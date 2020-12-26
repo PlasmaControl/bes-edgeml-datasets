@@ -1,2 +1,3 @@
-# bes-edge-ml
-BES edge-ML at DIII-D
+# BES edge-ml
+
+Code base for BES edge-ML at DIII-D
