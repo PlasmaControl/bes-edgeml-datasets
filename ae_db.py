@@ -1,8 +1,13 @@
+from pathlib import Path
 import mirpyidl
 
 
 def restore_db():
-    mirpyidl.execute("restore, '~/edge-ml/data/db.idl', /verbose")
+    db_file = Path('data/db.idl')
+    assert(db_file.exists())
+    idl_command = f"RESTORE, '{db_file.as_posix()}', /VERBOSE"
+    print(f'Executing python command: "{idl_command}"')
+    mirpyidl.execute(idl_command)
     heidbrink_keys = [
         'SHOT', 'TIME', 'EFIT', 'ZIP', 'NB',
         'EAE', 'TAE', 'RSAE', 'BAE', 'BAAE', 'EGAM',
