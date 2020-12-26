@@ -1,3 +1,5 @@
 __pycache__/
+data/
+figures/
 *.py[cod]
 .idea/
