@@ -77,22 +77,31 @@ def package_bes_data(shots=None, channels=None):
             rpos, zpos, start_time = get_bes_metadata(shot=shot)
             assert (time[0] == start_time)
             assert (time.size == data.shape[1])
-            signal_file = data_dir / f'besdata_{shot:d}.hdf5'
+            shot_string = f'{shot:d}'
+            if shot_string in mfile:
+                mgroup = mfile[shot_string]
+                print(f'Retrieving group {mgroup.name} in {mgroup.name}')
+            else:
+                mgroup = mfile.create_group(shot_string)
+                print(f'Creating group {mgroup.name} in {mgroup.name}')
+            signal_file = data_dir / f'besdata_{shot_string}.hdf5'
             with h5py.File(signal_file, 'w') as sfile:
-                print(f'Saving BES data for {shot} in {signal_file.as_posix()}')
-                sfile.attrs['shot'] = shot
-                sfile.attrs['delta_time'] = np.diff(time[0:100]).mean()
-                sfile.attrs['start_time'] = time[0]
-                sfile.attrs['stop_time'] = time[-1]
-                sfile.attrs['n_channels'] = data.shape[0]
-                sfile.attrs['n_time'] = data.shape[1]
-                sfile.attrs['time_units'] = 'ms'
-                sfile.attrs['r_position'] = rpos
-                sfile.attrs['z_position'] = zpos
-                sfile.attrs['rz_units'] = 'cm'
+                print(f'Saving BES data for {shot}')
+                for grp in [mgroup, sfile]:
+                    grp.attrs['shot'] = shot
+                    grp.attrs['delta_time'] = np.diff(time[0:100]).mean()
+                    grp.attrs['start_time'] = time[0]
+                    grp.attrs['stop_time'] = time[-1]
+                    grp.attrs['n_channels'] = data.shape[0]
+                    grp.attrs['n_time'] = data.shape[1]
+                    grp.attrs['time_units'] = 'ms'
+                    grp.attrs['r_position'] = rpos
+                    grp.attrs['z_position'] = zpos
+                    grp.attrs['rz_units'] = 'cm'
                 sfile.create_dataset('signals', data=data, compression='gzip')
                 sfile.create_dataset('time', data=time, compression='gzip')
                 traverse_h5py(sfile)
+        traverse_h5py(mfile)
 
 
 if __name__ == '__main__':
