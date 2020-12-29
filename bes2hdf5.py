@@ -1,8 +1,10 @@
 from pathlib import Path
 import time
-import h5py
+import pickle
 import numpy as np
+import h5py
 import MDSplus
+import ae_db
 
 connection = MDSplus.Connection('atlas.gat.com')
 
@@ -14,6 +16,7 @@ def traverse_h5py(group):
     def print_attrs(obj):
         for attr_name, attr_value in obj.attrs.items():
             print(f'TRH5:   Attribute: {attr_name} {attr_value}')
+
     print(f'TRH5: Group {group.name} in file {group.file}')
     print_attrs(group)
     for name, value in group.items():
@@ -31,7 +34,6 @@ big_shotlist = [176778, 171472, 171473, 171477, 171495,
 class BES_Data(object):
     _points = ['ip',
                'bt',
-               # 'density',
                'pinj',
                'pinj_15l',
                'vinj_15l',
@@ -55,19 +57,26 @@ class BES_Data(object):
             t1 = time.time()
         # get time array
         ptdata = f'ptdata("besfu01", {self.shot})'
-        self.time = np.array(connection.get(f'dim_of({ptdata})'))
+        try:
+            self.time = np.array(connection.get(f'dim_of({ptdata})'))
+        except:
+            self.time = None
+            return
         n_time = connection.get(f'size({ptdata})')
         self.n_time = n_time.data()
-        assert(self.n_time == self.time.size)
+        assert (self.n_time == self.time.size)
         # get metadata
         connection.openTree('bes', self.shot)
         r_position = np.array(connection.get(r'\bes_r')).round(decimals=2)
         z_position = np.array(connection.get(r'\bes_z')).round(decimals=2)
         start_time = connection.get(r'\bes_ts')
         connection.closeTree('bes', self.shot)
-        assert(start_time == self.time[0])
+        if not start_time == self.time[0]:
+            print('ALERT: shot {shot} with inconsistent start times: ',
+                  start_time, self.time[0])
         self.metadata = {'shot': self.shot,
-                         'delta_time': np.diff(self.time[0:100]).mean().round(decimals=4),
+                         'delta_time': np.diff(self.time[0:100]).mean().round(
+                             decimals=4),
                          'start_time': self.time[0],
                          'stop_time': self.time[-1],
                          'n_time': self.n_time,
@@ -83,13 +92,15 @@ class BES_Data(object):
                 if 'inj' in point_name:
                     connection.openTree('nb', self.shot)
                     data = np.array(connection.get(f'\\{point_name}'))
-                    data_time = np.array(connection.get(f'dim_of(\\{point_name})'))
+                    data_time = np.array(
+                        connection.get(f'dim_of(\\{point_name})'))
                     connection.closeTree('nb', self.shot)
                 else:
                     ptdata = f'_n = ptdata("{point_name}", {self.shot})'
                     data = np.array(connection.get(ptdata))
                     data_time = np.array(connection.get('dim_of(_n)'))
-                time_mask = np.logical_and(data_time>=self.time[0], data_time<=self.time[-1])
+                time_mask = np.logical_and(data_time >= self.time[0],
+                                           data_time <= self.time[-1])
                 data = data[time_mask]
                 data_time = data_time[time_mask]
             except:
@@ -98,21 +109,23 @@ class BES_Data(object):
                 data_time = h5py.Empty(dtype='f')
             assert (data.shape == data_time.shape)
             setattr(self, point_name, data)
-            if point_name in ['ip','bt','pinj']:
+            if point_name == 'pinj' or 'inj' not in point_name:
                 setattr(self, f'{point_name}_time', data_time)
         if self.verbose:
             t2 = time.time()
             print(f'  Shot {self.shot} with {self.n_time} time points')
-            print(f'  Time, metadata elapsed time = {t2-t1:.2f} s')
+            print(f'  Time, metadata elapsed time = {t2 - t1:.2f} s')
 
     def get_signals(self):
         tdi_vars = []
         tdi_assignments = []
         for channel in self.channels:
             tdi_vars.append(f'_n{channel:02d}')
-            tdi_assignments.append(f'{tdi_vars[-1]} = ptdata("besfu{channel:02d}", {self.shot})')
+            tdi_assignments.append(
+                f'{tdi_vars[-1]} = ptdata("besfu{channel:02d}", {self.shot})')
         if self.verbose:
-            print(f'  Fetching signals ({self.channels.size} channels) for shot {self.shot}')
+            print(
+                f'  Fetching signals ({self.channels.size} channels) for shot {self.shot}')
             t1 = time.time()
         connection.get(', '.join(tdi_assignments))
         self.signals = np.empty([self.channels.size, self.n_time])
@@ -120,11 +133,14 @@ class BES_Data(object):
             self.signals[i, :] = connection.get(tdi_var)
         if self.verbose:
             t2 = time.time()
-            print(f'  Get signals elapsed time = {t2-t1:.2f} s')
+            print(f'  Get signals elapsed time = {t2 - t1:.2f} s')
 
 
-def package_bes_data(shots=None, channels=None, verbose=False, with_signals=False):
-    if not shots and not channels:
+def package_bes(shots=None,
+                channels=None,
+                verbose=False,
+                with_signals=False):
+    if shots is None and channels is None:
         shots = [176778, 171472]
         channels = [1, 2]
     if not isinstance(shots, np.ndarray):
@@ -134,17 +150,20 @@ def package_bes_data(shots=None, channels=None, verbose=False, with_signals=Fals
         t1 = time.time()
         for shot in shots:
             bes_data = BES_Data(shot=shot, channels=channels, verbose=verbose)
+            if bes_data.time is None:
+                print(f'INVALID BES data for shot {shot}')
+                continue
             shot_string = f'{bes_data.shot:d}'
             mgroup = mfile.require_group(shot_string)
             # metadata attributes
             for attr_name, attr_value in bes_data.metadata.items():
                 if attr_name in mgroup.attrs:
                     if 'position' in attr_name:
-                        assert(np.allclose(attr_value,
-                                           mgroup.attrs[attr_name],
-                                           atol=0.1))
+                        assert (np.allclose(attr_value,
+                                            mgroup.attrs[attr_name],
+                                            atol=0.1))
                     else:
-                        assert(attr_value == mgroup.attrs[attr_name])
+                        assert (attr_value == mgroup.attrs[attr_name])
                 else:
                     mgroup.attrs[attr_name] = attr_value
             # metadata datasets
@@ -156,8 +175,7 @@ def package_bes_data(shots=None, channels=None, verbose=False, with_signals=Fals
                     mgroup.require_dataset(name,
                                            data=data,
                                            shape=data.shape,
-                                           dtype=data.dtype,
-                                           compression='gzip')
+                                           dtype=data.dtype)
             # signals
             if with_signals:
                 signal_file = data_dir / f'bes_signals_{shot_string}.hdf5'
@@ -183,11 +201,23 @@ def package_bes_data(shots=None, channels=None, verbose=False, with_signals=Fals
         t2 = time.time()
         print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
 
+
 def small_job():
-    package_bes_data(verbose=True, with_signals=True)
+    package_bes(verbose=True, with_signals=True)
+
 
 def big_job():
-    package_bes_data(shots=big_shotlist, verbose=True, with_signals=True)
+    package_bes(shots=big_shotlist[0:3], verbose=True, with_signals=True)
+
+
+def aedb_metadata():
+    pickle_file = Path.home() / 'edge-ml/data/db.pickle'
+    with pickle_file.open('rb') as f:
+        aedb = pickle.load(f)
+    shots = np.unique(aedb['shot'])
+    print(shots[0], shots[-1], shots.size)
+    package_bes(shots=shots, verbose=True, with_signals=False)
+
 
 if __name__ == '__main__':
-    small_job()
+    aedb_metadata()
