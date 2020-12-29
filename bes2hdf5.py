@@ -65,12 +65,16 @@ class BES_Data(object):
         n_time = connection.get(f'size({ptdata})')
         self.n_time = n_time.data()
         assert (self.n_time == self.time.size)
-        # get metadata
-        connection.openTree('bes', self.shot)
-        r_position = np.array(connection.get(r'\bes_r')).round(decimals=2)
-        z_position = np.array(connection.get(r'\bes_z')).round(decimals=2)
-        start_time = connection.get(r'\bes_ts')
-        connection.closeTree('bes', self.shot)
+        try:
+            # get metadata
+            connection.openTree('bes', self.shot)
+            r_position = np.array(connection.get(r'\bes_r')).round(decimals=2)
+            z_position = np.array(connection.get(r'\bes_z')).round(decimals=2)
+            start_time = connection.get(r'\bes_ts')
+            connection.closeTree('bes', self.shot)
+        except:
+            self.time = None
+            return
         if not start_time == self.time[0]:
             print('ALERT: shot {shot} with inconsistent start times: ',
                   start_time, self.time[0])
