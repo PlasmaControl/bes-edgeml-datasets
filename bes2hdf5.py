@@ -51,6 +51,7 @@ class BES_Data(object):
         self.shot = shot
         self.channels = channels
         self.signals = None
+        self.date = None
         self.verbose = verbose
         if self.verbose:
             print(f'Getting time and metadata for shot {self.shot}')
@@ -98,6 +99,9 @@ class BES_Data(object):
                     data = np.array(connection.get(f'\\{point_name}'))
                     data_time = np.array(
                         connection.get(f'dim_of(\\{point_name})'))
+                    if point_name == 'pinj':
+                        date = connection.get(f'getnci(\\{point_name}, "time_inserted")')
+                        self.metadata['date'] = date.date.decode('utf-8')
                     connection.closeTree('nb', self.shot)
                 else:
                     ptdata = f'_n = ptdata("{point_name}", {self.shot})'
@@ -152,7 +156,9 @@ def package_bes(shots=None,
     meta_file = data_dir / 'bes_metadata.hdf5'
     with h5py.File(meta_file, 'a') as mfile:
         t1 = time.time()
-        for shot in shots:
+        valid_shot_counter = 0
+        for ishot, shot in enumerate(shots):
+            print(f'Shot {shot} ({ishot+1} of {shots.size})')
             bes_data = BES_Data(shot=shot, channels=channels, verbose=verbose)
             if bes_data.time is None:
                 print(f'INVALID BES data for shot {shot}')
@@ -180,6 +186,7 @@ def package_bes(shots=None,
                                            data=data,
                                            shape=data.shape,
                                            dtype=data.dtype)
+            valid_shot_counter += 1
             # signals
             if with_signals:
                 signal_file = data_dir / f'bes_signals_{shot_string}.hdf5'
@@ -204,6 +211,7 @@ def package_bes(shots=None,
             traverse_h5py(mfile)
         t2 = time.time()
         print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
+        print(f'{valid_shot_counter} valid shots out of {shots.size}')
 
 
 def small_job():
@@ -224,4 +232,4 @@ def aedb_metadata():
 
 
 if __name__ == '__main__':
-    aedb_metadata()
+    small_job()
