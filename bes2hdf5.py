@@ -7,11 +7,7 @@ import MDSplus
 connection = MDSplus.Connection('atlas.gat.com')
 
 data_dir = Path('data')
-figures_dir = Path('figures')
-for d in [data_dir, figures_dir]:
-    if not d.exists():
-        print(f'Creating directory {d.as_posix()}')
-        d.mkdir()
+data_dir.mkdir(exist_ok=True)
 
 
 def traverse_h5py(group):
@@ -187,6 +183,11 @@ def package_bes_data(shots=None, channels=None, verbose=False, with_signals=Fals
         t2 = time.time()
         print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
 
+def small_job():
+    package_bes_data(verbose=True, with_signals=True)
+
+def big_job():
+    package_bes_data(shots=big_shotlist, verbose=True, with_signals=True)
 
 if __name__ == '__main__':
-    package_bes_data(verbose=True, with_signals=True)
+    small_job()
