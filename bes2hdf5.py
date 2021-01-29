@@ -4,12 +4,14 @@ import pickle
 import numpy as np
 import h5py
 import MDSplus
-import ae_db
 
 connection = MDSplus.Connection('atlas.gat.com')
 
 data_dir = Path('data')
 data_dir.mkdir(exist_ok=True)
+
+shotlist = [176778, 171472, 171473, 171477, 171495,
+            145747, 145745, 142300, 142294, 145384]
 
 
 def traverse_h5py(group):
@@ -17,6 +19,13 @@ def traverse_h5py(group):
         for attr_name, attr_value in obj.attrs.items():
             print(f'TRH5:   Attribute: {attr_name} {attr_value}')
 
+    do_close = False
+    if isinstance(group, (str, Path)):
+        do_close = True
+        if isinstance(group, str):
+            group = h5py.File(group, 'r')
+        else:
+            group = h5py.File(group.as_posix(), 'r')
     print(f'TRH5: Group {group.name} in file {group.file}')
     print_attrs(group)
     for name, value in group.items():
@@ -25,10 +34,8 @@ def traverse_h5py(group):
         if isinstance(value, h5py.Dataset):
             print(f'TRH5:   Dataset {value.name}', value.shape, value.dtype)
             print_attrs(value)
-
-
-big_shotlist = [176778, 171472, 171473, 171477, 171495,
-                145747, 145745, 142300, 142294, 145384]
+    if do_close:
+        group.close()
 
 
 class BES_Data(object):
@@ -59,7 +66,7 @@ class BES_Data(object):
         # get time array
         ptdata = f'ptdata("besfu01", {self.shot})'
         try:
-            self.time = np.array(connection.get(f'dim_of({ptdata})'))
+            self.time = np.array(connection.get(f'dim_of({ptdata})')).round(4)
         except:
             self.time = None
             return
@@ -69,8 +76,8 @@ class BES_Data(object):
         try:
             # get metadata
             connection.openTree('bes', self.shot)
-            r_position = np.array(connection.get(r'\bes_r')).round(decimals=2)
-            z_position = np.array(connection.get(r'\bes_z')).round(decimals=2)
+            r_position = np.array(connection.get(r'\bes_r')).round(2)
+            z_position = np.array(connection.get(r'\bes_z')).round(2)
             start_time = connection.get(r'\bes_ts')
             connection.closeTree('bes', self.shot)
         except:
@@ -81,14 +88,15 @@ class BES_Data(object):
                   start_time, self.time[0])
         self.metadata = {'shot': self.shot,
                          'delta_time': np.diff(self.time[0:100]).mean().round(
-                             decimals=4),
+                             4),
                          'start_time': self.time[0],
                          'stop_time': self.time[-1],
                          'n_time': self.n_time,
                          'time_units': 'ms',
                          'r_position': r_position,
                          'z_position': z_position,
-                         'rz_units': 'cm'}
+                         'rz_units': 'cm',
+                         'date': ''}
         # get ip, beams, etc.
         for point_name in self._points:
             data = np.array(0)
@@ -98,9 +106,10 @@ class BES_Data(object):
                     connection.openTree('nb', self.shot)
                     data = np.array(connection.get(f'\\{point_name}'))
                     data_time = np.array(
-                        connection.get(f'dim_of(\\{point_name})'))
+                            connection.get(f'dim_of(\\{point_name})'))
                     if point_name == 'pinj':
-                        date = connection.get(f'getnci(\\{point_name}, "time_inserted")')
+                        date = connection.get(
+                            f'getnci(\\{point_name}, "time_inserted")')
                         self.metadata['date'] = date.date.decode('utf-8')
                     connection.closeTree('nb', self.shot)
                 else:
@@ -130,10 +139,10 @@ class BES_Data(object):
         for channel in self.channels:
             tdi_vars.append(f'_n{channel:02d}')
             tdi_assignments.append(
-                f'{tdi_vars[-1]} = ptdata("besfu{channel:02d}", {self.shot})')
+                    f'{tdi_vars[-1]} = ptdata("besfu{channel:02d}", {self.shot})')
         if self.verbose:
             print(
-                f'  Fetching signals ({self.channels.size} channels) for shot {self.shot}')
+                    f'  Fetching signals ({self.channels.size} channels) for shot {self.shot}')
             t1 = time.time()
         connection.get(', '.join(tdi_assignments))
         self.signals = np.empty([self.channels.size, self.n_time])
@@ -153,39 +162,103 @@ def package_bes(shots=None,
         channels = [1, 2]
     if not isinstance(shots, np.ndarray):
         shots = np.array(shots)
-    meta_file = data_dir / 'bes_metadata.hdf5'
-    with h5py.File(meta_file, 'a') as mfile:
+    with h5py.File(data_dir / 'bes_metadata.hdf5', 'a') as metadata_file:
         t1 = time.time()
         valid_shot_counter = 0
+        configuration_group = metadata_file.require_group('configurations')
+        config_8x8_group = configuration_group.require_group(
+            '8x8_configurations')
+        config_non_8x8_group = configuration_group.require_group(
+            'non_8x8_configurations')
+
+        def validate_configuration(input_bes_data):
+            max_index = np.array([0, 100])
+            r_position = input_bes_data.metadata['r_position']
+            z_position = input_bes_data.metadata['z_position']
+            for igroup, config_group in enumerate([config_8x8_group,
+                                                   config_non_8x8_group]):
+                for config_index_str, config in config_group.items():
+                    if config_index_str.startswith('0'):
+                        config_index_str = config_index_str[1]
+                    config_index = eval(config_index_str)
+                    assert (isinstance(config, h5py.Group))
+                    assert ('r_position' in config.attrs and
+                            'z_position' in config.attrs and
+                            'shots' in config.attrs)
+                    max_index[igroup] = np.max([max_index[igroup], config_index])
+                    # test if input data matches existing configuration
+                    if not np.allclose(r_position,
+                                       config.attrs['r_position'],
+                                       atol=0.1):
+                        continue
+                    if not np.allclose(z_position,
+                                       config.attrs['z_position'],
+                                       atol=0.1):
+                        continue
+                    print(f'Configuration matches index {config_index}')
+                    if input_bes_data.shot not in config.attrs['shots']:
+                        config.attrs['shots'] = np.append(config.attrs['shots'],
+                                                          input_bes_data.shot)
+                    return config_index
+            print('Configuration does not match existing configuration')
+            # now test for 8x8 configuration
+            config_is_8x8 = True
+            for i in np.arange(8):
+                rdiff = np.diff(r_position[i+np.arange(8)*8])
+                col_test = np.allclose(rdiff, np.zeros(rdiff.shape), atol=0.1)
+                zdiff = np.diff(z_position[i*8 + np.arange(8)])
+                row_test = np.allclose(zdiff, np.zeros(zdiff.shape), atol=0.1)
+                config_is_8x8 = config_is_8x8 and col_test and row_test
+                if not config_is_8x8:
+                    break
+            print(f'New configuration is 8x8: {config_is_8x8}')
+            if config_is_8x8:
+                new_index = max_index[0]+1
+                print(f'New 8x8 config index is {new_index}')
+                new_config = config_8x8_group.create_group(f'{new_index:02d}')
+            else:
+                new_index = max_index[1]+1
+                print(f'New non-8x8 config index is {new_index}')
+                new_config = config_non_8x8_group.create_group(f'{new_index:d}')
+            new_config.attrs['r_position'] = r_position
+            new_config.attrs['z_position'] = z_position
+            new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=np.int)
+            return new_index
+
         for ishot, shot in enumerate(shots):
-            print(f'Shot {shot} ({ishot+1} of {shots.size})')
+            print(f'Shot {shot} ({ishot + 1} of {shots.size})')
             bes_data = BES_Data(shot=shot, channels=channels, verbose=verbose)
             if bes_data.time is None:
                 print(f'INVALID BES data for shot {shot}')
                 continue
             shot_string = f'{bes_data.shot:d}'
-            mgroup = mfile.require_group(shot_string)
+            shot_group = metadata_file.require_group(shot_string)
             # metadata attributes
             for attr_name, attr_value in bes_data.metadata.items():
-                if attr_name in mgroup.attrs:
+                if attr_name in shot_group.attrs:
                     if 'position' in attr_name:
                         assert (np.allclose(attr_value,
-                                            mgroup.attrs[attr_name],
+                                            shot_group.attrs[attr_name],
                                             atol=0.1))
                     else:
-                        assert (attr_value == mgroup.attrs[attr_name])
+                        assert (attr_value == shot_group.attrs[attr_name])
                 else:
-                    mgroup.attrs[attr_name] = attr_value
+                    shot_group.attrs[attr_name] = attr_value
+            config_index = validate_configuration(bes_data)
+            if 'configuration_index' in shot_group.attrs:
+                assert(config_index == shot_group.attrs['configuration_index'])
+            else:
+                shot_group.attrs['configuration_index'] = config_index
             # metadata datasets
             for point_name in bes_data._points:
                 for name in [f'{point_name}', f'{point_name}_time']:
                     data = getattr(bes_data, name, None)
                     if data is None:
                         continue
-                    mgroup.require_dataset(name,
-                                           data=data,
-                                           shape=data.shape,
-                                           dtype=data.dtype)
+                    shot_group.require_dataset(name,
+                                               data=data,
+                                               shape=data.shape,
+                                               dtype=data.dtype)
             valid_shot_counter += 1
             # signals
             if with_signals:
@@ -208,18 +281,14 @@ def package_bes(shots=None,
                         traverse_h5py(sfile)
         if verbose:
             print('Metadata file')
-            traverse_h5py(mfile)
+            traverse_h5py(metadata_file)
         t2 = time.time()
         print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
-        print(f'{valid_shot_counter} valid shots out of {shots.size}')
-
-
-def small_job():
-    package_bes(verbose=True, with_signals=True)
-
-
-def big_job():
-    package_bes(shots=big_shotlist[0:3], verbose=True, with_signals=True)
+        print(f'{valid_shot_counter} valid shots out of {shots.size} in input shot list')
+        for group in [config_8x8_group, config_non_8x8_group]:
+            for config_name, config_group in group.items():
+                nshots = config_group.attrs['shots'].size
+                print(f'Config {config_name} # of shots: {nshots}')
 
 
 def aedb_metadata():
@@ -232,4 +301,4 @@ def aedb_metadata():
 
 
 if __name__ == '__main__':
-    small_job()
+    package_bes(shots=shotlist, verbose=True, with_signals=False)

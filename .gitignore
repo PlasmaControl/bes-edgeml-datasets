@@ -5,3 +5,4 @@ jobs/
 .idea/
 
 *.py[cod]
+slurm-*.out

@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -p medium -t 0-4
+#SBATCH -p medium -t 0-6
 #SBATCH -N1 -n4 --mem=16G
 
 date
