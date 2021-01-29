@@ -17,7 +17,7 @@ pwd -P
 # do work
 export PYTHONPATH=${HOME}/edge-ml:${PYTHONPATH}
 python_exec=/fusion/projects/diagnostics/bes/smithdr/conda/envs/py38/bin/python
-$python_exec -c "import bes2hdf5; bes2hdf5.aedb_metadata()" &> python.txt
+$python_exec -c "from packaging_jobs import *; package_ae_database()" &> python.txt
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 

@@ -10,9 +10,6 @@ connection = MDSplus.Connection('atlas.gat.com')
 data_dir = Path('data')
 data_dir.mkdir(exist_ok=True)
 
-shotlist = [176778, 171472, 171473, 171477, 171495,
-            145747, 145745, 142300, 142294, 145384]
-
 
 def traverse_h5py(group):
     def print_attrs(obj):
@@ -291,14 +288,7 @@ def package_bes(shots=None,
                 print(f'Config {config_name} # of shots: {nshots}')
 
 
-def aedb_metadata():
-    pickle_file = Path.home() / 'edge-ml/data/db.pickle'
-    with pickle_file.open('rb') as f:
-        aedb = pickle.load(f)
-    shots = np.unique(aedb['shot'])
-    print(shots[0], shots[-1], shots.size)
-    package_bes(shots=shots, verbose=True, with_signals=False)
-
-
 if __name__ == '__main__':
+    shotlist = [176778, 171472, 171473, 171477, 171495,
+                145747, 145745, 142300, 142294, 145384]
     package_bes(shots=shotlist, verbose=True, with_signals=False)
