@@ -11,10 +11,18 @@ data_dir = Path('data')
 data_dir.mkdir(exist_ok=True)
 
 
-def traverse_h5py(group):
+def traverse_h5py(group, verbose=False):
+    """
+    Recursively traverse hdf5 file or group, and print summary information
+    on subgroups, datasets, and attributes
+    """
     def print_attrs(obj):
         for attr_name, attr_value in obj.attrs.items():
-            print(f'TRH5:   Attribute: {attr_name} {attr_value}')
+            if not verbose and isinstance(attr_value, np.ndarray) and attr_value.size>3:
+                print_value = attr_value[0:3]
+            else:
+                print_value = attr_value
+            print(f'    Attribute: {attr_name} {print_value}')
 
     do_close = False
     if isinstance(group, (str, Path)):
@@ -23,13 +31,13 @@ def traverse_h5py(group):
             group = h5py.File(group, 'r')
         else:
             group = h5py.File(group.as_posix(), 'r')
-    print(f'TRH5: Group {group.name} in file {group.file}')
+    print(f'Group {group.name} in file {group.file}')
     print_attrs(group)
     for name, value in group.items():
         if isinstance(value, h5py.Group):
             traverse_h5py(value)
         if isinstance(value, h5py.Dataset):
-            print(f'TRH5:   Dataset {value.name}', value.shape, value.dtype)
+            print(f'    Dataset {value.name}', value.shape, value.dtype)
             print_attrs(value)
     if do_close:
         group.close()
@@ -159,8 +167,9 @@ def package_bes(shots=None,
         channels = [1, 2]
     if not isinstance(shots, np.ndarray):
         shots = np.array(shots)
-    with h5py.File(data_dir / 'bes_metadata.hdf5', 'a') as metadata_file:
-        t1 = time.time()
+    t1 = time.time()
+    metadata_path = data_dir / 'bes_metadata.hdf5'
+    with h5py.File(metadata_path, 'a') as metadata_file:
         valid_shot_counter = 0
         configuration_group = metadata_file.require_group('configurations')
         config_8x8_group = configuration_group.require_group(
@@ -220,6 +229,9 @@ def package_bes(shots=None,
             new_config.attrs['r_position'] = r_position
             new_config.attrs['z_position'] = z_position
             new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=np.int)
+            if config_is_8x8:
+                new_config.attrs['r_avg'] = np.mean(r_position)
+                new_config.attrs['z_avg'] = np.mean(z_position)
             return new_index
 
         for ishot, shot in enumerate(shots):
@@ -276,17 +288,29 @@ def package_bes(shots=None,
                         t4 = time.time()
                         print(f'Write signals elapsed time = {t4 - t3:.2f} s')
                         traverse_h5py(sfile)
-        if verbose:
-            print('Metadata file')
-            traverse_h5py(metadata_file)
-        t2 = time.time()
-        print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
-        print(f'{valid_shot_counter} valid shots out of {shots.size} in input shot list')
-        for group in [config_8x8_group, config_non_8x8_group]:
-            for config_name, config_group in group.items():
-                nshots = config_group.attrs['shots'].size
-                print(f'Config {config_name} # of shots: {nshots}')
+    t2 = time.time()
+    print_metadata_summary(path=metadata_path)
+    print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
+    print(f'{valid_shot_counter} valid shots out of {shots.size} in input shot list')
 
+
+def print_metadata_summary(path=None):
+    if not path:
+        path = data_dir / 'bes_metadata.hdf5'
+    if not isinstance(path, Path):
+        path = Path(path)
+    print(f'Summarizing metadata file {path.as_posix()}')
+    with h5py.File(path, 'r') as metadata_file:
+        traverse_h5py(metadata_file)
+        config_8x8_group = metadata_file['configurations']['8x8_configurations']
+        config_non_8x8_group = metadata_file['configurations']['non_8x8_configurations']
+        for group in [config_8x8_group, config_non_8x8_group]:
+            sum_shots = 0
+            for config_group in group.values():
+                nshots = config_group.attrs['shots'].size
+                sum_shots += nshots
+                print(f'# of shots in {config_group.name}: {nshots}')
+            print(f'  Sum of shots in {group.name} group: {sum_shots}')
 
 if __name__ == '__main__':
     shotlist = [176778, 171472, 171473, 171477, 171495,

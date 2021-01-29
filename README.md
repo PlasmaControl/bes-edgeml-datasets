@@ -8,6 +8,7 @@ and save as python pickle file
 HDF5 file, and package BES metadata into a single HDF5 file with groups corresponding 
 to shots.  The primary function for packaging BES data is `package_bes()`.  The function 
 `traverse_h5py()` is a utility function to print the summarized contents of an hdf5 file.
+`print_metadata_summary()` is a utility function to print summary info for metadata files.
 `BES_Data` is a class that represents BES signals and metadata for a single shot.
 - `packaging_jobs.py` - Various packaging jobs for BES data, likely to be run in a Slurm script
 - `package_bes.sh` - Slurm script to run packaging jobs from `packaging_jobs.py` 
