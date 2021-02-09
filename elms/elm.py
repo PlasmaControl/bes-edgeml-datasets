@@ -1,6 +1,8 @@
 from pathlib import Path
 import csv
 import re
+import numpy as np
+import bes2hdf5
 
 
 def read_elm_shotlist(verbose=False):
@@ -20,6 +22,14 @@ def read_elm_shotlist(verbose=False):
             runids.append(match.group('runid'))
             shotlist.append(eval(match.group('shot')))
     return runids, shotlist
+
+
+def package_elm_database():
+    _, shots = read_elm_shotlist()
+    shots = np.array(shots)
+    print(shots[0], shots[-1], shots.size)
+    bes2hdf5.package_bes(shots=shots, verbose=True, with_signals=False)
+
 
 if __name__=='__main__':
     runids, shotlist = read_elm_shotlist()

@@ -1,8 +1,5 @@
 from pathlib import Path
 import time
-import os
-import concurrent.futures
-# import pickle
 import numpy as np
 import h5py
 import MDSplus
