@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -p medium -t 0-6
+#SBATCH -p medium -t 0-8
 #SBATCH -N1 -n4 --mem=16G
 
 date
@@ -17,7 +17,8 @@ pwd -P
 # do work
 export PYTHONPATH=${HOME}/edge-ml:${PYTHONPATH}
 python_exec=/fusion/projects/diagnostics/bes/smithdr/conda/envs/py38/bin/python
-$python_exec -c "from packaging_jobs import *; package_ae_database()" &> python.txt
+### $python_exec -c "from packaging_jobs import *; package_ae_database()" &> python.txt
+$python_exec -c "from packaging_jobs import *; package_elm_database()" &> python.txt
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 

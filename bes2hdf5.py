@@ -1,6 +1,8 @@
 from pathlib import Path
 import time
-import pickle
+import os
+import concurrent.futures
+# import pickle
 import numpy as np
 import h5py
 import MDSplus
@@ -11,17 +13,24 @@ data_dir = Path('data')
 data_dir.mkdir(exist_ok=True)
 
 
-def traverse_h5py(group, verbose=False):
+def traverse_h5py(group):
     """
     Recursively traverse hdf5 file or group, and print summary information
     on subgroups, datasets, and attributes
     """
     def print_attrs(obj):
         for attr_name, attr_value in obj.attrs.items():
-            if not verbose and isinstance(attr_value, np.ndarray) and attr_value.size>3:
-                print_value = attr_value[0:3]
+            if isinstance(attr_value, np.ndarray) and attr_value.size>4:
+                if np.issubdtype(attr_value.dtype, np.floating):
+                    tmp = [f'{val:.2f}' for val in attr_value[0:4]]
+                else:
+                    tmp = [f'{val}' for val in attr_value[0:4]]
+                print_value = '[ ' + ' '.join(tmp) + ' ... ]'
             else:
-                print_value = attr_value
+                if hasattr(attr_value, 'dtype') and np.issubdtype(attr_value.dtype, np.floating):
+                    print_value = f'{attr_value:.2f}'
+                else:
+                    print_value = attr_value
             print(f'    Attribute: {attr_name} {print_value}')
 
     do_close = False
@@ -64,7 +73,7 @@ class BES_Data(object):
         self.channels = channels
         self.signals = None
         self.date = None
-        self.verbose = verbose
+        self.verbose = verbose or True
         if self.verbose:
             print(f'Getting time and metadata for shot {self.shot}')
             t1 = time.time()
@@ -205,6 +214,7 @@ def package_bes(shots=None,
                     if input_bes_data.shot not in config.attrs['shots']:
                         config.attrs['shots'] = np.append(config.attrs['shots'],
                                                           input_bes_data.shot)
+                        config.attrs['nshots'] = config.attrs['shots'].size
                     return config_index
             print('Configuration does not match existing configuration')
             # now test for 8x8 configuration
@@ -217,11 +227,16 @@ def package_bes(shots=None,
                 config_is_8x8 = config_is_8x8 and col_test and row_test
                 if not config_is_8x8:
                     break
-            print(f'New configuration is 8x8: {config_is_8x8}')
+            print(f'Is new configuration 8x8?: {config_is_8x8}')
             if config_is_8x8:
                 new_index = max_index[0]+1
                 print(f'New 8x8 config index is {new_index}')
                 new_config = config_8x8_group.create_group(f'{new_index:02d}')
+                new_config.attrs['r_avg'] = np.mean(r_position).round(2)
+                new_config.attrs['z_avg'] = np.mean(z_position).round(2)
+                z_first_column = z_position[np.arange(8)*8]
+                new_config.attrs['upper_inboard_channel'] = z_first_column.argmax() * 8
+                new_config.attrs['lower_inboard_channel'] = z_first_column.argmin() * 8
             else:
                 new_index = max_index[1]+1
                 print(f'New non-8x8 config index is {new_index}')
@@ -229,67 +244,75 @@ def package_bes(shots=None,
             new_config.attrs['r_position'] = r_position
             new_config.attrs['z_position'] = z_position
             new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=np.int)
-            if config_is_8x8:
-                new_config.attrs['r_avg'] = np.mean(r_position)
-                new_config.attrs['z_avg'] = np.mean(z_position)
+            new_config.attrs['nshots'] = new_config.attrs['shots'].size
             return new_index
 
-        for ishot, shot in enumerate(shots):
-            print(f'Shot {shot} ({ishot + 1} of {shots.size})')
-            bes_data = BES_Data(shot=shot, channels=channels, verbose=verbose)
-            if bes_data.time is None:
-                print(f'INVALID BES data for shot {shot}')
-                continue
-            shot_string = f'{bes_data.shot:d}'
-            shot_group = metadata_file.require_group(shot_string)
-            # metadata attributes
-            for attr_name, attr_value in bes_data.metadata.items():
-                if attr_name in shot_group.attrs:
-                    if 'position' in attr_name:
-                        assert (np.allclose(attr_value,
-                                            shot_group.attrs[attr_name],
-                                            atol=0.1))
+        # with concurrent.futures.ProcessPoolExecutor(max_workers=os.cpu_count()//16) as executor:
+        #     futures = []
+        for iiii in [0]:
+            shot_count = 0
+            for shot in shots:
+                print(shot)
+                # futures.append(executor.submit(BES_Data, shot=shot, channels=channels))
+            # for future in concurrent.futures.as_completed(futures):
+                shot_count += 1
+                # bes_data = future.result()
+                bes_data = BES_Data(shot=shot, channels=channels, verbose=verbose)
+                print(f'Shot {bes_data.shot} ({shot_count} of {shots.size})')
+                if bes_data.time is None:
+                    print(f'INVALID BES data for shot {bes_data.shot}')
+                    continue
+                shot_string = f'{bes_data.shot:d}'
+                shot_group = metadata_file.require_group(shot_string)
+                # metadata attributes
+                for attr_name, attr_value in bes_data.metadata.items():
+                    if attr_name in shot_group.attrs:
+                        if 'position' in attr_name:
+                            assert (np.allclose(attr_value,
+                                                shot_group.attrs[attr_name],
+                                                atol=0.1))
+                        else:
+                            assert (attr_value == shot_group.attrs[attr_name])
                     else:
-                        assert (attr_value == shot_group.attrs[attr_name])
+                        shot_group.attrs[attr_name] = attr_value
+                config_index = validate_configuration(bes_data)
+                if 'configuration_index' in shot_group.attrs:
+                    assert(config_index == shot_group.attrs['configuration_index'])
                 else:
-                    shot_group.attrs[attr_name] = attr_value
-            config_index = validate_configuration(bes_data)
-            if 'configuration_index' in shot_group.attrs:
-                assert(config_index == shot_group.attrs['configuration_index'])
-            else:
-                shot_group.attrs['configuration_index'] = config_index
-            # metadata datasets
-            for point_name in bes_data._points:
-                for name in [f'{point_name}', f'{point_name}_time']:
-                    data = getattr(bes_data, name, None)
-                    if data is None:
-                        continue
-                    shot_group.require_dataset(name,
-                                               data=data,
-                                               shape=data.shape,
-                                               dtype=data.dtype)
-            valid_shot_counter += 1
-            # signals
-            if with_signals:
-                signal_file = data_dir / f'bes_signals_{shot_string}.hdf5'
-                bes_data.get_signals()
-                with h5py.File(signal_file, 'w') as sfile:
-                    if verbose:
-                        t3 = time.time()
-                    sfile.create_dataset('signals',
-                                         data=bes_data.signals,
-                                         compression='gzip',
-                                         chunks=True)
-                    sfile.create_dataset('time',
-                                         data=bes_data.time,
-                                         compression='gzip',
-                                         chunks=True)
-                    if verbose:
-                        t4 = time.time()
-                        print(f'Write signals elapsed time = {t4 - t3:.2f} s')
-                        traverse_h5py(sfile)
+                    shot_group.attrs['configuration_index'] = config_index
+                # metadata datasets
+                for point_name in bes_data._points:
+                    for name in [f'{point_name}', f'{point_name}_time']:
+                        data = getattr(bes_data, name, None)
+                        if data is None:
+                            continue
+                        shot_group.require_dataset(name,
+                                                   data=data,
+                                                   shape=data.shape,
+                                                   dtype=data.dtype)
+                valid_shot_counter += 1
+                # signals
+                if with_signals:
+                    signal_file = data_dir / f'bes_signals_{shot_string}.hdf5'
+                    bes_data.get_signals()
+                    with h5py.File(signal_file, 'w') as sfile:
+                        if verbose:
+                            t3 = time.time()
+                        sfile.create_dataset('signals',
+                                             data=bes_data.signals,
+                                             compression='gzip',
+                                             chunks=True)
+                        sfile.create_dataset('time',
+                                             data=bes_data.time,
+                                             compression='gzip',
+                                             chunks=True)
+                        if verbose:
+                            t4 = time.time()
+                            print(f'Write signals elapsed time = {t4 - t3:.2f} s')
+                            traverse_h5py(sfile)
     t2 = time.time()
-    print_metadata_summary(path=metadata_path)
+    if verbose:
+        print_metadata_summary(path=metadata_path)
     print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
     print(f'{valid_shot_counter} valid shots out of {shots.size} in input shot list')
 
@@ -315,4 +338,5 @@ def print_metadata_summary(path=None):
 if __name__ == '__main__':
     shotlist = [176778, 171472, 171473, 171477, 171495,
                 145747, 145745, 142300, 142294, 145384]
-    package_bes(shots=shotlist, verbose=True, with_signals=False)
+    package_bes(shots=shotlist[0:4], verbose=False, with_signals=False)
+    # print_metadata_summary(path='jobs/job_13524274/data/bes_metadata.hdf5')
