@@ -2,17 +2,13 @@ from pathlib import Path
 import pickle
 import mirpyidl
 import numpy as np
-import bes2hdf5
+from edgeml import bes2hdf5
 
-data_dir = Path('data')
-data_dir.mkdir(exist_ok=True)
 
-data_dir = bes2hdf5.data_dir / 'elm'
-data_dir.mkdir(exist_ok=True)
-
+directory = Path(__file__).parent.absolute()
 
 def restore_db():
-    db_file = Path.home() / 'edge-ml/data/db.idl'
+    db_file = directory / 'db.idl'
     assert(db_file.exists())
     idl_command = f"RESTORE, '{db_file.as_posix()}'"
     print(f'Executing python command: "{idl_command}"')
@@ -35,11 +31,13 @@ def restore_db():
     return heidbrink_db
 
 
-def package_ae_database():
-    pickle_file = Path.home() / 'edge-ml/data/db.pickle'
+def package_ae(nshots=None):
+    pickle_file = directory / 'db.pickle'
     with pickle_file.open('rb') as f:
         ae_db = pickle.load(f)
     shots = np.unique(ae_db['shot'])
+    if nshots:
+        shots = shots[0:nshots]
     print(shots[0], shots[-1], shots.size)
     bes2hdf5.package_bes(shots=shots, verbose=True, with_signals=False)
 

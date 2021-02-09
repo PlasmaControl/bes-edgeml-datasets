@@ -2,16 +2,16 @@ from pathlib import Path
 import csv
 import re
 import numpy as np
-import bes2hdf5
+from edgeml import bes2hdf5
 
 
 def read_elm_shotlist(verbose=False):
+    file = Path(__file__).parent / 'elm-shotlist.csv'
     rx = re.compile(r"^\s+(?P<runid>\w+)\s+(?P<shot>\d+)\s*$")
-    file = Path.home() / 'edge-ml/data/elm-shotlist.csv'
+    shotlist = []
+    runids = []
     with file.open() as f:
         reader = csv.reader(f)
-        shotlist = []
-        runids = []
         for irow, row in enumerate(reader):
             if irow==0:
                 continue
@@ -24,9 +24,11 @@ def read_elm_shotlist(verbose=False):
     return runids, shotlist
 
 
-def package_elm_database():
+def package_elms(nshots=None):
     _, shots = read_elm_shotlist()
     shots = np.array(shots)
+    if nshots:
+        shots = shots[0:nshots]
     print(shots[0], shots[-1], shots.size)
     bes2hdf5.package_bes(shots=shots, verbose=True, with_signals=False)
 

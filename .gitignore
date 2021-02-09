@@ -4,5 +4,7 @@ figures/
 jobs/
 .idea/
 
+*.hdf5
+*.csv
 *.py[cod]
 slurm-*.out

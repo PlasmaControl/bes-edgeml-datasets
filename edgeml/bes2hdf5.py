@@ -6,8 +6,22 @@ import MDSplus
 
 connection = MDSplus.Connection('atlas.gat.com')
 
-data_dir = Path('data')
-data_dir.mkdir(exist_ok=True)
+
+def _print_attrs(obj):
+    for attr_name, attr_value in obj.attrs.items():
+        if isinstance(attr_value, np.ndarray) and attr_value.size > 4:
+            if np.issubdtype(attr_value.dtype, np.floating):
+                tmp = [f'{val:.2f}' for val in attr_value[0:4]]
+            else:
+                tmp = [f'{val}' for val in attr_value[0:4]]
+            print_value = '[ ' + ' '.join(tmp) + ' ... ]'
+        else:
+            if hasattr(attr_value, 'dtype') and np.issubdtype(attr_value.dtype,
+                                                              np.floating):
+                print_value = f'{attr_value:.2f}'
+            else:
+                print_value = attr_value
+        print(f'    Attribute: {attr_name} {print_value}')
 
 
 def traverse_h5py(group):
@@ -15,22 +29,8 @@ def traverse_h5py(group):
     Recursively traverse hdf5 file or group, and print summary information
     on subgroups, datasets, and attributes
     """
-    def print_attrs(obj):
-        for attr_name, attr_value in obj.attrs.items():
-            if isinstance(attr_value, np.ndarray) and attr_value.size>4:
-                if np.issubdtype(attr_value.dtype, np.floating):
-                    tmp = [f'{val:.2f}' for val in attr_value[0:4]]
-                else:
-                    tmp = [f'{val}' for val in attr_value[0:4]]
-                print_value = '[ ' + ' '.join(tmp) + ' ... ]'
-            else:
-                if hasattr(attr_value, 'dtype') and np.issubdtype(attr_value.dtype, np.floating):
-                    print_value = f'{attr_value:.2f}'
-                else:
-                    print_value = attr_value
-            print(f'    Attribute: {attr_name} {print_value}')
-
     do_close = False
+    # open h5 file if `group` is path
     if isinstance(group, (str, Path)):
         do_close = True
         if isinstance(group, str):
@@ -38,13 +38,13 @@ def traverse_h5py(group):
         else:
             group = h5py.File(group.as_posix(), 'r')
     print(f'Group {group.name} in file {group.file}')
-    print_attrs(group)
+    _print_attrs(group)
     for name, value in group.items():
         if isinstance(value, h5py.Group):
             traverse_h5py(value)
         if isinstance(value, h5py.Dataset):
             print(f'    Dataset {value.name}', value.shape, value.dtype)
-            print_attrs(value)
+            _print_attrs(value)
     if do_close:
         group.close()
 
@@ -150,7 +150,8 @@ class BES_Data(object):
         for channel in self.channels:
             tdi_vars.append(f'_n{channel:02d}')
             tdi_assignments.append(
-                    f'{tdi_vars[-1]} = ptdata("besfu{channel:02d}", {self.shot})')
+                    f'{tdi_vars[-1]} = \
+                        ptdata("besfu{channel:02d}", {self.shot})')
         if self.verbose:
             print(
                     f'  Fetching signals ({self.channels.size} channels) for shot {self.shot}')
@@ -164,7 +165,8 @@ class BES_Data(object):
             print(f'  Get signals elapsed time = {t2 - t1:.2f} s')
 
 
-def package_bes(shots=None,
+def package_bes(filename=None,
+                shots=None,
                 channels=None,
                 verbose=False,
                 with_signals=False):
@@ -174,10 +176,11 @@ def package_bes(shots=None,
     if not isinstance(shots, np.ndarray):
         shots = np.array(shots)
     t1 = time.time()
-    metadata_path = data_dir / 'bes_metadata.hdf5'
-    with h5py.File(metadata_path, 'a') as metadata_file:
+    if not filename:
+        filename = 'bes_metadata.hdf5'
+    with h5py.File(filename, 'a') as metafile:
         valid_shot_counter = 0
-        configuration_group = metadata_file.require_group('configurations')
+        configuration_group = metafile.require_group('configurations')
         config_8x8_group = configuration_group.require_group(
             '8x8_configurations')
         config_non_8x8_group = configuration_group.require_group(
@@ -197,7 +200,8 @@ def package_bes(shots=None,
                     assert ('r_position' in config.attrs and
                             'z_position' in config.attrs and
                             'shots' in config.attrs)
-                    max_index[igroup] = np.max([max_index[igroup], config_index])
+                    max_index[igroup] = np.max([max_index[igroup],
+                                                config_index])
                     # test if input data matches existing configuration
                     if not np.allclose(r_position,
                                        config.attrs['r_position'],
@@ -260,7 +264,7 @@ def package_bes(shots=None,
                     print(f'INVALID BES data for shot {bes_data.shot}')
                     continue
                 shot_string = f'{bes_data.shot:d}'
-                shot_group = metadata_file.require_group(shot_string)
+                shot_group = metafile.require_group(shot_string)
                 # metadata attributes
                 for attr_name, attr_value in bes_data.metadata.items():
                     if attr_name in shot_group.attrs:
@@ -290,7 +294,7 @@ def package_bes(shots=None,
                 valid_shot_counter += 1
                 # signals
                 if with_signals:
-                    signal_file = data_dir / f'bes_signals_{shot_string}.hdf5'
+                    signal_file = f'bes_signals_{shot_string}.hdf5'
                     bes_data.get_signals()
                     with h5py.File(signal_file, 'w') as sfile:
                         if verbose:
@@ -309,14 +313,14 @@ def package_bes(shots=None,
                             traverse_h5py(sfile)
     t2 = time.time()
     if verbose:
-        print_metadata_summary(path=metadata_path)
+        print_metadata_summary(path=filename)
     print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
     print(f'{valid_shot_counter} valid shots out of {shots.size} in input shot list')
 
 
 def print_metadata_summary(path=None):
     if not path:
-        path = data_dir / 'bes_metadata.hdf5'
+        path = 'bes_metadata.hdf5'
     if not isinstance(path, Path):
         path = Path(path)
     print(f'Summarizing metadata file {path.as_posix()}')
@@ -335,5 +339,4 @@ def print_metadata_summary(path=None):
 if __name__ == '__main__':
     shotlist = [176778, 171472, 171473, 171477, 171495,
                 145747, 145745, 142300, 142294, 145384]
-    package_bes(shots=shotlist[0:4], verbose=False, with_signals=False)
-    # print_metadata_summary(path='jobs/job_13524274/data/bes_metadata.hdf5')
+    package_bes(shots=shotlist[0:4], verbose=True, with_signals=False)

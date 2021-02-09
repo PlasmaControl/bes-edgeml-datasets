@@ -1,0 +1,15 @@
+D3DRDB queries
+
+https://nomos.gat.com/DIII-D/comp/database/d3drdb/query_str.php
+
+
+list shots and runids for logbook entries with given text
+
+SELECT entries.run, entries.shot
+FROM entries INNER JOIN shots
+ON entries.shot = shots.shot
+WHERE entries.text LIKE(&&STRING1&&)
+AND YEAR(entries.entered) >= 2014
+AND shots.shot_type = (&&STRING2&&)
+GROUP by entries.shot, entries.run
+ORDER by entries.shot DESC
