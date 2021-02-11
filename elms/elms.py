@@ -24,14 +24,27 @@ def read_elm_shotlist(verbose=False):
     return runids, shotlist
 
 
-def package_elms(nshots=None):
-    _, shots = read_elm_shotlist()
-    shots = np.array(shots)
-    if nshots:
-        shots = shots[0:nshots]
-    print(shots[0], shots[-1], shots.size)
-    bes2hdf5.package_bes(shots=shots, verbose=True, with_signals=False)
+def package_elms(max_shots=None):
+    _, shotlist = read_elm_shotlist()
+    shotlist = np.array(shotlist)
+    if max_shots:
+        shotlist = shotlist[0:max_shots]
+    print(shotlist[0], shotlist[-1], shotlist.size)
+    bes2hdf5.package_bes(shots=shotlist, verbose=True, with_signals=False)
+
+
+def package_8x8_sublist(max_shots=None):
+    shotlist = bes2hdf5.make_8x8_sublist(
+            path='/home/smithdr/edgeml/elms/data/elm_metadata/bes_metadata.hdf5',
+            upper_inboard_channel=56,
+            noplot=True)
+    if max_shots:
+        shotlist = shotlist[0:max_shots]
+    bes2hdf5.package_bes(shots=shotlist, channels=np.arange(1,11), verbose=True, with_signals=True)
 
 
 if __name__=='__main__':
-    runids, shotlist = read_elm_shotlist()
+    # runids, shotlist = read_elm_shotlist()
+    # bes2hdf5.print_metadata_summary('data/elm_metadata/bes_metadata.hdf5', only_8x8=True)
+    # shotlist = bes2hdf5.make_8x8_sublist(path='data/elm_metadata/bes_metadata.hdf5', upper_inboard_channel=56)
+    package_8x8_sublist()
