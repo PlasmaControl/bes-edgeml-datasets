@@ -156,7 +156,7 @@ class BES_Data(object):
         tdi_vars = []
         tdi_assignments = []
         for channel in self.channels:
-            var = f'_n{channel:02d}'
+            var = f'_n{channel:02d}_{self.shot}'
             tdi_vars.append(var)
             tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
             tdi_assignments.append(tmp)

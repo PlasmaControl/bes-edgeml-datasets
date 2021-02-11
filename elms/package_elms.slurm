@@ -19,7 +19,7 @@ pwd -P
 # do work
 python_exec=/fusion/projects/diagnostics/bes/smithdr/conda/envs/py38/bin/python
 ##$python_exec -c "import elms; elms.package_elms()" &> python.txt
-$python_exec -c "import elms; elms.package_8x8_sublist(max_shots=12)" &> python.txt
+$python_exec -c "import elms; elms.package_8x8_sublist(max_shots=16)" &> python.txt
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 
