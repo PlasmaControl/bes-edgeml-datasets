@@ -40,7 +40,10 @@ def package_8x8_sublist(max_shots=None):
             noplot=True)
     if max_shots:
         shotlist = shotlist[0:max_shots]
-    bes2hdf5.package_bes(shots=shotlist, channels=np.arange(1,65), verbose=True, with_signals=True)
+    bes2hdf5.package_bes(shots=shotlist,
+                         channels=np.arange(1,65),
+                         verbose=True,
+                         with_signals=True)
 
 
 if __name__=='__main__':

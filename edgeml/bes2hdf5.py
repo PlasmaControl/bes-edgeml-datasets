@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import concurrent.futures
 import os
 import sys
+import threading
 
 
 def _print_attrs(obj):
@@ -232,11 +233,83 @@ def validate_configuration(input_bes_data,
     return new_index
 
 
+def get_validate_bes_data(shot=None,
+                          channels=None,
+                          verbose=False,
+                          with_signals=False,
+                          metafile=None,
+                          lock=None):
+
+    bes_data = BES_Data(shot=shot,
+                        channels=channels,
+                        verbose=verbose,
+                        get_signals=with_signals)
+    if bes_data.time is None:
+        print(f'{bes_data.shot}: INVALID BES data')
+        return 0
+    lock.acquire()
+    configuration_group = metafile.require_group('configurations')
+    config_8x8_group = configuration_group.require_group(
+            '8x8_configurations')
+    config_non_8x8_group = configuration_group.require_group(
+            'non_8x8_configurations')
+    shot_string = f'{bes_data.shot:d}'
+    shot_group = metafile.require_group(shot_string)
+    # metadata attributes
+    for attr_name, attr_value in bes_data.metadata.items():
+        if attr_name in shot_group.attrs:
+            if 'position' in attr_name:
+                assert (np.allclose(attr_value,
+                                    shot_group.attrs[attr_name],
+                                    atol=0.1))
+            else:
+                assert (attr_value == shot_group.attrs[attr_name])
+        else:
+            shot_group.attrs[attr_name] = attr_value
+    config_index = validate_configuration(bes_data,
+                                          config_8x8_group,
+                                          config_non_8x8_group)
+    if 'configuration_index' in shot_group.attrs:
+        assert (config_index == shot_group.attrs['configuration_index'])
+    else:
+        shot_group.attrs['configuration_index'] = config_index
+    # metadata datasets
+    for point_name in bes_data._points:
+        for name in [f'{point_name}', f'{point_name}_time']:
+            data = getattr(bes_data, name, None)
+            if data is None:
+                continue
+            shot_group.require_dataset(name,
+                                       data=data,
+                                       shape=data.shape,
+                                       dtype=data.dtype)
+    lock.release()
+    # signals
+    if with_signals:
+        signal_file = f'bes_signals_{shot_string}.hdf5'
+        with h5py.File(signal_file, 'w') as sfile:
+            sfile.create_dataset('signals',
+                                 data=bes_data.signals,
+                                 compression='gzip',
+                                 chunks=True)
+            sfile.create_dataset('time',
+                                 data=bes_data.time,
+                                 compression='gzip',
+                                 chunks=True)
+        if verbose:
+            traverse_h5py(signal_file)
+        signal_mb = bes_data.signals.nbytes // 1024 // 1024
+        print(f'{bes_data.shot}: BES_Data size = {signal_mb} MB')
+    del bes_data
+    return shot
+
+
 def package_bes(filename=None,
                 shots=None,
                 channels=None,
                 verbose=False,
-                with_signals=False):
+                with_signals=False,
+                max_workers=None):
     if filename is None:
         filename = 'bes_metadata.hdf5'
     if shots is None:
@@ -248,85 +321,32 @@ def package_bes(filename=None,
     t1 = time.time()
     with h5py.File(filename, 'a') as metafile:
         valid_shot_counter = 0
-        configuration_group = metafile.require_group('configurations')
-        config_8x8_group = configuration_group.require_group(
-            '8x8_configurations')
-        config_non_8x8_group = configuration_group.require_group(
-            'non_8x8_configurations')
-        max_workers = len(os.sched_getaffinity(0))//2
+        if not max_workers:
+            max_workers = len(os.sched_getaffinity(0)) // 2
+        lock = threading.Lock()
         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
             futures = []
-            shot_count = 0
+            # submit tasks to workers
             for i, shot in enumerate(shots):
                 print(f'{shot}: submitting to worker pool ({i+1} of {shots.size})')
-                future = executor.submit(BES_Data,
+                future = executor.submit(get_validate_bes_data,
                                          shot=shot,
                                          channels=channels,
-                                         verbose=False,
-                                         get_signals=with_signals)
+                                         verbose=verbose,
+                                         with_signals=with_signals,
+                                         metafile=metafile,
+                                         lock=lock)
                 futures.append(future)
+            # get results as workers finish
+            shot_count = 0
             for future in concurrent.futures.as_completed(futures):
                 shot_count += 1
-                bes_data = future.result()
-                print(f'{bes_data.shot}: work finished ({shot_count} of {shots.size})')
+                shot = future.result()
+                if shot:
+                    valid_shot_counter += 1
+                    print(f'{shot}: work finished ({shot_count} of {shots.size})')
             t_mid = time.time()
             print(f'Worker pool elapsed time = {t_mid-t1:.2f} s')
-            for future in futures:
-                t3 = time.time()
-                bes_data = future.result()
-                if bes_data.time is None:
-                    print(f'{bes_data.shot}: INVALID BES data')
-                    continue
-                shot_string = f'{bes_data.shot:d}'
-                shot_group = metafile.require_group(shot_string)
-                # metadata attributes
-                for attr_name, attr_value in bes_data.metadata.items():
-                    if attr_name in shot_group.attrs:
-                        if 'position' in attr_name:
-                            assert (np.allclose(attr_value,
-                                                shot_group.attrs[attr_name],
-                                                atol=0.1))
-                        else:
-                            assert (attr_value == shot_group.attrs[attr_name])
-                    else:
-                        shot_group.attrs[attr_name] = attr_value
-                config_index = validate_configuration(bes_data,
-                                                      config_8x8_group,
-                                                      config_non_8x8_group)
-                if 'configuration_index' in shot_group.attrs:
-                    assert(config_index == shot_group.attrs['configuration_index'])
-                else:
-                    shot_group.attrs['configuration_index'] = config_index
-                # metadata datasets
-                for point_name in bes_data._points:
-                    for name in [f'{point_name}', f'{point_name}_time']:
-                        data = getattr(bes_data, name, None)
-                        if data is None:
-                            continue
-                        shot_group.require_dataset(name,
-                                                   data=data,
-                                                   shape=data.shape,
-                                                   dtype=data.dtype)
-                valid_shot_counter += 1
-                t4 = time.time()
-                print(f'{bes_data.shot}: Metadata validation time = {t4-t3:.2f} s')
-                # signals
-                if with_signals:
-                    signal_file = f'bes_signals_{shot_string}.hdf5'
-                    with h5py.File(signal_file, 'w') as sfile:
-                        sfile.create_dataset('signals',
-                                             data=bes_data.signals,
-                                             compression='gzip',
-                                             chunks=True)
-                        sfile.create_dataset('time',
-                                             data=bes_data.time,
-                                             compression='gzip',
-                                             chunks=True)
-                    t5 = time.time()
-                    if verbose:
-                        traverse_h5py(signal_file)
-                    print(f'{bes_data.shot}: Signal validation time = {t5-t4:.2f} s')
-                    print(f'{bes_data.shot}: BES_Data size = {bes_data.signals.nbytes // 1024 // 1024} MB')
     t2 = time.time()
     if verbose:
         print_metadata_summary(path=filename)
@@ -353,7 +373,7 @@ def print_metadata_summary(path=None, only_8x8=False):
                 nshots = config_group.attrs['shots'].size
                 sum_shots += nshots
                 print(f'# of shots in {config_group.name}: {nshots}')
-            print(f'  Sum of shots in {group.name} group: {sum_shots}')
+            print(f'Sum of shots in {group.name} group: {sum_shots}')
             if only_8x8:
                 break
 
@@ -413,4 +433,8 @@ if __name__ == '__main__':
     shotlist = [176778, 171472, 171473, 171477,
                 171495, 145747, 145745, 142300,
                 142294, 145384, 164895, 164824]
-    package_bes(shots=shotlist, channels=np.arange(1,11), verbose=True, with_signals=True)
+    package_bes(shots=shotlist[0:6],
+                channels=np.arange(1,5),
+                verbose=True,
+                with_signals=True,
+                max_workers=2)
