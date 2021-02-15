@@ -30,7 +30,9 @@ def package_elms(max_shots=None):
     if max_shots:
         shotlist = shotlist[0:max_shots]
     print(shotlist[0], shotlist[-1], shotlist.size)
-    bes2hdf5.package_bes(shots=shotlist, verbose=True, with_signals=False)
+    bes2hdf5.package_bes(shots=shotlist,
+                         verbose=True,
+                         with_signals=False)
 
 
 def package_8x8_sublist(max_shots=None):

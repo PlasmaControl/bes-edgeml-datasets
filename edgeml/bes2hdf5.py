@@ -77,13 +77,15 @@ class BES_Data(object):
         self.shot = shot
         self.channels = channels
         self.verbose = verbose
+        self.time = None
         self.signals = None
         self.metadata = None
         print(f'{self.shot}: start')
         # get time array
         ptdata = f'ptdata("besfu01", {self.shot})'
         try:
-            self.time = np.array(self.connection.get(f'dim_of({ptdata})')).round(4)
+            sigtime = self.connection.get(f'dim_of({ptdata})')
+            self.time = np.array(sigtime).round(4)
         except:
             self.time = None
             return
@@ -98,6 +100,7 @@ class BES_Data(object):
             start_time = self.connection.get(r'\bes_ts')
             self.connection.closeTree('bes', self.shot)
         except:
+            print(f'{self.shot}: ERROR getting metadata')
             self.time = None
             return
         if not start_time == self.time[0]:
@@ -116,8 +119,6 @@ class BES_Data(object):
                          'date': ''}
         # get ip, beams, etc.
         for point_name in self._points:
-            data = np.array(0)
-            data_time = np.array(0)
             try:
                 if 'inj' in point_name:
                     self.connection.openTree('nb', self.shot)
@@ -161,10 +162,15 @@ class BES_Data(object):
             tdi_vars.append(var)
             tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
             tdi_assignments.append(tmp)
-        self.connection.get(', '.join(tdi_assignments))
         self.signals = np.empty([self.channels.size, self.n_time])
-        for i, tdi_var in enumerate(tdi_vars):
-            self.signals[i, :] = self.connection.get(tdi_var)
+        try:
+            self.connection.get(', '.join(tdi_assignments))
+            for i, tdi_var in enumerate(tdi_vars):
+                self.signals[i, :] = self.connection.get(tdi_var)
+        except:
+            print(f'{self.shot}: ERROR fetching signals')
+            self.signals = None
+            return
         t2 = time.time()
         print(f'{self.shot}: Signal time = {t2 - t1:.2f} s')
 
@@ -246,16 +252,35 @@ def get_validate_bes_data(shot=None,
                         get_signals=with_signals)
     if bes_data.time is None:
         print(f'{bes_data.shot}: INVALID BES data')
-        return 0
+        return -bes_data.shot
+    shot_string = f'{bes_data.shot:d}'
+    # signals
+    if with_signals:
+        if bes_data.signals is None:
+            print(f'{bes_data.shot}: INVALID BES signals')
+            return -bes_data.shot
+        signal_file = f'bes_signals_{shot_string}.hdf5'
+        with h5py.File(signal_file, 'w') as sfile:
+            sfile.create_dataset('signals',
+                                 data=bes_data.signals,
+                                 compression='gzip',
+                                 chunks=True)
+            sfile.create_dataset('time',
+                                 data=bes_data.time,
+                                 compression='gzip',
+                                 chunks=True)
+        if verbose:
+            traverse_h5py(signal_file)
+        signal_mb = bes_data.signals.nbytes // 1024 // 1024
+        print(f'{bes_data.shot}: BES_Data size = {signal_mb} MB')
+    # metadata attributes
     lock.acquire()
     configuration_group = metafile.require_group('configurations')
     config_8x8_group = configuration_group.require_group(
             '8x8_configurations')
     config_non_8x8_group = configuration_group.require_group(
             'non_8x8_configurations')
-    shot_string = f'{bes_data.shot:d}'
     shot_group = metafile.require_group(shot_string)
-    # metadata attributes
     for attr_name, attr_value in bes_data.metadata.items():
         if attr_name in shot_group.attrs:
             if 'position' in attr_name:
@@ -284,22 +309,6 @@ def get_validate_bes_data(shot=None,
                                        shape=data.shape,
                                        dtype=data.dtype)
     lock.release()
-    # signals
-    if with_signals:
-        signal_file = f'bes_signals_{shot_string}.hdf5'
-        with h5py.File(signal_file, 'w') as sfile:
-            sfile.create_dataset('signals',
-                                 data=bes_data.signals,
-                                 compression='gzip',
-                                 chunks=True)
-            sfile.create_dataset('time',
-                                 data=bes_data.time,
-                                 compression='gzip',
-                                 chunks=True)
-        if verbose:
-            traverse_h5py(signal_file)
-        signal_mb = bes_data.signals.nbytes // 1024 // 1024
-        print(f'{bes_data.shot}: BES_Data size = {signal_mb} MB')
     del bes_data
     return shot
 
@@ -342,9 +351,11 @@ def package_bes(filename=None,
             for future in concurrent.futures.as_completed(futures):
                 shot_count += 1
                 shot = future.result()
-                if shot:
+                if shot > 0:
                     valid_shot_counter += 1
                     print(f'{shot}: work finished ({shot_count} of {shots.size})')
+                else:
+                    print(f'{-shot}: INVALID return value')
             t_mid = time.time()
             print(f'Worker pool elapsed time = {t_mid-t1:.2f} s')
     t2 = time.time()
