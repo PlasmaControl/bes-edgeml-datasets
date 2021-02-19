@@ -1,6 +1,7 @@
 import numpy as np
 import matplotlib.pyplot as plt
-import matplotlib.widgets as widgets
+from matplotlib import widgets
+from matplotlib import patches
 import MDSplus
 import time as timelib
 
@@ -115,9 +116,19 @@ class ElmTaggerGUI(object):
         self.xlim = [self.start_time - 2*(self.stop_time-self.start_time),
                      self.stop_time + 2*(self.stop_time-self.start_time)]
         print(f'ELM index {self.elm_index}  shot {self.shot}')
+        for axes in self.axes:
+            axes.set_prop_cycle(None)
         self.plot_density()
         self.plot_bes()
         self.plot_dalpha()
+        for axes in self.axes:
+            ylim = axes.get_ylim()
+            rect = patches.Rectangle([self.start_time, ylim[0]],
+                                     self.stop_time-self.start_time,
+                                     ylim[1]-ylim[0],
+                                     linewidth=0,
+                                     facecolor='whitesmoke')
+            axes.add_patch(rect)
         plt.draw()
 
     def plot_density(self):
@@ -192,17 +203,20 @@ class ElmTaggerGUI(object):
         plt.legend(loc='upper right')
 
     def plot_dalpha(self):
-        ptnames = ['FS02', 'FS03', 'FS04', 'FS05', 'FS06', 'FS07', 'FS08',
-                   'FS02UP', 'FS03UP', 'FS04UP']
+        ptnames = ['FS02', 'FS03', 'FS04',
+                   # 'FS05', 'FS06', 'FS07', 'FS08',
+                   # 'FS02UP', 'FS03UP', 'FS04UP',
+                   ]
         plt.sca(self.axes[1])
+        self.connection.openTree('spectroscopy', self.shot)
         for ptname in ptnames:
             data = None
             time = None
-            data_tag = f'ptdata("{ptname}", {self.shot})'
+            data_tag = f'\\{ptname}'
             try:
                 t1 = timelib.time()
                 data = np.array(self.connection.get(data_tag))
-                # time = np.array(self.connection.get(f'dim_of({data_tag})'))
+                time = np.array(self.connection.get(f'dim_of({data_tag})'))
                 t2 = timelib.time()
                 print(f'  Elapsed time for {data_tag}: {t2 - t1:.1f} s')
             except MDSplus._mdsshr.MdsException:
@@ -221,6 +235,7 @@ class ElmTaggerGUI(object):
         plt.xlim(self.xlim)
         plt.autoscale(enable=True, axis='y')
         plt.legend(loc='upper right')
+        self.connection.closeTree('spectroscopy', self.shot)
 
     def remove_vlines(self):
         while self.vlines:

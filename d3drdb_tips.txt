@@ -8,8 +8,8 @@ list shots and runids for logbook entries with given text
 SELECT entries.run, entries.shot
 FROM entries INNER JOIN shots
 ON entries.shot = shots.shot
-WHERE entries.text LIKE(&&STRING1&&)
+WHERE entries.text LIKE('%elm%')
 AND YEAR(entries.entered) >= 2014
-AND shots.shot_type = (&&STRING2&&)
+AND shots.shot_type = ('plasma')
 GROUP by entries.shot, entries.run
 ORDER by entries.shot DESC
