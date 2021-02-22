@@ -6,7 +6,6 @@ import MDSplus
 import matplotlib.pyplot as plt
 import concurrent.futures
 import os
-import sys
 import threading
 
 
@@ -88,6 +87,7 @@ class BES_Data(object):
             self.time = np.array(sigtime).round(4)
         except:
             self.time = None
+            print(f'{self.shot}: ERROR no time data')
             return
         n_time = self.connection.get(f'size({ptdata})')
         self.n_time = n_time.data()
@@ -139,6 +139,10 @@ class BES_Data(object):
                 data = data[time_mask]
                 data_time = data_time[time_mask]
             except:
+                if point_name=='pinj_15l':
+                    self.time = None
+                    print(f'{self.shot}: ERROR missing pinj_15l')
+                    return
                 print(f'{self.shot}: INVALID data node for {point_name}')
                 data = h5py.Empty(dtype='f')
                 data_time = h5py.Empty(dtype='f')
@@ -146,6 +150,11 @@ class BES_Data(object):
             setattr(self, point_name, data)
             if point_name == 'pinj' or 'inj' not in point_name:
                 setattr(self, f'{point_name}_time', data_time)
+            if point_name =='pinj_15l':
+                if data.max() < 500e3:
+                    self.time = None
+                    print(f'{self.shot}: ERROR invalid pinj_15l')
+                    return
         print(f'{self.shot}: {self.n_time} time points')
         t2 = time.time()
         print(f'{self.shot}: Metadata time = {t2 - t1:.2f} s')
@@ -170,6 +179,7 @@ class BES_Data(object):
         except:
             print(f'{self.shot}: ERROR fetching signals')
             self.signals = None
+            self.time = None
             return
         t2 = time.time()
         print(f'{self.shot}: Signal time = {t2 - t1:.2f} s')
@@ -251,13 +261,13 @@ def get_validate_bes_data(shot=None,
                         verbose=verbose,
                         get_signals=with_signals)
     if bes_data.time is None:
-        print(f'{bes_data.shot}: INVALID BES data')
+        print(f'{bes_data.shot}: ERROR invalid BES_Data object')
         return -bes_data.shot
     shot_string = f'{bes_data.shot:d}'
     # signals
     if with_signals:
         if bes_data.signals is None:
-            print(f'{bes_data.shot}: INVALID BES signals')
+            print(f'{bes_data.shot}: ERROR invalid BES signals')
             return -bes_data.shot
         signal_file = f'bes_signals_{shot_string}.hdf5'
         with h5py.File(signal_file, 'w') as sfile:
@@ -444,8 +454,8 @@ if __name__ == '__main__':
     shotlist = [176778, 171472, 171473, 171477,
                 171495, 145747, 145745, 142300,
                 142294, 145384, 164895, 164824]
-    package_bes(shots=shotlist[0:6],
+    package_bes(shots=shotlist[:],
                 channels=np.arange(1,5),
                 verbose=True,
-                with_signals=True,
+                with_signals=False,
                 max_workers=2)

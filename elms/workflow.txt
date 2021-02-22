@@ -1,0 +1,5 @@
+1) Use scripts in OMFIT to perform D3DRDB query to get ELM-relevant shots and save to elm-shotlist.csv.
+
+2) Get BES metadata for shotlist using elms.package_shotlist_metadata().  Submit a batch job using package_elms.slurm.
+
+

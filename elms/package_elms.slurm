@@ -6,7 +6,7 @@ date
 module load edgeml
 export PYTHONPATH=${SLURM_SUBMIT_DIR}:${PYTHONPATH}
 module -l list
-. /home/smithdr/packages/miniconda3/etc/profile.d/conda.sh
+. /fusion/projects/diagnostics/bes/smithdr/miniconda3/etc/profile.d/conda.sh
 conda activate py38
 
 # make work area in local scratch
@@ -18,8 +18,8 @@ pwd -P
 
 # do work
 python_exec=/fusion/projects/diagnostics/bes/smithdr/conda/envs/py38/bin/python
-##$python_exec -c "import elms; elms.package_elms()" &> python.txt
-$python_exec -c "import elms; elms.package_8x8_sublist()" &> python.txt
+$python_exec -c "import elms; elms.package_shotlist_metadata()" &> python.txt
+## $python_exec -c "import elms; elms.package_8x8_sublist()" &> python.txt
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 
