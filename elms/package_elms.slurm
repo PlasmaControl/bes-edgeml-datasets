@@ -1,6 +1,6 @@
 #!/usr/bin/env bash
-#SBATCH -t 0-12
-#SBATCH -N1 -n4 --mem=16G
+#SBATCH -t 1-0
+#SBATCH -N1 -n8 --mem=16G
 
 date
 module load edgeml
@@ -18,8 +18,8 @@ pwd -P
 
 # do work
 python_exec=/fusion/projects/diagnostics/bes/smithdr/conda/envs/py38/bin/python
-$python_exec -c "import elms; elms.package_shotlist_metadata()" &> python.txt
-## $python_exec -c "import elms; elms.package_8x8_sublist()" &> python.txt
+## $python_exec -c "import elms; elms.package_shotlist_metadata()" &> python.txt
+$python_exec -c "import elms; elms.package_8x8_sublist(with_signals=True)" &> python.txt
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 

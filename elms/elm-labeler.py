@@ -48,13 +48,13 @@ class ElmTaggerGUI(object):
 
         self.multi = widgets.MultiCursor(self.fig.canvas, self.axes, color='r', lw=1)
 
-        dtypes = [('ELM index', np.uint16),
-                    ('Shot', np.uint32),
-                    ('Start time', np.float),
-                    ('Stop time', np.float)]
-        self.elm_list = np.loadtxt('omfit-elm-time-list.csv',
+        dtypes = [('Shot', np.uint32),
+                  ('Start time', np.float),
+                  ('Stop time', np.float)]
+        self.elm_list = np.loadtxt('elm-list.csv',
                                    dtype=dtypes,
-                                   delimiter=',')
+                                   delimiter=',',
+                                   skiprows=1)
         self.nelms = self.elm_list['Shot'].size
         self.rng = np.random.default_rng()
         self.processed_elms = []

@@ -3,3 +3,11 @@
 2) Get BES metadata for shotlist using elms.package_shotlist_metadata().  Submit a batch job using package_elms.slurm.
 
 
+
+
+Down selection
+
+1503 ELMy shots returned by D3DRDB query (see `elm-shotslist.csv`)
+976 shots have valid BES data
+437 shots have 8x8 BES data
+348 shots have 8x8 BES data within an r/z window

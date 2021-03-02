@@ -7,6 +7,7 @@ import matplotlib.pyplot as plt
 import concurrent.futures
 import os
 import threading
+import csv
 
 
 def _print_attrs(obj):
@@ -328,7 +329,7 @@ def package_bes(filename=None,
                 channels=None,
                 verbose=False,
                 with_signals=False,
-                max_workers=None):
+                max_workers=2):
     if filename is None:
         filename = 'bes_metadata.hdf5'
     if shots is None:
@@ -403,12 +404,11 @@ def make_8x8_sublist(path=None,
                      upper_inboard_channel=None,
                      verbose=False,
                      noplot=False,
-                     rminmax=(223,226.5),
+                     rminmax=(223,227),
                      zminmax=(-1.5,1)):
     if not path:
         path = 'bes_metadata.hdf5'
-    if not isinstance(path, Path):
-        path = Path(path)
+    path = Path(path)
     r = []
     z = []
     nshots = []
@@ -438,8 +438,8 @@ def make_8x8_sublist(path=None,
                          textcoords='offset points',
                          xytext=(0,10),
                          ha='center')
-        plt.xlim(222, 227)
-        plt.ylim(None, 1.5)
+        plt.xlim(220, 230)
+        plt.ylim(-1.5, 1.5)
         for r in rminmax:
             plt.vlines(r, zminmax[0], zminmax[1], color='k')
         for z in zminmax:
