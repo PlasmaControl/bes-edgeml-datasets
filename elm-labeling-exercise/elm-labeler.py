@@ -1,27 +1,33 @@
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import widgets
-from matplotlib import patches
 import MDSplus
 import time as timelib
-
+import h5py
+from pathlib import Path
+from edgeml.bes2hdf5 import traverse_h5py
 
 class ElmTaggerGUI(object):
 
-    def __init__(self):
+    def __init__(self, save_pdf=False):
         self.time_markers = [None, None, None, None]
         self.marker_label = ['Pre-ELM start',
                              'ELM start',
                              'ELM end',
                              'Post-ELM end']
         self.fig, self.axes = plt.subplots(ncols=3, figsize=[11.5, 4])
+        self.fig.canvas.mpl_connect('close_event', self.on_close)
         for axes in self.axes:
             axes.set_xlabel('Time (ms)')
+            axes.set_title('empty')
         self.axes[0].set_ylabel('Line avg dens (AU)')
         self.axes[1].set_ylabel('D alpha')
         self.axes[2].set_ylabel('BES')
         plt.tight_layout(rect=(0, 0.15, 1, 1))
+
         self.fig.canvas.mpl_connect('button_press_event', self.axis_click)
+
+        self.save_pdf = save_pdf
 
         self.skip_button = widgets.Button(plt.axes([0.03, 0.05, 0.08, 0.075]),
                                           'Skip ELM',
@@ -48,29 +54,53 @@ class ElmTaggerGUI(object):
 
         self.multi = widgets.MultiCursor(self.fig.canvas, self.axes, color='r', lw=1)
 
-        dtypes = [('Shot', np.uint32),
-                  ('Start time', np.float),
-                  ('Stop time', np.float)]
-        self.elm_list = np.loadtxt('elm-list.csv',
-                                   dtype=dtypes,
-                                   delimiter=',',
-                                   skiprows=1)
-        self.nelms = self.elm_list['Shot'].size
+        h5_file = 'data/elm_events_small/elm-events-small.hdf5'
+        self.elm_data_file = h5py.File(h5_file, 'r')
+        self.nelms = len(self.elm_data_file)
+
+        self.label_filename = 'labeled-elm-events.hdf5'
+        self.label_file = h5py.File(self.label_filename, 'a')
+        grp = self.label_file.require_group('skipped_elms')
+        if 'skipped_elms' not in grp.attrs:
+            grp.attrs['skipped_elms'] = []
+
         self.rng = np.random.default_rng()
-        self.processed_elms = []
         self.elm_index = None
         self.shot = None
         self.start_time = None
         self.stop_time = None
         self.connection = MDSplus.Connection('atlas.gat.com')
+        self.labeled_elms = []
+        self.skipped_elms = []
+
+        # load skipped/labeled elms from existing label file
+        for group_key in self.label_file:
+            if 'skipped' in group_key:
+                skipped_elms = self.label_file['skipped_elms'].attrs['skipped_elms']
+                for skipped_elm in skipped_elms:
+                    self.skipped_elms.append(skipped_elm)
+                continue
+            self.labeled_elms.append(int(group_key))
 
         self.vlines = []
         self.data_lines = []
         self.clear_and_get_new_elm()
 
+    def on_close(self, *args, **kwargs):
+        if self.label_file:
+            self.label_file.close()
+        if self.elm_data_file:
+            self.elm_data_file.close()
+        traverse_h5py(self.label_filename)
+
+    def __del__(self):
+        self.fig.close()
+
     def skip(self, event):
         # log ELM index, then clear and get new ELM
-        self.processed_elms.append(self.elm_index)
+        self.skipped_elms.append(self.elm_index)
+        self.label_file['skipped_elms'].attrs['skipped_elms'] = \
+            self.skipped_elms
         self.clear_and_get_new_elm()
         plt.draw()
 
@@ -84,14 +114,35 @@ class ElmTaggerGUI(object):
         plt.draw()
 
     def accept(self, event):
-        # log ELM index, log markers, then clear and get new ELM
-        self.processed_elms.append(self.elm_index)
+        if self.save_pdf:
+            plt.savefig(f'elm_{self.elm_index:05d}_shot_{self.shot}.pdf',
+                        format='pdf',
+                        transparent=True)
+        self.labeled_elms.append(self.elm_index)
         self.log_elm_markers()
         self.clear_and_get_new_elm()
         plt.draw()
 
     def log_elm_markers(self):
-        pass
+        time = self.time
+        signals = self.signals
+        mask = np.logical_and(time >= self.time_markers[0],
+                              time <= self.time_markers[3])
+        time = time[mask]
+        signals = signals[:,mask]
+        labels = np.zeros(time.shape, dtype=np.int8)
+        mask = np.logical_and(time >= self.time_markers[1],
+                              time <= self.time_markers[2])
+        labels[mask] = 1
+
+        groupname = f'{self.elm_index:05d}'
+        assert(groupname not in self.label_file)
+        elm_group = self.label_file.create_group(groupname)
+        elm_group.attrs['shot'] = self.shot
+        elm_group.create_dataset('time', data=time)
+        elm_group.create_dataset('signals', data=signals)
+        elm_group.create_dataset('labels', data=labels)
+
 
     def clear_and_get_new_elm(self, event=None):
         # plots: remove vlines, remove data lines and legend
@@ -105,16 +156,18 @@ class ElmTaggerGUI(object):
         # data: get new ELM instance, plot new data
         while True:
             candidate_index = self.rng.integers(0, self.nelms)
-            if candidate_index in self.processed_elms:
+            if (candidate_index in self.labeled_elms) or \
+                    (candidate_index in self.skipped_elms):
                 continue
             else:
                 self.elm_index = candidate_index
                 break
-        self.shot = self.elm_list['Shot'][self.elm_index]
-        self.start_time = self.elm_list['Start time'][self.elm_index]
-        self.stop_time = self.elm_list['Stop time'][self.elm_index]
-        self.xlim = [self.start_time - 2*(self.stop_time-self.start_time),
-                     self.stop_time + 2*(self.stop_time-self.start_time)]
+        elm_group = self.elm_data_file[f'{self.elm_index:05d}']
+        self.shot = elm_group.attrs['shot']
+        self.time = elm_group['time'][:]
+        self.signals = elm_group['signals'][:,:]
+        self.start_time = self.time[0]
+        self.stop_time = self.time[-1]
         print(f'ELM index {self.elm_index}  shot {self.shot}')
         for axes in self.axes:
             axes.set_prop_cycle(None)
@@ -122,13 +175,10 @@ class ElmTaggerGUI(object):
         self.plot_bes()
         self.plot_dalpha()
         for axes in self.axes:
-            ylim = axes.get_ylim()
-            rect = patches.Rectangle([self.start_time, ylim[0]],
-                                     self.stop_time-self.start_time,
-                                     ylim[1]-ylim[0],
-                                     linewidth=0,
-                                     facecolor='whitesmoke')
-            axes.add_patch(rect)
+            plt.sca(axes)
+            plt.legend(loc='upper right')
+            plt.title(f'Shot {self.shot} | ELM index {self.elm_index}')
+            plt.xlim(self.start_time, self.stop_time)
         plt.draw()
 
     def plot_density(self):
@@ -156,8 +206,8 @@ class ElmTaggerGUI(object):
                     pass
                 if data is None or time is None:
                     continue
-                mask = np.logical_and(time >= self.xlim[0],
-                                      time <= self.xlim[1])
+                mask = np.logical_and(time >= self.start_time,
+                                      time <= self.stop_time)
                 data = data[mask]
                 time = time[mask]
                 decimate = data.size // 1500 + 1
@@ -166,41 +216,17 @@ class ElmTaggerGUI(object):
                 line = plt.plot(time, data/data.max(), label=data_node)
                 self.data_lines.append(line)
                 break
-        plt.xlim(self.xlim)
-        # plt.autoscale(enable=True, axis='y')
         plt.ylim(0.7,1.1)
-        plt.legend(loc='upper right')
         self.connection.closeTree('electrons', self.shot)
 
     def plot_bes(self):
-        ptnames = ['besfu20', 'besfu23']
         plt.sca(self.axes[2])
-        for ptname in ptnames:
-            data = None
-            time = None
-            data_tag = f'ptdata("{ptname}", {self.shot})'
-            try:
-                t1 = timelib.time()
-                data = np.array(self.connection.get(data_tag))
-                time = np.array(self.connection.get(f'dim_of({data_tag})'))
-                t2 = timelib.time()
-                print(f'  Elapsed time for {data_tag}: {t2 - t1:.1f} s')
-            except:
-                pass
-            if data is None or time is None:
-                continue
-            mask = np.logical_and(time >= self.xlim[0],
-                                  time <= self.xlim[1])
-            data = data[mask]
-            time = time[mask]
-            decimate = data.size // 1500 + 1
-            data = data[::decimate]
-            time = time[::decimate]
-            line = plt.plot(time, data/data.max(), label=ptname)
+        decimate = self.time.size // 1500 + 1
+        time = self.time[::decimate]
+        for i_signal in [20, 22, 24]:
+            data = self.signals[i_signal-1, ::decimate]
+            line = plt.plot(time, data, label=f'Ch {i_signal}')
             self.data_lines.append(line)
-        plt.xlim(self.xlim)
-        plt.autoscale(enable=True, axis='y')
-        plt.legend(loc='upper right')
 
     def plot_dalpha(self):
         ptnames = ['FS02', 'FS03', 'FS04',
@@ -223,8 +249,8 @@ class ElmTaggerGUI(object):
                 print(f'  FAILED: {data_tag}')
             if data is None or time is None:
                 continue
-            mask = np.logical_and(time >= self.xlim[0],
-                                  time <= self.xlim[1])
+            mask = np.logical_and(time >= self.start_time,
+                                  time <= self.stop_time)
             data = data[mask]
             time = time[mask]
             decimate = data.size // 1500 + 1
@@ -232,9 +258,6 @@ class ElmTaggerGUI(object):
             time = time[::decimate]
             line = plt.plot(time, data/data.max(), label=ptname)
             self.data_lines.append(line)
-        plt.xlim(self.xlim)
-        plt.autoscale(enable=True, axis='y')
-        plt.legend(loc='upper right')
         self.connection.closeTree('spectroscopy', self.shot)
 
     def remove_vlines(self):
@@ -283,6 +306,6 @@ class ElmTaggerGUI(object):
         plt.draw()
 
 
-ElmTaggerGUI()
+ElmTaggerGUI(save_pdf=True)
 
 plt.show()

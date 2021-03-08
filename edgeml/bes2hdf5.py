@@ -287,10 +287,8 @@ def get_validate_bes_data(shot=None,
     # metadata attributes
     lock.acquire()
     configuration_group = metafile.require_group('configurations')
-    config_8x8_group = configuration_group.require_group(
-            '8x8_configurations')
-    config_non_8x8_group = configuration_group.require_group(
-            'non_8x8_configurations')
+    config_8x8_group = configuration_group.require_group('8x8_configurations')
+    config_non_8x8_group = configuration_group.require_group('non_8x8_configurations')
     shot_group = metafile.require_group(shot_string)
     for attr_name, attr_value in bes_data.metadata.items():
         if attr_name in shot_group.attrs:
@@ -372,7 +370,8 @@ def package_bes(filename=None,
     t2 = time.time()
     if verbose:
         print_metadata_summary(path=filename)
-    print(f'Packaging data elapsed time = {t2 - t1:.2f} s')
+    dt = t2 - t1
+    print(f'Packaging data elapsed time: {int(dt)//3600} hr {dt%3600/60:.1f} min')
     print(f'{valid_shot_counter} valid shots out of {shots.size} in input shot list')
 
 
