@@ -11,7 +11,7 @@ from edgeml import bes2hdf5
 os.chdir('/fusion/projects/diagnostics/bes/smithdr/labeled-elms')
 
 repo_directory = bes2hdf5.repo_directory
-elm_signals_file = repo_directory / 'elms/data/elm_events/elm-events.hdf5'
+elm_signals_file = repo_directory / 'elms/data/unlabeled-elm-events/elm-events.hdf5'
 
 elm_labeling_directory = Path().absolute()
 valid_users = ['smithdr', 'mckee', 'yanz', 'burkem']
