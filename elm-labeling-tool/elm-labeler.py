@@ -1,11 +1,27 @@
+import time as timelib
+from pathlib import Path
+import os
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import widgets
 import MDSplus
-import time as timelib
 import h5py
-from pathlib import Path
-from edgeml.bes2hdf5 import traverse_h5py
+from edgeml import bes2hdf5
+
+os.chdir('/fusion/projects/diagnostics/bes/smithdr/labeled-elms')
+
+repo_directory = bes2hdf5.repo_directory
+elm_signals_file = repo_directory / 'elms/data/elm_events/elm-events.hdf5'
+
+elm_labeling_directory = Path().absolute()
+valid_users = ['smithdr', 'mckee', 'yanz', 'burkem']
+user_name = os.environ['USER']
+user_index = valid_users.index(user_name)
+user_data_directory = Path(elm_labeling_directory / 'data' / user_name)
+user_data_directory.mkdir(parents=True, exist_ok=True)
+
+labeled_elms_file = user_data_directory / f'labeled-elm-events-{user_name}.hdf5'
+
 
 class ElmTaggerGUI(object):
 
@@ -54,53 +70,63 @@ class ElmTaggerGUI(object):
 
         self.multi = widgets.MultiCursor(self.fig.canvas, self.axes, color='r', lw=1)
 
-        h5_file = 'data/elm_events_small/elm-events-small.hdf5'
-        self.elm_data_file = h5py.File(h5_file, 'r')
+        self.elm_data_file = h5py.File(elm_signals_file, 'r')
         self.nelms = len(self.elm_data_file)
 
-        self.label_filename = 'labeled-elm-events.hdf5'
-        self.label_file = h5py.File(self.label_filename, 'a')
-        grp = self.label_file.require_group('skipped_elms')
-        if 'skipped_elms' not in grp.attrs:
-            grp.attrs['skipped_elms'] = []
+        self.label_file = h5py.File(labeled_elms_file, 'a')
+        self.labeled_elms = self.label_file.attrs.setdefault('labeled_elms',
+                                                             np.array([], dtype=np.int))
+        self.skipped_elms = self.label_file.attrs.setdefault('skipped_elms',
+                                                             np.array([], dtype=np.int))
+
+        self.validate_data_file()
 
         self.rng = np.random.default_rng()
         self.elm_index = None
         self.shot = None
         self.start_time = None
         self.stop_time = None
+        self.time = None
+        self.signals = None
         self.connection = MDSplus.Connection('atlas.gat.com')
-        self.labeled_elms = []
-        self.skipped_elms = []
 
-        # load skipped/labeled elms from existing label file
-        for group_key in self.label_file:
-            if 'skipped' in group_key:
-                skipped_elms = self.label_file['skipped_elms'].attrs['skipped_elms']
-                for skipped_elm in skipped_elms:
-                    self.skipped_elms.append(skipped_elm)
-                continue
-            self.labeled_elms.append(int(group_key))
+        # # load skipped/labeled elms from existing label file
+        # for group_key in self.label_file:
+        #     if 'skipped' in group_key:
+        #         skipped_elms = self.label_file['skipped_elms'].attrs['skipped_elms']
+        #         for skipped_elm in skipped_elms:
+        #             self.skipped_elms.append(skipped_elm)
+        #         continue
+        #     self.labeled_elms.append(int(group_key))
 
         self.vlines = []
         self.data_lines = []
         self.clear_and_get_new_elm()
 
+    def validate_data_file(self):
+        assert(len(self.label_file) == self.labeled_elms.size)
+        for elm_index in self.label_file:
+            assert(int(elm_index) in self.labeled_elms)
+            assert(int(elm_index) not in self.skipped_elms)
+        for elm_index in np.concatenate((self.labeled_elms, self.skipped_elms)):
+            assert ((elm_index - user_index) % 4 == 0)
+        print('Labeled data file is valid')
+
     def on_close(self, *args, **kwargs):
+        self.validate_data_file()
         if self.label_file:
             self.label_file.close()
         if self.elm_data_file:
             self.elm_data_file.close()
-        traverse_h5py(self.label_filename)
+        bes2hdf5.traverse_h5py(labeled_elms_file)
 
-    def __del__(self):
-        self.fig.close()
+    # def __del__(self):
+    #     self.fig.close()
 
     def skip(self, event):
         # log ELM index, then clear and get new ELM
-        self.skipped_elms.append(self.elm_index)
-        self.label_file['skipped_elms'].attrs['skipped_elms'] = \
-            self.skipped_elms
+        self.skipped_elms = np.append(self.skipped_elms, self.elm_index)
+        self.label_file.attrs['skipped_elms'] = self.skipped_elms
         self.clear_and_get_new_elm()
         plt.draw()
 
@@ -115,10 +141,12 @@ class ElmTaggerGUI(object):
 
     def accept(self, event):
         if self.save_pdf:
-            plt.savefig(f'elm_{self.elm_index:05d}_shot_{self.shot}.pdf',
-                        format='pdf',
-                        transparent=True)
-        self.labeled_elms.append(self.elm_index)
+            pdf_file = user_data_directory / \
+                       f'elm_{self.elm_index:05d}_shot_{self.shot}.pdf'
+            plt.savefig(pdf_file, format='pdf', transparent=True)
+        self.labeled_elms = np.append(self.labeled_elms, self.elm_index)
+        self.label_file.attrs['labeled_elms'] = self.labeled_elms
+        print(f'Labeled ELMs: {self.labeled_elms.size}')
         self.log_elm_markers()
         self.clear_and_get_new_elm()
         plt.draw()
@@ -154,14 +182,17 @@ class ElmTaggerGUI(object):
         self.accept_button.color = 'whitesmoke'
         self.accept_button.hovercolor = 'whitesmoke'
         # data: get new ELM instance, plot new data
+        rng_range = self.nelms//4-1
         while True:
-            candidate_index = self.rng.integers(0, self.nelms)
+            candidate_index = self.rng.integers(0, rng_range)*4 + user_index
             if (candidate_index in self.labeled_elms) or \
                     (candidate_index in self.skipped_elms):
                 continue
-            else:
-                self.elm_index = candidate_index
-                break
+            if not f'{candidate_index:05d}' in self.elm_data_file:
+                continue
+            self.elm_index = candidate_index
+            break
+        assert((self.elm_index-user_index)%4 == 0)
         elm_group = self.elm_data_file[f'{self.elm_index:05d}']
         self.shot = elm_group.attrs['shot']
         self.time = elm_group['time'][:]
@@ -208,6 +239,8 @@ class ElmTaggerGUI(object):
                     continue
                 mask = np.logical_and(time >= self.start_time,
                                       time <= self.stop_time)
+                if np.count_nonzero(mask)<10:
+                    continue
                 data = data[mask]
                 time = time[mask]
                 decimate = data.size // 1500 + 1

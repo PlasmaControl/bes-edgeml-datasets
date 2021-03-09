@@ -7,49 +7,83 @@ import matplotlib.pyplot as plt
 import concurrent.futures
 import os
 import threading
-import csv
 
 
-def _print_attrs(obj):
-    for attr_name, attr_value in obj.attrs.items():
-        if isinstance(attr_value, np.ndarray) and attr_value.size > 4:
-            if np.issubdtype(attr_value.dtype, np.floating):
-                tmp = [f'{val:.2f}' for val in attr_value[0:4]]
+repo_directory = Path(__file__).parent.parent
+
+
+# def _print_attrs(obj):
+#     for attr_name, attr_value in obj.attrs.items():
+#         if isinstance(attr_value, np.ndarray) and attr_value.size > 4:
+#             if np.issubdtype(attr_value.dtype, np.floating):
+#                 tmp = [f'{val:.2f}' for val in attr_value[0:4]]
+#             else:
+#                 tmp = [f'{val}' for val in attr_value[0:4]]
+#             print_value = '[ ' + ' '.join(tmp) + ' ... ]'
+#         else:
+#             if hasattr(attr_value, 'dtype') and np.issubdtype(attr_value.dtype,
+#                                                               np.floating):
+#                 print_value = f'{attr_value:.2f}'
+#             else:
+#                 print_value = attr_value
+#         print(f'    Attribute: {attr_name} {print_value}')
+#
+#
+# def traverse_h5py_old(group):
+#     """
+#     Recursively traverse hdf5 file or group, and print summary information
+#     on subgroups, datasets, and attributes
+#     """
+#     do_close = False
+#     # open h5 file if `group` is path
+#     if isinstance(group, (str, Path)):
+#         do_close = True
+#         if isinstance(group, str):
+#             group = h5py.File(group, 'r')
+#         else:
+#             group = h5py.File(group.as_posix(), 'r')
+#     print(f'Group {group.name} in file {group.file}')
+#     _print_attrs(group)
+#     for name, value in group.items():
+#         if isinstance(value, h5py.Group):
+#             traverse_h5py(value)
+#         if isinstance(value, h5py.Dataset):
+#             print(f'    Dataset {value.name}', value.shape, value.dtype)
+#             _print_attrs(value)
+#     if do_close:
+#         group.close()
+
+def traverse_h5py(input_filename):
+    # private function to print attributes, if any
+    # groups or datasets may have attributes
+    def print_attributes(obj):
+        for key, value in obj.attrs.items():
+            if isinstance(value, np.ndarray):
+                print(f'  Attribute {key}:', value.shape, value.dtype)
             else:
-                tmp = [f'{val}' for val in attr_value[0:4]]
-            print_value = '[ ' + ' '.join(tmp) + ' ... ]'
-        else:
-            if hasattr(attr_value, 'dtype') and np.issubdtype(attr_value.dtype,
-                                                              np.floating):
-                print_value = f'{attr_value:.2f}'
-            else:
-                print_value = attr_value
-        print(f'    Attribute: {attr_name} {print_value}')
+                print(f'  Attribute {key}:', value)
 
+    # private function to recursively print groups/subgroups and datasets
+    def recursively_print_info(input_group):
+        print(f'Group {input_group.name}')
+        print_attributes(input_group)
+        # loop over items in a group
+        # items may be subgroup or dataset
+        # items are key/value pairs
+        for key, value in input_group.items():
+            if isinstance(value, h5py.Group):
+                recursively_print_info(value)
+            if isinstance(value, h5py.Dataset):
+                print(f'  Dataset {key}:', value.shape, value.dtype)
+                print_attributes(value)
 
-def traverse_h5py(group):
-    """
-    Recursively traverse hdf5 file or group, and print summary information
-    on subgroups, datasets, and attributes
-    """
-    do_close = False
-    # open h5 file if `group` is path
-    if isinstance(group, (str, Path)):
-        do_close = True
-        if isinstance(group, str):
-            group = h5py.File(group, 'r')
-        else:
-            group = h5py.File(group.as_posix(), 'r')
-    print(f'Group {group.name} in file {group.file}')
-    _print_attrs(group)
-    for name, value in group.items():
-        if isinstance(value, h5py.Group):
-            traverse_h5py(value)
-        if isinstance(value, h5py.Dataset):
-            print(f'    Dataset {value.name}', value.shape, value.dtype)
-            _print_attrs(value)
-    if do_close:
-        group.close()
+    # the file object functions like a group
+    # it is the top-level group, known as `root` or `/`
+    print(f'Contents of {input_filename}')
+    with h5py.File(input_filename, 'r') as file:
+        # loop over key/value pairs at file root;
+        # values may be a group or dataset
+        recursively_print_info(file)
 
 
 class BES_Data(object):
@@ -250,12 +284,12 @@ def validate_configuration(input_bes_data,
     return new_index
 
 
-def get_validate_bes_data(shot=None,
-                          channels=None,
-                          verbose=False,
-                          with_signals=False,
-                          metafile=None,
-                          lock=None):
+def validate_bes_data(shot=None,
+                      channels=None,
+                      verbose=False,
+                      with_signals=False,
+                      metafile=None,
+                      lock=None):
 
     bes_data = BES_Data(shot=shot,
                         channels=channels,
@@ -329,7 +363,7 @@ def package_bes(filename=None,
                 with_signals=False,
                 max_workers=2):
     if filename is None:
-        filename = 'bes_metadata.hdf5'
+        filename = '../elms/data/bes_metadata.hdf5'
     if shots is None:
         shots = [176778, 171472]
     if channels is None:
@@ -347,7 +381,7 @@ def package_bes(filename=None,
             # submit tasks to workers
             for i, shot in enumerate(shots):
                 print(f'{shot}: submitting to worker pool ({i+1} of {shots.size})')
-                future = executor.submit(get_validate_bes_data,
+                future = executor.submit(validate_bes_data,
                                          shot=shot,
                                          channels=channels,
                                          verbose=verbose,
@@ -377,7 +411,7 @@ def package_bes(filename=None,
 
 def print_metadata_summary(path=None, only_8x8=False):
     if not path:
-        path = 'bes_metadata.hdf5'
+        path = '../elms/data/bes_metadata.hdf5'
     if not isinstance(path, Path):
         path = Path(path)
     print(f'Summarizing metadata file {path.as_posix()}')
@@ -406,7 +440,7 @@ def make_8x8_sublist(path=None,
                      rminmax=(223,227),
                      zminmax=(-1.5,1)):
     if not path:
-        path = 'bes_metadata.hdf5'
+        path = '../elms/data/bes_metadata.hdf5'
     path = Path(path)
     r = []
     z = []

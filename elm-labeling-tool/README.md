@@ -1,4 +1,4 @@
-Instructions for ELM labeling competition
+# Instructions for ELM labeling competition
 
 1) In a new terminal, run:
 
