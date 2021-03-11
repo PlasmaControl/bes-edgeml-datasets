@@ -2,8 +2,9 @@
 
 Code base for BES edge-ML at DIII-D
 
-- `edgeml/` - module for packaging BES data and metadata in HDF5.
-Do `from edgeml import bes2hdf5`.
+- `edgeml/` - Module for packaging BES data and metadata in HDF5.
+Do `from edgeml import bes2hdf5`.  Consider adding `<repo-dir>/edgeml/' to
+`PYTHONPATH`.
 - `elm-dataset-workflow/` - Python and shell scripts to generate ELM-relevant
 shotlists and elm candidates
 - `elm-labeling-tool/` - GUI for interactively labeling ELM events
