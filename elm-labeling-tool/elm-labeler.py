@@ -11,7 +11,7 @@ from edgeml import bes2hdf5
 os.chdir('/fusion/projects/diagnostics/bes/smithdr/labeled-elms')
 
 repo_directory = bes2hdf5.repo_directory
-elm_signals_file = repo_directory / 'elms/data/unlabeled-elm-events/elm-events.hdf5'
+elm_signals_file = repo_directory / 'elm-dataset-workflow/data/unlabeled-elm-events/elm-events.hdf5'
 
 elm_labeling_directory = Path().absolute()
 valid_users = ['smithdr', 'mckee', 'yanz', 'burkem']
@@ -32,6 +32,7 @@ class ElmTaggerGUI(object):
                              'ELM end',
                              'Post-ELM end']
         self.fig, self.axes = plt.subplots(ncols=3, figsize=[11.5, 4])
+        self.fig_num = self.fig.number
         self.fig.canvas.mpl_connect('close_event', self.on_close)
         for axes in self.axes:
             axes.set_xlabel('Time (ms)')
@@ -45,19 +46,25 @@ class ElmTaggerGUI(object):
 
         self.save_pdf = save_pdf
 
-        self.skip_button = widgets.Button(plt.axes([0.03, 0.05, 0.08, 0.075]),
+        # self.quit_button = widgets.Button(plt.axes([0.01, 0.05, 0.07, 0.075]),
+        #                                   'Quit',
+        #                                   color='lightsalmon',
+        #                                   hovercolor='red')
+        # self.quit_button.on_clicked(self.on_close)
+
+        self.skip_button = widgets.Button(plt.axes([0.01, 0.05, 0.07, 0.075]),
                                           'Skip ELM',
                                           color='lightsalmon',
                                           hovercolor='red')
         self.skip_button.on_clicked(self.skip)
 
-        self.clear_button = widgets.Button(plt.axes([0.15, 0.05, 0.2, 0.075]),
+        self.clear_button = widgets.Button(plt.axes([0.2, 0.05, 0.2, 0.075]),
                                            'Clear markers',
                                            color='lightgray',
                                            hovercolor='darkgray')
         self.clear_button.on_clicked(self.clear_markers)
 
-        self.status_box = widgets.TextBox(plt.axes([0.45, 0.05, 0.25, 0.075]),
+        self.status_box = widgets.TextBox(plt.axes([0.5, 0.05, 0.2, 0.075]),
                                          'Status:',
                                           color='w',
                                           hovercolor='w')
@@ -90,15 +97,6 @@ class ElmTaggerGUI(object):
         self.signals = None
         self.connection = MDSplus.Connection('atlas.gat.com')
 
-        # # load skipped/labeled elms from existing label file
-        # for group_key in self.label_file:
-        #     if 'skipped' in group_key:
-        #         skipped_elms = self.label_file['skipped_elms'].attrs['skipped_elms']
-        #         for skipped_elm in skipped_elms:
-        #             self.skipped_elms.append(skipped_elm)
-        #         continue
-        #     self.labeled_elms.append(int(group_key))
-
         self.vlines = []
         self.data_lines = []
         self.clear_and_get_new_elm()
@@ -113,11 +111,14 @@ class ElmTaggerGUI(object):
         print('Labeled data file is valid')
 
     def on_close(self, *args, **kwargs):
+        print('on_close')
         self.validate_data_file()
         if self.label_file:
             self.label_file.close()
         if self.elm_data_file:
             self.elm_data_file.close()
+        # if self.fig and plt.fignum_exists(self.fig.number):
+        #     plt.close(self.fig)
         bes2hdf5.traverse_h5py(labeled_elms_file)
 
     # def __del__(self):
@@ -188,7 +189,7 @@ class ElmTaggerGUI(object):
             if (candidate_index in self.labeled_elms) or \
                     (candidate_index in self.skipped_elms):
                 continue
-            if not f'{candidate_index:05d}' in self.elm_data_file:
+            if f'{candidate_index:05d}' not in self.elm_data_file:
                 continue
             self.elm_index = candidate_index
             break

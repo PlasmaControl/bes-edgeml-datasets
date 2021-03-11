@@ -1,11 +1,7 @@
-# Instructions for ELM labeling competition
+# Instructions for ELM labeling tool
 
-1) In a new terminal, run:
+In a new terminal, run:
 
-$ cd /fusion/projects/diagnostics/bes/smithdr/label-elms
-$ source load-conda.sh
+`$ source launch-elm-labeler.sh`
 
-Verify that `which python` gives the following output:
-
-$ which python
-/fusion/projects/diagnostics/bes/smithdr/conda/envs/py38/bin/python
+When finished, close the GUI window.
