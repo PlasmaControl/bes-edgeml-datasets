@@ -19,13 +19,12 @@ def combine_datafiles(
     with h5py.File(newfile, 'w') as nf:
         for i, filename in enumerate(files):
             with h5py.File(filename, 'r') as f:
-                assert('labeled_elms' in f.attrs.keys())
-                assert('skipped_elms' in f.attrs.keys())
-                for key in f.attrs:
+                for attrname in f.attrs:
+                    assert(attrname in ['labeled_elms', 'skipped_elms'])
                     if i == 0:
-                        nf.attrs.create(key, f.attrs[key])
+                        nf.attrs.create(attrname, f.attrs[attrname])
                     else:
-                        nf.attrs[key] = np.append(nf.attrs[key], f.attrs[key])
+                        nf.attrs[attrname] = np.append(nf.attrs[attrname], f.attrs[attrname])
                 for elm_key, elm_group in f.items():
                     assert(isinstance(elm_group, h5py.Group))
                     new_elm_group = nf.create_group(elm_key)
@@ -59,4 +58,5 @@ for file in original_data_files:
 print(f'Total ELM count: {total_elm_count}')
 
 
-combine_datafiles(files=original_data_files)
+if __name__=='__main__':
+    combine_datafiles(files=original_data_files)
