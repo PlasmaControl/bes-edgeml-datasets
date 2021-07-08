@@ -102,7 +102,9 @@ class ElmTaggerGUI(object):
         self.clear_and_get_new_elm()
 
     def validate_data_file(self):
-        assert(len(self.label_file) == self.labeled_elms.size)
+        if len(self.label_file) != self.labeled_elms.size:
+            self.labeled_elms = np.array([int(elm_index) for elm_index in self.label_file],
+                                         dtype=np.int)
         for elm_index in self.label_file:
             assert(int(elm_index) in self.labeled_elms)
             assert(int(elm_index) not in self.skipped_elms)

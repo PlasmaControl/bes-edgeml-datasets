@@ -53,7 +53,7 @@ repo_directory = Path(__file__).parent.parent
 #     if do_close:
 #         group.close()
 
-def traverse_h5py(input_filename):
+def traverse_h5py(input_filename, skip_subgroups=False):
     # private function to print attributes, if any
     # groups or datasets may have attributes
     def print_attributes(obj):
@@ -65,17 +65,19 @@ def traverse_h5py(input_filename):
 
     # private function to recursively print groups/subgroups and datasets
     def recursively_print_info(input_group):
-        print(f'Group {input_group.name}')
-        print_attributes(input_group)
         # loop over items in a group
         # items may be subgroup or dataset
         # items are key/value pairs
         for key, value in input_group.items():
             if isinstance(value, h5py.Group):
+                if skip_subgroups:
+                    continue
                 recursively_print_info(value)
             if isinstance(value, h5py.Dataset):
                 print(f'  Dataset {key}:', value.shape, value.dtype)
                 print_attributes(value)
+        print(f'Group {input_group.name}')
+        print_attributes(input_group)
 
     # the file object functions like a group
     # it is the top-level group, known as `root` or `/`
@@ -484,11 +486,15 @@ def make_8x8_sublist(path=None,
 
 
 if __name__ == '__main__':
-    shotlist = [176778, 171472, 171473, 171477,
-                171495, 145747, 145745, 142300,
-                142294, 145384, 164895, 164824]
-    package_bes(shots=shotlist[:],
-                channels=np.arange(1,5),
-                verbose=True,
-                with_signals=False,
-                max_workers=2)
+    # shotlist = [176778, 171472, 171473, 171477,
+    #             171495, 145747, 145745, 142300,
+    #             142294, 145384, 164895, 164824]
+    # package_bes(shots=shotlist[:],
+    #             channels=np.arange(1,5),
+    #             verbose=True,
+    #             with_signals=False,
+    #             max_workers=2)
+    data_dir = Path('/fusion/projects/diagnostics/bes/smithdr/labeled-elms/data')
+    for h5_file in data_dir.glob('*/labeled-elm-events*.hdf5'):
+        print(h5_file)
+        traverse_h5py(h5_file, skip_subgroups=True)
