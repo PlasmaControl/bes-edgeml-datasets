@@ -4,6 +4,8 @@ figures/
 jobs/
 .idea/
 
+*.pdf
+*.png
 *.hdf5
 *.csv
 *.py[cod]
