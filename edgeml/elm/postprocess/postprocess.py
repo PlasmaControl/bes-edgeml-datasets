@@ -4,7 +4,7 @@ import datetime
 import numpy as np
 import h5py
 
-from edgeml.bes2hdf5 import traverse_h5py
+from ...bes2hdf5 import traverse_h5py
 
 
 data_dir = Path('data').absolute()

@@ -1,13 +1,13 @@
 from pathlib import Path
 import time
-import numpy as np
-import h5py
-import MDSplus
-import matplotlib.pyplot as plt
 import concurrent.futures
 import os
 import threading
 
+import numpy as np
+import h5py
+import matplotlib.pyplot as plt
+import MDSplus
 
 repo_directory = Path(__file__).parent.parent
 

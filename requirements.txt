@@ -2,3 +2,5 @@ numpy
 h5py
 mdsplus
 mirpyidl
+MDSplus
+matplotlib
