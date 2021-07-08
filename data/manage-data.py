@@ -31,10 +31,12 @@ def combine_datafiles(
                     for ds_key, ds_value in elm_group.items():
                         assert(isinstance(ds_value, h5py.Dataset))
                         new_elm_group.create_dataset(ds_key, data=ds_value)
+                nf.attrs['labeled_elms'] = np.unique(nf.attrs['labeled_elms'])
         labeled_elms = nf.attrs['labeled_elms']
-        assert (labeled_elms.size == len(nf))
+        print(f'Size of `labeled_elms` array: {labeled_elms.size}')
+        print(f'Number of groups: {len(nf)}')
         assert (ensure_unique(labeled_elms))
-        print(f'ELMs in combined file: {labeled_elms.size}')
+        assert (labeled_elms.size == len(nf))
 
 
 data_dir = Path(__file__).parent
@@ -51,8 +53,9 @@ for file in original_data_files:
         for key, value in h5file.attrs.items():
             print(f'    {key} shape {value.size}')
         labeled_elms = h5file.attrs['labeled_elms']
-        assert(labeled_elms.size == len(h5file))
-        assert(ensure_unique(labeled_elms))
+        print(labeled_elms.size, len(h5file))
+        # assert(ensure_unique(labeled_elms))
+        # assert(labeled_elms.size == len(h5file))
         total_elm_count += len(h5file)
 
 print(f'Total ELM count: {total_elm_count}')
