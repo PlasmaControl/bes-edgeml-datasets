@@ -396,7 +396,7 @@ def package_bes(filename=None,
             for future in concurrent.futures.as_completed(futures):
                 shot_count += 1
                 shot = future.result()
-                if shot > 0:
+                if future.exception() is None and shot > 0:
                     valid_shot_counter += 1
                     print(f'{shot}: work finished ({shot_count} of {shots.size})')
                 else:
@@ -494,7 +494,11 @@ if __name__ == '__main__':
     #             verbose=True,
     #             with_signals=False,
     #             max_workers=2)
-    data_dir = Path('/fusion/projects/diagnostics/bes/smithdr/labeled-elms/data')
-    for h5_file in data_dir.glob('*/labeled-elm-events*.hdf5'):
-        print(h5_file)
-        traverse_h5py(h5_file, skip_subgroups=True)
+    # data_dir = Path('/fusion/projects/diagnostics/bes/smithdr/labeled-elms/data')
+    # for h5_file in data_dir.glob('*/labeled-elm-events*.hdf5'):
+    #     print(h5_file)
+    #     traverse_h5py(h5_file, skip_subgroups=True)
+    package_bes(shots=[164884,164883,164882,164881],
+                         verbose=True,
+                         with_signals=False,
+                         filename='tmp.hdf5')
