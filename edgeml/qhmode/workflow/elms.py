@@ -31,11 +31,12 @@ def package_metadata(max_shots=None):
             shot_list.append(int(row['shot']))
             if max_shots and irow > max_shots:
                 break
-    filename = data_directory / 'bes_metadata.hdf5'
+    # filename = Path('bes_metadata.hdf5')
     bes2hdf5.package_bes(shots=shot_list,
                          verbose=True,
                          with_signals=False,
-                         filename=filename.as_posix())
+                         filename='bes_metadata.hdf5',
+                         )
 
 
 def package_signals_8x8_only(max_shots=None):

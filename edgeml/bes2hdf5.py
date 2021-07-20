@@ -321,7 +321,8 @@ def validate_bes_data(shot=None,
         signal_mb = bes_data.signals.nbytes // 1024 // 1024
         print(f'{bes_data.shot}: BES_Data size = {signal_mb} MB')
     # metadata attributes
-    lock.acquire()
+    if lock:
+        lock.acquire()
     configuration_group = metafile.require_group('configurations')
     config_8x8_group = configuration_group.require_group('8x8_configurations')
     config_non_8x8_group = configuration_group.require_group('non_8x8_configurations')
@@ -353,7 +354,8 @@ def validate_bes_data(shot=None,
                                        data=data,
                                        shape=data.shape,
                                        dtype=data.dtype)
-    lock.release()
+    if lock:
+        lock.release()
     del bes_data
     return shot
 
@@ -363,7 +365,8 @@ def package_bes(filename=None,
                 channels=None,
                 verbose=False,
                 with_signals=False,
-                max_workers=2):
+                max_workers=2,
+                use_concurrent=False):
     if filename is None:
         filename = '../elms/data/bes_metadata.hdf5'
     if shots is None:
@@ -373,36 +376,51 @@ def package_bes(filename=None,
     shots = np.array(shots)
     channels = np.array(channels)
     t1 = time.time()
-    with h5py.File(filename, 'a') as metafile:
+    with h5py.File(filename, 'w') as metafile:
         valid_shot_counter = 0
-        if not max_workers:
-            max_workers = len(os.sched_getaffinity(0)) // 2
-        lock = threading.Lock()
-        with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-            futures = []
-            # submit tasks to workers
+        if use_concurrent:
+            if not max_workers:
+                max_workers = len(os.sched_getaffinity(0)) // 2
+            lock = threading.Lock()
+            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                futures = []
+                # submit tasks to workers
+                for i, shot in enumerate(shots):
+                    print(f'{shot}: submitting to worker pool ({i+1} of {shots.size})')
+                    future = executor.submit(validate_bes_data,
+                                             shot=shot,
+                                             channels=channels,
+                                             verbose=verbose,
+                                             with_signals=with_signals,
+                                             metafile=metafile,
+                                             lock=lock)
+                    futures.append(future)
+                # get results as workers finish
+                shot_count = 0
+                for future in concurrent.futures.as_completed(futures):
+                    shot_count += 1
+                    shot = future.result()
+                    if future.exception() is None and shot > 0:
+                        valid_shot_counter += 1
+                        print(f'{shot}: work finished ({shot_count} of {shots.size})')
+                    else:
+                        print(f'{-shot}: INVALID return value')
+                t_mid = time.time()
+                print(f'Worker pool elapsed time = {t_mid-t1:.2f} s')
+        else:
             for i, shot in enumerate(shots):
-                print(f'{shot}: submitting to worker pool ({i+1} of {shots.size})')
-                future = executor.submit(validate_bes_data,
-                                         shot=shot,
+                print(
+                    f'Trying {shot} ({i + 1} of {shots.size})')
+                shot = validate_bes_data(shot=shot,
                                          channels=channels,
                                          verbose=verbose,
                                          with_signals=with_signals,
-                                         metafile=metafile,
-                                         lock=lock)
-                futures.append(future)
-            # get results as workers finish
-            shot_count = 0
-            for future in concurrent.futures.as_completed(futures):
-                shot_count += 1
-                shot = future.result()
-                if future.exception() is None and shot > 0:
+                                         metafile=metafile)
+                if shot and shot>0:
                     valid_shot_counter += 1
-                    print(f'{shot}: work finished ({shot_count} of {shots.size})')
+                    print( f'{shot} good')
                 else:
-                    print(f'{-shot}: INVALID return value')
-            t_mid = time.time()
-            print(f'Worker pool elapsed time = {t_mid-t1:.2f} s')
+                    print(f'{-shot} INVALID return value')
     t2 = time.time()
     if verbose:
         print_metadata_summary(path=filename)
@@ -423,7 +441,7 @@ def print_metadata_summary(path=None, only_8x8=False):
         if only_8x8:
             traverse_h5py(config_8x8_group)
         else:
-            traverse_h5py(metadata_file)
+            traverse_h5py(path)
         for group in [config_8x8_group, config_non_8x8_group]:
             sum_shots = 0
             for config_group in group.values():
