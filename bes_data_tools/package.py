@@ -1,10 +1,11 @@
 from pathlib import Path
 import csv
-import numpy as np
-from edgeml import bes2hdf5
-import h5py
 import time as timelib
 
+import numpy as np
+import h5py
+
+from . import bes2hdf5
 
 # establish directories and CSV files in `elms/data`
 data_directory = Path(__file__).parent / 'data'
@@ -115,7 +116,7 @@ def package_unlabeled_elm_events(max_elms=None):
             elm_event_group.create_dataset('time', data=time[time_mask])
     if signal_group:
         signal_group.close()
-    bes2hdf5.traverse_h5py(unlabeled_elm_events_file)
+    bes2hdf5.print_h5py_contents(unlabeled_elm_events_file)
     print('Failed shots:', failed_shots)
     t2 = timelib.time()
     dt = t2 - t1

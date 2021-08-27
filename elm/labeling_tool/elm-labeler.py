@@ -121,7 +121,7 @@ class ElmTaggerGUI(object):
             self.elm_data_file.close()
         # if self.fig and plt.fignum_exists(self.fig.number):
         #     plt.close(self.fig)
-        bes2hdf5.traverse_h5py(labeled_elms_file)
+        bes2hdf5.print_h5py_contents(labeled_elms_file)
 
     # def __del__(self):
     #     self.fig.close()

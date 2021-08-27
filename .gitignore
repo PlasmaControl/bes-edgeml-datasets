@@ -1,12 +1,13 @@
-__pycache__/
 data/
-figures/
-jobs/
+
+__pycache__/
 .idea/
 
+*.py[cod]
+slurm-*.out
 *.pdf
 *.png
 *.hdf5
+
 *.csv
-*.py[cod]
-slurm-*.out
+!bes_data_tools/sample_shotlist.csv

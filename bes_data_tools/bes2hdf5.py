@@ -9,84 +9,6 @@ import h5py
 import matplotlib.pyplot as plt
 import MDSplus
 
-repo_directory = Path(__file__).parent.parent
-
-
-# def _print_attrs(obj):
-#     for attr_name, attr_value in obj.attrs.items():
-#         if isinstance(attr_value, np.ndarray) and attr_value.size > 4:
-#             if np.issubdtype(attr_value.dtype, np.floating):
-#                 tmp = [f'{val:.2f}' for val in attr_value[0:4]]
-#             else:
-#                 tmp = [f'{val}' for val in attr_value[0:4]]
-#             print_value = '[ ' + ' '.join(tmp) + ' ... ]'
-#         else:
-#             if hasattr(attr_value, 'dtype') and np.issubdtype(attr_value.dtype,
-#                                                               np.floating):
-#                 print_value = f'{attr_value:.2f}'
-#             else:
-#                 print_value = attr_value
-#         print(f'    Attribute: {attr_name} {print_value}')
-#
-#
-# def traverse_h5py_old(group):
-#     """
-#     Recursively traverse hdf5 file or group, and print summary information
-#     on subgroups, datasets, and attributes
-#     """
-#     do_close = False
-#     # open h5 file if `group` is path
-#     if isinstance(group, (str, Path)):
-#         do_close = True
-#         if isinstance(group, str):
-#             group = h5py.File(group, 'r')
-#         else:
-#             group = h5py.File(group.as_posix(), 'r')
-#     print(f'Group {group.name} in file {group.file}')
-#     _print_attrs(group)
-#     for name, value in group.items():
-#         if isinstance(value, h5py.Group):
-#             traverse_h5py(value)
-#         if isinstance(value, h5py.Dataset):
-#             print(f'    Dataset {value.name}', value.shape, value.dtype)
-#             _print_attrs(value)
-#     if do_close:
-#         group.close()
-
-def traverse_h5py(input_filename, skip_subgroups=False):
-    # private function to print attributes, if any
-    # groups or datasets may have attributes
-    def print_attributes(obj):
-        for key, value in obj.attrs.items():
-            if isinstance(value, np.ndarray):
-                print(f'  Attribute {key}:', value.shape, value.dtype)
-            else:
-                print(f'  Attribute {key}:', value)
-
-    # private function to recursively print groups/subgroups and datasets
-    def recursively_print_info(input_group):
-        # loop over items in a group
-        # items may be subgroup or dataset
-        # items are key/value pairs
-        for key, value in input_group.items():
-            if isinstance(value, h5py.Group):
-                if skip_subgroups:
-                    continue
-                recursively_print_info(value)
-            if isinstance(value, h5py.Dataset):
-                print(f'  Dataset {key}:', value.shape, value.dtype)
-                print_attributes(value)
-        print(f'Group {input_group.name}')
-        print_attributes(input_group)
-
-    # the file object functions like a group
-    # it is the top-level group, known as `root` or `/`
-    print(f'Contents of {input_filename}')
-    with h5py.File(input_filename, 'r') as file:
-        # loop over key/value pairs at file root;
-        # values may be a group or dataset
-        recursively_print_info(file)
-
 
 class BES_Data(object):
     _points = ['ip',
@@ -222,9 +144,68 @@ class BES_Data(object):
         print(f'{self.shot}: Signal time = {t2 - t1:.2f} s')
 
 
-def validate_configuration(input_bes_data,
-                           config_8x8_group,
-                           config_non_8x8_group):
+def print_h5py_contents(input_filename, skip_subgroups=False):
+    # private function to print attributes, if any
+    # groups or datasets may have attributes
+    def print_attributes(obj):
+        for key, value in obj.attrs.items():
+            if isinstance(value, np.ndarray):
+                print(f'  Attribute {key}:', value.shape, value.dtype)
+            else:
+                print(f'  Attribute {key}:', value)
+
+    # private function to recursively print groups/subgroups and datasets
+    def recursively_print_content(group):
+        # loop over items in a group
+        # items may be subgroup or dataset
+        # items are key/value pairs
+        for key, value in group.items():
+            if isinstance(value, h5py.Group):
+                if skip_subgroups:
+                    continue
+                recursively_print_content(value)
+            if isinstance(value, h5py.Dataset):
+                print(f'  Dataset {key}:', value.shape, value.dtype)
+                print_attributes(value)
+        print(f'Group {group.name}')
+        print_attributes(group)
+
+    # the file object functions like a group
+    # it is the top-level group, known as `root` or `/`
+    print(f'Contents of {input_filename}')
+    with h5py.File(input_filename, 'r') as file:
+        # loop over key/value pairs at file root;
+        # values may be a group or dataset
+        recursively_print_content(file)
+
+
+def print_metadata_contents(path=None, only_8x8=False):
+    if not path:
+        path = '../elms/data/bes_metadata.hdf5'
+    if not isinstance(path, Path):
+        path = Path(path)
+    print(f'Summarizing metadata file {path.as_posix()}')
+    with h5py.File(path, 'r') as metadata_file:
+        config_8x8_group = metadata_file['configurations']['8x8_configurations']
+        config_non_8x8_group = metadata_file['configurations']['non_8x8_configurations']
+        if only_8x8:
+            print_h5py_contents(config_8x8_group)
+        else:
+            print_h5py_contents(path)
+        for group in [config_8x8_group, config_non_8x8_group]:
+            sum_shots = 0
+            for config_group in group.values():
+                nshots = config_group.attrs['shots'].size
+                sum_shots += nshots
+                print(f'# of shots in {config_group.name}: {nshots}')
+            print(f'Sum of shots in {group.name} group: {sum_shots}')
+            if only_8x8:
+                break
+
+
+def _validate_configuration(input_bes_data,
+                            config_8x8_group,
+                            config_non_8x8_group):
     max_index = np.array([0, 100])
     r_position = input_bes_data.metadata['r_position']
     z_position = input_bes_data.metadata['z_position']
@@ -286,12 +267,12 @@ def validate_configuration(input_bes_data,
     return new_index
 
 
-def validate_bes_data(shot=None,
-                      channels=None,
-                      verbose=False,
-                      with_signals=False,
-                      metafile=None,
-                      lock=None):
+def _validate_bes_data(shot=None,
+                       channels=None,
+                       verbose=False,
+                       with_signals=False,
+                       metafile=None,
+                       lock=None):
 
     bes_data = BES_Data(shot=shot,
                         channels=channels,
@@ -317,7 +298,7 @@ def validate_bes_data(shot=None,
                                  compression='gzip',
                                  chunks=True)
         if verbose:
-            traverse_h5py(signal_file)
+            print_h5py_contents(signal_file)
         signal_mb = bes_data.signals.nbytes // 1024 // 1024
         print(f'{bes_data.shot}: BES_Data size = {signal_mb} MB')
     # metadata attributes
@@ -337,9 +318,9 @@ def validate_bes_data(shot=None,
                 assert (attr_value == shot_group.attrs[attr_name])
         else:
             shot_group.attrs[attr_name] = attr_value
-    config_index = validate_configuration(bes_data,
-                                          config_8x8_group,
-                                          config_non_8x8_group)
+    config_index = _validate_configuration(bes_data,
+                                           config_8x8_group,
+                                           config_non_8x8_group)
     if 'configuration_index' in shot_group.attrs:
         assert (config_index == shot_group.attrs['configuration_index'])
     else:
@@ -387,7 +368,7 @@ def package_bes(filename=None,
                 # submit tasks to workers
                 for i, shot in enumerate(shots):
                     print(f'{shot}: submitting to worker pool ({i+1} of {shots.size})')
-                    future = executor.submit(validate_bes_data,
+                    future = executor.submit(_validate_bes_data,
                                              shot=shot,
                                              channels=channels,
                                              verbose=verbose,
@@ -411,11 +392,11 @@ def package_bes(filename=None,
             for i, shot in enumerate(shots):
                 print(
                     f'Trying {shot} ({i + 1} of {shots.size})')
-                shot = validate_bes_data(shot=shot,
-                                         channels=channels,
-                                         verbose=verbose,
-                                         with_signals=with_signals,
-                                         metafile=metafile)
+                shot = _validate_bes_data(shot=shot,
+                                          channels=channels,
+                                          verbose=verbose,
+                                          with_signals=with_signals,
+                                          metafile=metafile)
                 if shot and shot>0:
                     valid_shot_counter += 1
                     print( f'{shot} good')
@@ -423,34 +404,10 @@ def package_bes(filename=None,
                     print(f'{-shot} INVALID return value')
     t2 = time.time()
     if verbose:
-        print_metadata_summary(path=filename)
+        print_metadata_contents(path=filename)
     dt = t2 - t1
     print(f'Packaging data elapsed time: {int(dt)//3600} hr {dt%3600/60:.1f} min')
     print(f'{valid_shot_counter} valid shots out of {shots.size} in input shot list')
-
-
-def print_metadata_summary(path=None, only_8x8=False):
-    if not path:
-        path = '../elms/data/bes_metadata.hdf5'
-    if not isinstance(path, Path):
-        path = Path(path)
-    print(f'Summarizing metadata file {path.as_posix()}')
-    with h5py.File(path, 'r') as metadata_file:
-        config_8x8_group = metadata_file['configurations']['8x8_configurations']
-        config_non_8x8_group = metadata_file['configurations']['non_8x8_configurations']
-        if only_8x8:
-            traverse_h5py(config_8x8_group)
-        else:
-            traverse_h5py(path)
-        for group in [config_8x8_group, config_non_8x8_group]:
-            sum_shots = 0
-            for config_group in group.values():
-                nshots = config_group.attrs['shots'].size
-                sum_shots += nshots
-                print(f'# of shots in {config_group.name}: {nshots}')
-            print(f'Sum of shots in {group.name} group: {sum_shots}')
-            if only_8x8:
-                break
 
 
 def make_8x8_sublist(path=None,
@@ -519,4 +476,4 @@ if __name__ == '__main__':
     package_bes(shots=[164884,164883,164882,164881],
                          verbose=True,
                          with_signals=False,
-                         filename='tmp.hdf5')
+                         filename='metadata.hdf5')
