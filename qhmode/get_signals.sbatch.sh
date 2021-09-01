@@ -1,12 +1,12 @@
 #!/usr/bin/env bash
-#SBATCH -t 0-4
-#SBATCH -N1 -n8 --mem=32G
+#SBATCH -t 1-0
+#SBATCH -N1 -n8 --mem=16G
 
 date
 
 # prepare module environment
 module load edgeml
-export PYTHONPATH=${SLURM_SUBMIT_DIR}:${PYTHONPATH}
+## export PYTHONPATH=${SLURM_SUBMIT_DIR}:${PYTHONPATH}
 module -l list
 
 # activate conda environment
@@ -15,21 +15,21 @@ conda activate py38
 conda info -e
 
 # prepare work area in local scratch
-job_label="job_${SLURM_JOB_ID}"
-mkdir /local-scratch/${job_label}
-cd /local-scratch/${job_label}
+job_dir=/local-scratch/job_${SLURM_JOB_ID}
+mkdir $job_dir
+cp *metadata.hdf5 $job_dir
+cd $job_dir
 pwd -P
 
 # do work
-python -c "import elms; elms.package_metadata()" &> python.txt
+python $HOME/edgeml/qhmode/get_signals.py &> get_signals.txt
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 
 # move work from local scratch to submission area
-mkdir -p ${SLURM_SUBMIT_DIR}/data
-cd ${SLURM_SUBMIT_DIR}/data
-pwd -P
-mv /local-scratch/${job_label} ./metadata-${job_label}
+mv bes_signals*.hdf5 ${SLURM_SUBMIT_DIR}
+mv *metadata_8x8.hdf5 ${SLURM_SUBMIT_DIR}
+mv get_signals.txt ${SLURM_SUBMIT_DIR}
 
 date
 

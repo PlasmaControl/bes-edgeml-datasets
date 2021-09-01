@@ -3,64 +3,113 @@ import csv
 import time as timelib
 
 import numpy as np
+import matplotlib.pyplot as plt
 import h5py
 
-from . import bes2hdf5
-
-# establish directories and CSV files in `elms/data`
-data_directory = Path(__file__).parent / 'data'
-data_directory.mkdir(exist_ok=True)
-metadata_directory = data_directory / 'metadata'
-metadata_directory.mkdir(exist_ok=True)
-signals_directory = data_directory / 'signals-8x8-only'
-signals_directory.mkdir(exist_ok=True)
-unlabeled_elms_directory = data_directory / 'unlabeled-elm-events'
-unlabeled_elms_directory.mkdir(exist_ok=True)
-shot_list_file = data_directory / 'shotlist.csv'
-elm_list_file = data_directory / 'elm-list.csv'
+try:
+    from . import bes2hdf5
+except:
+    import bes2hdf5
 
 
-def package_metadata(max_shots=None):
-    print(f'Using shotlist {shot_list_file.as_posix()}')
-    assert(shot_list_file.exists())
-    shot_list = []
-    with shot_list_file.open() as csvfile:
-        reader = csv.DictReader(csvfile,
-                                fieldnames=None,
-                                skipinitialspace=True)
-        for irow, row in enumerate(reader):
-            shot_list.append(int(row['shot']))
-            if max_shots and irow > max_shots:
-                break
-    # filename = Path('bes_metadata.hdf5')
-    bes2hdf5.package_bes(shots=shot_list,
-                         verbose=True,
-                         with_signals=False,
-                         filename='bes_metadata.hdf5',
-                         )
+# def package_metadata(shotlist_csvfile='shotlist.csv',
+#                      max_shots=None,
+#                      output_h5file='bes_metadata.hdf5'):
+#     shotlist_csvfile = Path(shotlist_csvfile)
+#     print(f'Using shotlist {shotlist_csvfile.as_posix()}')
+#     assert(shotlist_csvfile.exists())
+#     shotlist = []
+#     with shotlist_csvfile.open() as csvfile:
+#         reader = csv.DictReader(csvfile,
+#                                 fieldnames=None,
+#                                 skipinitialspace=True)
+#         for irow, row in enumerate(reader):
+#             shotlist.append(int(row['shot']))
+#             if max_shots and irow > max_shots:
+#                 break
+#     # filename = Path('bes_metadata.hdf5')
+#     bes2hdf5.package_bes(shotlist=shotlist,
+#                          verbose=True,
+#                          with_signals=False,
+#                          output_h5file=output_h5file,
+#                          )
 
 
-def package_signals_8x8_only(max_shots=None):
-    metadata_file = metadata_directory / 'bes_metadata.hdf5'
-    print(f'Using metadata in {metadata_file.as_posix()}')
-    assert(metadata_file.exists())
-    shot_list = bes2hdf5.make_8x8_sublist(
-            path=metadata_file,
+def make_8x8_sublist(input_h5file='metadata.hdf5',
+                     upper_inboard_channel=None,
+                     verbose=False,
+                     noplot=False,
+                     rminmax=(223,227),
+                     zminmax=(-1.5,1)):
+    input_h5file = Path(input_h5file)
+    r = []
+    z = []
+    nshots = []
+    shotlist = np.array((), dtype=np.int)
+    with h5py.File(input_h5file, 'r') as metadata_file:
+        config_8x8_group = metadata_file['configurations']['8x8_configurations']
+        for name, config in config_8x8_group.items():
+            upper = config.attrs['upper_inboard_channel']
+            if upper_inboard_channel is not None and upper != upper_inboard_channel:
+                continue
+            shots = config.attrs['shots']
+            r_avg = config.attrs['r_avg']
+            z_avg = config.attrs['z_avg']
+            nshots.append(shots.size)
+            r.append(r_avg)
+            z.append(z_avg)
+            if rminmax[0] <= r_avg <= rminmax[1] and  zminmax[0] <= z_avg <= zminmax[1]:
+                shotlist = np.append(shotlist, shots)
+            if verbose:
+                print(f'8x8 config #{name} nshots {nshots[-1]} ravg {r_avg:.2f} upper {upper}')
+    print(f'Shots within r/z min/max limits: {shotlist.size}')
+    if not noplot:
+        plt.plot(r, z, 'x')
+        for i, nshot in enumerate(nshots):
+            plt.annotate(repr(nshot),
+                         (r[i], z[i]),
+                         textcoords='offset points',
+                         xytext=(0,10),
+                         ha='center')
+        plt.xlim(220, 230)
+        plt.ylim(-1.5, 1.5)
+        for r in rminmax:
+            plt.vlines(r, zminmax[0], zminmax[1], color='k')
+        for z in zminmax:
+            plt.hlines(z, rminmax[0], rminmax[1], color='k')
+        plt.xlabel('R (cm)')
+        plt.ylabel('Z (cm)')
+        plt.title('R/Z centers of BES 8x8 grids, and shot counts')
+    return shotlist
+
+
+def package_signals_8x8_only(input_h5file='metadata.hdf5',
+                             max_shots=None,
+                             output_h5file='metadata_8x8.hdf5'):
+    input_h5file = Path(input_h5file)
+    print(f'Using metadata in {input_h5file.as_posix()}')
+    assert(input_h5file.exists())
+    shot_list = make_8x8_sublist(
+            input_h5file=input_h5file,
             upper_inboard_channel=56,
             noplot=True)
     if max_shots:
         shot_list = shot_list[0:max_shots]
-    bes2hdf5.package_bes(shots=shot_list,
+    bes2hdf5.package_bes(shotlist=shot_list,
+                         output_h5file=output_h5file,
                          verbose=True,
-                         with_signals=True)
+                         with_signals=True,
+                         )
 
 
-def package_unlabeled_elm_events(max_elms=None):
-    print(f'Using ELM list file {elm_list_file.as_posix()}')
-    assert(elm_list_file.exists())
+def package_unlabeled_elm_events(elm_csvfile=None,
+                                 max_elms=None):
+    elm_csvfile = Path(elm_csvfile)
+    print(f'Using ELM list file {elm_csvfile.as_posix()}')
+    assert(elm_csvfile.exists())
     elms = []
     t1 = timelib.time()
-    with elm_list_file.open() as csvfile:
+    with elm_csvfile.open() as csvfile:
         reader = csv.DictReader(csvfile,
                                 fieldnames=None,
                                 skipinitialspace=True)
@@ -68,7 +117,9 @@ def package_unlabeled_elm_events(max_elms=None):
             elms.append({'shot': int(row['shot']),
                          'start_time': float(row['start_time']),
                          'stop_time': float(row['stop_time'])})
-    unlabeled_elm_events_file = Path('elm-events.hdf5')  # local output file
+    unlabeled_elm_events_file = Path('elm_events.hdf5')  # local output file
+    signals_directory = 'signals_8x8_only'
+    signals_directory.mkdir(exist_ok=True)
     metadata_file = signals_directory / 'bes_metadata.hdf5'
     current_shot = 0
     signal_group = None
@@ -79,8 +130,7 @@ def package_unlabeled_elm_events(max_elms=None):
             if max_elms and ielm > max_elms:
                 break
             if elm['shot'] != current_shot:
-                signal_file = signals_directory / \
-                              f"bes_signals_{elm['shot']:d}.hdf5"
+                signal_file = signals_directory / f"bes_signals_{elm['shot']:d}.hdf5"
                 if not signal_file.exists():
                     if elm['shot'] not in failed_shots:
                         print(f'File {signal_file.as_posix()} does not exist !!!')
@@ -123,11 +173,5 @@ def package_unlabeled_elm_events(max_elms=None):
     print(f'Elapsed time: {int(dt) // 3600} hr {dt % 3600 / 60:.1f} min')
 
 
-# if __name__ == '__main__':
-    # shotlist = read_shotlist()
-    # package_shotlist_metadata(max_shots=4)
-    # bes2hdf5.print_metadata_summary('data/elm_metadata/bes_metadata.hdf5', only_8x8=True)
-    # shotlist = bes2hdf5.make_8x8_sublist(path='data/elm_metadata/bes_metadata.hdf5',
-    #                                      upper_inboard_channel=56)
-    # package_8x8_sublist()
-    # package_unlabeled_elm_events()
+if __name__ == '__main__':
+    pass

@@ -1,12 +1,13 @@
 from pathlib import Path
 import time
+import csv
 import concurrent.futures
 import os
 import threading
 
 import numpy as np
+
 import h5py
-import matplotlib.pyplot as plt
 import MDSplus
 
 
@@ -341,23 +342,34 @@ def _validate_bes_data(shot=None,
     return shot
 
 
-def package_bes(filename=None,
-                shots=None,
-                channels=None,
+def package_bes(shotlist=(176778, 171472),
+                shotlist_csvfile=None,
+                max_shots=None,
+                output_h5file='metadata.hdf5',
+                channels=np.arange(1,65),
                 verbose=False,
                 with_signals=False,
                 max_workers=2,
                 use_concurrent=False):
-    if filename is None:
-        filename = '../elms/data/bes_metadata.hdf5'
-    if shots is None:
-        shots = [176778, 171472]
-    if channels is None:
-        channels = np.arange(1,65)
-    shots = np.array(shots)
+    output_h5file = Path(output_h5file)
+    if shotlist_csvfile:
+        # use CSV file with 'shot' column to create shotlist
+        shotlist_csvfile = Path(shotlist_csvfile)
+        print(f'Using shotlist {shotlist_csvfile.as_posix()}')
+        assert(shotlist_csvfile.exists())
+        shotlist = []
+        with shotlist_csvfile.open() as csvfile:
+            reader = csv.DictReader(csvfile,
+                                    fieldnames=None,
+                                    skipinitialspace=True)
+            for irow, row in enumerate(reader):
+                if max_shots and irow+1 >= max_shots:
+                    break
+                shotlist.append(int(row['shot']))
+    shotlist = np.array(shotlist)
     channels = np.array(channels)
     t1 = time.time()
-    with h5py.File(filename, 'w') as metafile:
+    with h5py.File(output_h5file.as_posix(), 'w') as h5file:
         valid_shot_counter = 0
         if use_concurrent:
             if not max_workers:
@@ -366,14 +378,14 @@ def package_bes(filename=None,
             with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                 futures = []
                 # submit tasks to workers
-                for i, shot in enumerate(shots):
-                    print(f'{shot}: submitting to worker pool ({i+1} of {shots.size})')
+                for i, shot in enumerate(shotlist):
+                    print(f'{shot}: submitting to worker pool ({i+1} of {shotlist.size})')
                     future = executor.submit(_validate_bes_data,
                                              shot=shot,
                                              channels=channels,
                                              verbose=verbose,
                                              with_signals=with_signals,
-                                             metafile=metafile,
+                                             metafile=h5file,
                                              lock=lock)
                     futures.append(future)
                 # get results as workers finish
@@ -383,20 +395,19 @@ def package_bes(filename=None,
                     shot = future.result()
                     if future.exception() is None and shot > 0:
                         valid_shot_counter += 1
-                        print(f'{shot}: work finished ({shot_count} of {shots.size})')
+                        print(f'{shot}: work finished ({shot_count} of {shotlist.size})')
                     else:
                         print(f'{-shot}: INVALID return value')
                 t_mid = time.time()
                 print(f'Worker pool elapsed time = {t_mid-t1:.2f} s')
         else:
-            for i, shot in enumerate(shots):
-                print(
-                    f'Trying {shot} ({i + 1} of {shots.size})')
+            for i, shot in enumerate(shotlist):
+                print(f'Trying {shot} ({i + 1} of {shotlist.size})')
                 shot = _validate_bes_data(shot=shot,
                                           channels=channels,
                                           verbose=verbose,
                                           with_signals=with_signals,
-                                          metafile=metafile)
+                                          metafile=h5file)
                 if shot and shot>0:
                     valid_shot_counter += 1
                     print( f'{shot} good')
@@ -404,76 +415,11 @@ def package_bes(filename=None,
                     print(f'{-shot} INVALID return value')
     t2 = time.time()
     if verbose:
-        print_metadata_contents(path=filename)
+        print_metadata_contents(path=output_h5file)
     dt = t2 - t1
     print(f'Packaging data elapsed time: {int(dt)//3600} hr {dt%3600/60:.1f} min')
-    print(f'{valid_shot_counter} valid shots out of {shots.size} in input shot list')
-
-
-def make_8x8_sublist(path=None,
-                     upper_inboard_channel=None,
-                     verbose=False,
-                     noplot=False,
-                     rminmax=(223,227),
-                     zminmax=(-1.5,1)):
-    if not path:
-        path = '../elms/data/bes_metadata.hdf5'
-    path = Path(path)
-    r = []
-    z = []
-    nshots = []
-    shotlist = np.array((), dtype=np.int)
-    with h5py.File(path, 'r') as metadata_file:
-        config_8x8_group = metadata_file['configurations']['8x8_configurations']
-        for name, config in config_8x8_group.items():
-            upper = config.attrs['upper_inboard_channel']
-            if upper_inboard_channel is not None and upper != upper_inboard_channel:
-                continue
-            shots = config.attrs['shots']
-            r_avg = config.attrs['r_avg']
-            z_avg = config.attrs['z_avg']
-            nshots.append(shots.size)
-            r.append(r_avg)
-            z.append(z_avg)
-            if rminmax[0] <= r_avg <= rminmax[1] and  zminmax[0] <= z_avg <= zminmax[1]:
-                shotlist = np.append(shotlist, shots)
-            if verbose:
-                print(f'8x8 config #{name} nshots {nshots[-1]} ravg {r_avg:.2f} upper {upper}')
-    print(f'Shots within r/z min/max limits: {shotlist.size}')
-    if not noplot:
-        plt.plot(r, z, 'x')
-        for i, nshot in enumerate(nshots):
-            plt.annotate(repr(nshot),
-                         (r[i], z[i]),
-                         textcoords='offset points',
-                         xytext=(0,10),
-                         ha='center')
-        plt.xlim(220, 230)
-        plt.ylim(-1.5, 1.5)
-        for r in rminmax:
-            plt.vlines(r, zminmax[0], zminmax[1], color='k')
-        for z in zminmax:
-            plt.hlines(z, rminmax[0], rminmax[1], color='k')
-        plt.xlabel('R (cm)')
-        plt.ylabel('Z (cm)')
-        plt.title('R/Z centers of BES 8x8 grids, and shot counts')
-    return shotlist
+    print(f'{valid_shot_counter} valid shots out of {shotlist.size} in input shot list')
 
 
 if __name__ == '__main__':
-    # shotlist = [176778, 171472, 171473, 171477,
-    #             171495, 145747, 145745, 142300,
-    #             142294, 145384, 164895, 164824]
-    # package_bes(shots=shotlist[:],
-    #             channels=np.arange(1,5),
-    #             verbose=True,
-    #             with_signals=False,
-    #             max_workers=2)
-    # data_dir = Path('/fusion/projects/diagnostics/bes/smithdr/labeled-elms/data')
-    # for h5_file in data_dir.glob('*/labeled-elm-events*.hdf5'):
-    #     print(h5_file)
-    #     traverse_h5py(h5_file, skip_subgroups=True)
-    package_bes(shots=[164884,164883,164882,164881],
-                         verbose=True,
-                         with_signals=False,
-                         filename='metadata.hdf5')
+    package_bes(verbose=True)

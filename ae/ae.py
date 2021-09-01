@@ -39,7 +39,7 @@ def package_ae(nshots=None):
     if nshots:
         shots = shots[0:nshots]
     print(shots[0], shots[-1], shots.size)
-    bes2hdf5.package_bes(shots=shots, verbose=True, with_signals=False)
+    bes2hdf5.package_bes(shotlist=shots, verbose=True, with_signals=False)
 
 
 if __name__ == '__main__':

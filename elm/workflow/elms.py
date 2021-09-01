@@ -31,7 +31,7 @@ def package_metadata(max_shots=None):
             shot_list.append(int(row['shot']))
             if max_shots and irow > max_shots:
                 break
-    bes2hdf5.package_bes(shots=shot_list,
+    bes2hdf5.package_bes(shotlist=shot_list,
                          verbose=True,
                          with_signals=False)
 
@@ -41,12 +41,12 @@ def package_signals_8x8_only(max_shots=None):
     print(f'Using metadata in {metadata_file.as_posix()}')
     assert(metadata_file.exists())
     shot_list = bes2hdf5.make_8x8_sublist(
-            path=metadata_file,
+            input_h5file=metadata_file,
             upper_inboard_channel=56,
             noplot=True)
     if max_shots:
         shot_list = shot_list[0:max_shots]
-    bes2hdf5.package_bes(shots=shot_list,
+    bes2hdf5.package_bes(shotlist=shot_list,
                          verbose=True,
                          with_signals=True)
 

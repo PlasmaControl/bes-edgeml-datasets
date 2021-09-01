@@ -5,8 +5,8 @@ in this OMFIT project:
 `/fusion/projects/diagnostics/bes/smithdr/omfit/edgeml-dataset-tools.zip`
 
 
-1) Run OMFIT script `make_shotlist.py` to perform D3DRDB query to get ELM
--relevant shots.  Returns ~ 1500 shots.  Copy output file to `data/shot-list.csv`.
+1) Run OMFIT script `make_shotlist.py` to perform D3DRDB query to get QH and LH-transition
+-relevant shots.  Returns ~ 1500 shots.  Copy output files to `data/`.
 
 2) Package BES metadata for ELM-relevant shotlist using `package_metadata()` 
 in `elms.py`. Submit a batch job using `package-metadata.slurm.sh`.  
