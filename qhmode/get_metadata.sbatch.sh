@@ -22,7 +22,18 @@ cd $job_dir
 pwd -P
 
 # do work
-python $HOME/edgeml/qhmode/get_metadata.py &> get_metadata.txt
+##python ${SLURM_SUBMIT_DIR}/get_metadata.py &> get_metadata.txt
+python - <<'HEREDOC' &> get_metadata.txt
+from bes_data_tools.bes2hdf5 import package_bes
+package_bes(
+    shotlist_csvfile='lh_shotlist.csv',
+    output_h5file='lh_metadata.hdf5',
+    verbose=True)
+package_bes(
+    shotlist_csvfile='qh_shotlist.csv',
+    output_h5file='qh_metadata.hdf5',
+    verbose=True)
+HEREDOC
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 

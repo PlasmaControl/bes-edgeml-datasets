@@ -24,7 +24,16 @@ cd $job_dir
 pwd -P
 
 # do work
-python ${SLURM_SUBMIT_DIR}/get_signals.py &> get_signals.txt
+##python ${SLURM_SUBMIT_DIR}/get_signals.py &> get_signals.txt
+python - <<'HEREDOC' &> get_signals.txt
+from bes_data_tools.package import package_signals_8x8_only
+package_signals_8x8_only(
+    input_h5file='lh_metadata.hdf5',
+    output_h5file='lh_metadata_8x8.hdf5')
+package_signals_8x8_only(
+    input_h5file='qh_metadata.hdf5',
+    output_h5file='qh_metadata_8x8.hdf5')
+HEREDOC
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 
