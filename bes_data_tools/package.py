@@ -12,29 +12,6 @@ except:
     import bes2hdf5
 
 
-# def package_metadata(shotlist_csvfile='shotlist.csv',
-#                      max_shots=None,
-#                      output_h5file='bes_metadata.hdf5'):
-#     shotlist_csvfile = Path(shotlist_csvfile)
-#     print(f'Using shotlist {shotlist_csvfile.as_posix()}')
-#     assert(shotlist_csvfile.exists())
-#     shotlist = []
-#     with shotlist_csvfile.open() as csvfile:
-#         reader = csv.DictReader(csvfile,
-#                                 fieldnames=None,
-#                                 skipinitialspace=True)
-#         for irow, row in enumerate(reader):
-#             shotlist.append(int(row['shot']))
-#             if max_shots and irow > max_shots:
-#                 break
-#     # filename = Path('bes_metadata.hdf5')
-#     bes2hdf5.package_bes(shotlist=shotlist,
-#                          verbose=True,
-#                          with_signals=False,
-#                          output_h5file=output_h5file,
-#                          )
-
-
 def make_8x8_sublist(input_h5file='metadata.hdf5',
                      upper_inboard_channel=None,
                      verbose=False,
@@ -55,10 +32,14 @@ def make_8x8_sublist(input_h5file='metadata.hdf5',
             shots = config.attrs['shots']
             r_avg = config.attrs['r_avg']
             z_avg = config.attrs['z_avg']
+            z_position = config.attrs['z_position']
             nshots.append(shots.size)
             r.append(r_avg)
             z.append(z_avg)
-            if rminmax[0] <= r_avg <= rminmax[1] and  zminmax[0] <= z_avg <= zminmax[1]:
+            delz = z_position.max() - z_position.min()
+            if rminmax[0] <= r_avg <= rminmax[1] and \
+                    zminmax[0] <= z_avg <= zminmax[1] and \
+                    delz <= 12:
                 shotlist = np.append(shotlist, shots)
             if verbose:
                 print(f'8x8 config #{name} nshots {nshots[-1]} ravg {r_avg:.2f} upper {upper}')
@@ -171,7 +152,3 @@ def package_unlabeled_elm_events(elm_csvfile=None,
     t2 = timelib.time()
     dt = t2 - t1
     print(f'Elapsed time: {int(dt) // 3600} hr {dt % 3600 / 60:.1f} min')
-
-
-if __name__ == '__main__':
-    pass

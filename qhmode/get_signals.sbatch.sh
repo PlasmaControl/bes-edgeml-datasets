@@ -14,19 +14,21 @@ module -l list
 conda activate py38
 conda info -e
 
-# prepare work area in local scratch
+# prepare job dir in local scratch and copy inputs
 job_dir=/local-scratch/job_${SLURM_JOB_ID}
 mkdir $job_dir
 cp *metadata.hdf5 $job_dir
+
+# move to job dir in local scratch
 cd $job_dir
 pwd -P
 
 # do work
-python $HOME/edgeml/qhmode/get_signals.py &> get_signals.txt
+python ${SLURM_SUBMIT_DIR}/get_signals.py &> get_signals.txt
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 
-# move work from local scratch to submission area
+# move results from local scratch to submission dir
 mv bes_signals*.hdf5 ${SLURM_SUBMIT_DIR}
 mv *metadata_8x8.hdf5 ${SLURM_SUBMIT_DIR}
 mv get_signals.txt ${SLURM_SUBMIT_DIR}
