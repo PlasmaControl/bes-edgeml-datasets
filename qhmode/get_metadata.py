@@ -1,4 +1,4 @@
-from bes_data_tools.bes2hdf5 import package_bes
+from bes_data_tools.bes_data import package_bes
 
 package_bes(
     shotlist_csvfile='lh_shotlist.csv',

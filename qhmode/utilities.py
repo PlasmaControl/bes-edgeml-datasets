@@ -1,5 +1,5 @@
-from bes_data_tools.bes2hdf5 import package_bes
-from bes_data_tools.package import package_signals_8x8_only
+from bes_data_tools.bes_data import package_bes
+from bes_data_tools.package_h5 import package_8x8_signals
 
 
 def get_metadata():
@@ -19,13 +19,13 @@ def get_metadata():
 
 
 def get_signals():
-    package_signals_8x8_only(
+    package_8x8_signals(
         input_h5file='lh_metadata.hdf5',
         output_h5file='lh_metadata_8x8.hdf5',
         max_shots=2,
     )
 
-    package_signals_8x8_only(
+    package_8x8_signals(
         input_h5file='qh_metadata.hdf5',
         output_h5file='qh_metadata_8x8.hdf5',
         max_shots=2,

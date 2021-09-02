@@ -1,3 +1,9 @@
+"""
+Plotting utilities for BES metadata and signal HDF5 files.
+
+`plot_layouts` is a function that plots BES channel layouts from metadata file.
+"""
+
 from pathlib import Path
 import matplotlib.pyplot as plt
 import h5py

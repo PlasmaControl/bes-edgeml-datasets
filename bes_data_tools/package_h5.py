@@ -1,148 +1,24 @@
+"""
+Functions to package BES metadata and signals in HDF5 files.
+
+`package_bes` is the primary function that packages metadata (signals are
+optional).
+
+`package_8x8_signals` filters metadata and saves HDF5 files for signals and
+filtered metadata.
+"""
+
 from pathlib import Path
-import time
 import csv
-import concurrent.futures
-import os
 import threading
-
+import concurrent
+import time
+import os
 import numpy as np
-
+import matplotlib.pyplot as plt
 import h5py
-import MDSplus
 
-
-class BES_Data(object):
-    _points = ['ip',
-               'bt',
-               'pinj',
-               'pinj_15l',
-               'vinj_15l',
-               'pinj_15r',
-               'vinj_15r',
-               ]
-
-    def __init__(self,
-                 shot=None,
-                 channels=None,
-                 verbose=False,
-                 get_signals=False):
-        t1 = time.time()
-        self.connection = MDSplus.Connection('atlas.gat.com')
-        if shot is None:
-            shot = 176778
-        if channels is None:
-            channels = np.arange(1, 65)
-        channels = np.array(channels)
-        self.shot = shot
-        self.channels = channels
-        self.verbose = verbose
-        self.time = None
-        self.signals = None
-        self.metadata = None
-        print(f'{self.shot}: start')
-        # get time array
-        ptdata = f'ptdata("besfu01", {self.shot})'
-        try:
-            sigtime = self.connection.get(f'dim_of({ptdata})')
-            self.time = np.array(sigtime).round(4)
-        except:
-            self.time = None
-            print(f'{self.shot}: ERROR no time data')
-            return
-        n_time = self.connection.get(f'size({ptdata})')
-        self.n_time = n_time.data()
-        assert (self.n_time == self.time.size)
-        try:
-            # get metadata
-            self.connection.openTree('bes', self.shot)
-            r_position = np.array(self.connection.get(r'\bes_r')).round(2)
-            z_position = np.array(self.connection.get(r'\bes_z')).round(2)
-            start_time = self.connection.get(r'\bes_ts')
-            self.connection.closeTree('bes', self.shot)
-        except:
-            print(f'{self.shot}: ERROR getting metadata')
-            self.time = None
-            return
-        if not start_time == self.time[0]:
-            print(f'{self.shot}: ALERT inconsistent start times: ',
-                  start_time, self.time[0])
-        self.metadata = {'shot': self.shot,
-                         'delta_time': np.diff(self.time[0:100]).mean().round(
-                             4),
-                         'start_time': self.time[0],
-                         'stop_time': self.time[-1],
-                         'n_time': self.n_time,
-                         'time_units': 'ms',
-                         'r_position': r_position,
-                         'z_position': z_position,
-                         'rz_units': 'cm',
-                         'date': ''}
-        # get ip, beams, etc.
-        for point_name in self._points:
-            try:
-                if 'inj' in point_name:
-                    self.connection.openTree('nb', self.shot)
-                    data = np.array(self.connection.get(f'\\{point_name}'))
-                    data_time = np.array(
-                            self.connection.get(f'dim_of(\\{point_name})'))
-                    if point_name == 'pinj':
-                        date = self.connection.get(
-                            f'getnci(\\{point_name}, "time_inserted")')
-                        self.metadata['date'] = date.date.decode('utf-8')
-                    self.connection.closeTree('nb', self.shot)
-                else:
-                    ptdata = f'_n = ptdata("{point_name}", {self.shot})'
-                    data = np.array(self.connection.get(ptdata))
-                    data_time = np.array(self.connection.get('dim_of(_n)'))
-                time_mask = np.logical_and(data_time >= self.time[0],
-                                           data_time <= self.time[-1])
-                data = data[time_mask]
-                data_time = data_time[time_mask]
-            except:
-                if point_name=='pinj_15l':
-                    self.time = None
-                    print(f'{self.shot}: ERROR missing pinj_15l')
-                    return
-                print(f'{self.shot}: INVALID data node for {point_name}')
-                data = h5py.Empty(dtype='f')
-                data_time = h5py.Empty(dtype='f')
-            assert (data.shape == data_time.shape)
-            setattr(self, point_name, data)
-            if point_name == 'pinj' or 'inj' not in point_name:
-                setattr(self, f'{point_name}_time', data_time)
-            if point_name =='pinj_15l':
-                if data.max() < 500e3:
-                    self.time = None
-                    print(f'{self.shot}: ERROR invalid pinj_15l')
-                    return
-        print(f'{self.shot}: {self.n_time} time points')
-        t2 = time.time()
-        print(f'{self.shot}: Metadata time = {t2 - t1:.2f} s')
-        if get_signals:
-            self.get_signals()
-
-    def get_signals(self):
-        t1 = time.time()
-        print(f'{self.shot}: fetching {self.channels.size} signals')
-        tdi_vars = []
-        tdi_assignments = []
-        for channel in self.channels:
-            var = f'_n{channel:02d}_{self.shot}'
-            tdi_vars.append(var)
-            tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
-            tdi_assignments.append(tmp)
-        self.signals = np.empty([self.channels.size, self.n_time])
-        try:
-            self.connection.get(', '.join(tdi_assignments))
-            for i, tdi_var in enumerate(tdi_vars):
-                self.signals[i, :] = self.connection.get(tdi_var)
-        except:
-            print(f'{self.shot}: ERROR fetching signals')
-            self.signals = None
-            self.time = None
-            return
-        t2 = time.time()
-        print(f'{self.shot}: Signal time = {t2 - t1:.2f} s')
+from .bes_data import BES_Data
 
 
 def print_h5py_contents(input_filename, skip_subgroups=False):
@@ -420,6 +296,72 @@ def package_bes(shotlist=(176778, 171472),
     print(f'Packaging data elapsed time: {int(dt)//3600} hr {dt%3600/60:.1f} min')
     print(f'{valid_shot_counter} valid shots out of {shotlist.size} in input shot list')
 
+def make_8x8_sublist(input_h5file='metadata.hdf5',
+                     upper_inboard_channel=None,
+                     verbose=False,
+                     noplot=False,
+                     rminmax=(223,227),
+                     zminmax=(-1.5,1)):
+    input_h5file = Path(input_h5file)
+    r = []
+    z = []
+    nshots = []
+    shotlist = np.array((), dtype=np.int)
+    with h5py.File(input_h5file, 'r') as metadata_file:
+        config_8x8_group = metadata_file['configurations']['8x8_configurations']
+        for name, config in config_8x8_group.items():
+            upper = config.attrs['upper_inboard_channel']
+            if upper_inboard_channel is not None and upper != upper_inboard_channel:
+                continue
+            shots = config.attrs['shots']
+            r_avg = config.attrs['r_avg']
+            z_avg = config.attrs['z_avg']
+            z_position = config.attrs['z_position']
+            nshots.append(shots.size)
+            r.append(r_avg)
+            z.append(z_avg)
+            delz = z_position.max() - z_position.min()
+            if rminmax[0] <= r_avg <= rminmax[1] and \
+                    zminmax[0] <= z_avg <= zminmax[1] and \
+                    delz <= 12:
+                shotlist = np.append(shotlist, shots)
+            if verbose:
+                print(f'8x8 config #{name} nshots {nshots[-1]} ravg {r_avg:.2f} upper {upper}')
+    print(f'Shots within r/z min/max limits: {shotlist.size}')
+    if not noplot:
+        plt.plot(r, z, 'x')
+        for i, nshot in enumerate(nshots):
+            plt.annotate(repr(nshot),
+                         (r[i], z[i]),
+                         textcoords='offset points',
+                         xytext=(0,10),
+                         ha='center')
+        plt.xlim(220, 230)
+        plt.ylim(-1.5, 1.5)
+        for r in rminmax:
+            plt.vlines(r, zminmax[0], zminmax[1], color='k')
+        for z in zminmax:
+            plt.hlines(z, rminmax[0], rminmax[1], color='k')
+        plt.xlabel('R (cm)')
+        plt.ylabel('Z (cm)')
+        plt.title('R/Z centers of BES 8x8 grids, and shot counts')
+    return shotlist
 
-if __name__ == '__main__':
-    package_bes(verbose=True)
+
+def package_8x8_signals(input_h5file='metadata.hdf5',
+                        max_shots=None,
+                        output_h5file='metadata_8x8.hdf5'):
+    input_h5file = Path(input_h5file)
+    print(f'Using metadata in {input_h5file.as_posix()}')
+    assert(input_h5file.exists())
+    shot_list = make_8x8_sublist(
+            input_h5file=input_h5file,
+            upper_inboard_channel=56,
+            noplot=True)
+    if max_shots:
+        shot_list = shot_list[0:max_shots]
+    package_bes(shotlist=shot_list,
+        output_h5file=output_h5file,
+        verbose=True,
+        with_signals=True,
+        )
