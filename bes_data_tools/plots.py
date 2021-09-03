@@ -9,6 +9,11 @@ import matplotlib.pyplot as plt
 import h5py
 
 
+# make standard directories
+Path('data').mkdir(exist_ok=True)
+Path('figures').mkdir(exist_ok=True)
+
+
 def plot_layouts(input_h5file=None,
                  batch_and_save=False,
                  output_pdffile='configurations.pdf'):

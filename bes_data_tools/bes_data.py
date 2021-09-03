@@ -4,10 +4,16 @@ BES_Data class
 Fetches and stores BES metadata, relevant signals, and (optionally) BES signals
 """
 
+from pathlib import Path
 import time
 import numpy as np
 import h5py
 import MDSplus
+
+
+# make standard directories
+Path('data').mkdir(exist_ok=True)
+Path('figures').mkdir(exist_ok=True)
 
 
 class BES_Data(object):
@@ -142,3 +148,10 @@ class BES_Data(object):
             return
         t2 = time.time()
         print(f'{self.shot}: Signal time = {t2 - t1:.2f} s')
+
+
+if __name__=='__main__':
+    bes_data = BES_Data(shot=184800,
+                        channels=[1,2,3,4],
+                        get_signals=True,
+                        verbose=True)

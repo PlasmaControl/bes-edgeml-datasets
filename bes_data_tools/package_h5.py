@@ -15,10 +15,17 @@ import concurrent
 import time
 import os
 import numpy as np
-import matplotlib.pyplot as plt
 import h5py
 
-from .bes_data import BES_Data
+try:
+    from .bes_data import BES_Data
+except ImportError:
+    from bes_data_tools.bes_data import BES_Data
+
+
+# make standard directories
+Path('data').mkdir(exist_ok=True)
+Path('figures').mkdir(exist_ok=True)
 
 
 def print_h5py_contents(input_filename, skip_subgroups=False):
@@ -161,10 +168,11 @@ def _validate_bes_data(shot=None,
     shot_string = f'{bes_data.shot:d}'
     # signals
     if with_signals:
+        Path('data/signals').mkdir(parents=True, exist_ok=True)
         if bes_data.signals is None:
             print(f'{bes_data.shot}: ERROR invalid BES signals')
             return -bes_data.shot
-        signal_file = f'bes_signals_{shot_string}.hdf5'
+        signal_file = f'data/signals/bes_signals_{shot_string}.hdf5'
         with h5py.File(signal_file, 'w') as sfile:
             sfile.create_dataset('signals',
                                  data=bes_data.signals,
@@ -219,31 +227,34 @@ def _validate_bes_data(shot=None,
 
 
 def package_bes(shotlist=(176778, 171472),
-                shotlist_csvfile=None,
+                input_csvfile=None,
                 max_shots=None,
-                output_h5file='metadata.hdf5',
-                channels=np.arange(1,65),
+                output_h5file='data/sample_metadata.hdf5',
+                channels=None,
                 verbose=False,
                 with_signals=False,
                 max_workers=2,
                 use_concurrent=False):
-    output_h5file = Path(output_h5file)
-    if shotlist_csvfile:
-        # use CSV file with 'shot' column to create shotlist
-        shotlist_csvfile = Path(shotlist_csvfile)
-        print(f'Using shotlist {shotlist_csvfile.as_posix()}')
-        assert(shotlist_csvfile.exists())
+    if input_csvfile:
+        # override `shotlist`
+        # use CSV file with 'shot' column to create `shotlist`
+        input_csvfile = Path(input_csvfile)
+        print(f'Using shotlist {input_csvfile.as_posix()}')
+        assert(input_csvfile.exists())
         shotlist = []
-        with shotlist_csvfile.open() as csvfile:
+        with input_csvfile.open() as csvfile:
             reader = csv.DictReader(csvfile,
                                     fieldnames=None,
                                     skipinitialspace=True)
             for irow, row in enumerate(reader):
-                if max_shots and irow+1 >= max_shots:
+                if max_shots and irow+1 > max_shots:
                     break
                 shotlist.append(int(row['shot']))
     shotlist = np.array(shotlist)
+    if channels is None:
+        channels = np.arange(1,65)
     channels = np.array(channels)
+    output_h5file = Path(output_h5file)
     t1 = time.time()
     with h5py.File(output_h5file.as_posix(), 'w') as h5file:
         valid_shot_counter = 0
@@ -296,16 +307,15 @@ def package_bes(shotlist=(176778, 171472),
     print(f'Packaging data elapsed time: {int(dt)//3600} hr {dt%3600/60:.1f} min')
     print(f'{valid_shot_counter} valid shots out of {shotlist.size} in input shot list')
 
-def make_8x8_sublist(input_h5file='metadata.hdf5',
+def make_8x8_sublist(input_h5file='data/sample_metadata.hdf5',
                      upper_inboard_channel=None,
                      verbose=False,
-                     noplot=False,
-                     rminmax=(223,227),
-                     zminmax=(-1.5,1)):
+                     r_range=(223, 227),
+                     z_range=(-1.5, 1)):
     input_h5file = Path(input_h5file)
-    r = []
-    z = []
-    nshots = []
+    # r = []
+    # z = []
+    # nshots = []
     shotlist = np.array((), dtype=np.int)
     with h5py.File(input_h5file, 'r') as metadata_file:
         config_8x8_group = metadata_file['configurations']['8x8_configurations']
@@ -317,40 +327,43 @@ def make_8x8_sublist(input_h5file='metadata.hdf5',
             r_avg = config.attrs['r_avg']
             z_avg = config.attrs['z_avg']
             z_position = config.attrs['z_position']
-            nshots.append(shots.size)
-            r.append(r_avg)
-            z.append(z_avg)
-            delz = z_position.max() - z_position.min()
-            if rminmax[0] <= r_avg <= rminmax[1] and \
-                    zminmax[0] <= z_avg <= zminmax[1] and \
-                    delz <= 12:
+            # nshots.append(shots.size)
+            # r.append(r_avg)
+            # z.append(z_avg)
+            delta_z = z_position.max() - z_position.min()
+            valid_condition = \
+                r_range[0] <= r_avg <= r_range[1] and \
+                z_range[0] <= z_avg <= z_range[1] and \
+                delta_z <= 12
+            if valid_condition:
                 shotlist = np.append(shotlist, shots)
             if verbose:
-                print(f'8x8 config #{name} nshots {nshots[-1]} ravg {r_avg:.2f} upper {upper}')
+                print(f'8x8 config #{name} nshots {shots.size} ravg {r_avg:.2f} upper {upper}')
     print(f'Shots within r/z min/max limits: {shotlist.size}')
-    if not noplot:
-        plt.plot(r, z, 'x')
-        for i, nshot in enumerate(nshots):
-            plt.annotate(repr(nshot),
-                         (r[i], z[i]),
-                         textcoords='offset points',
-                         xytext=(0,10),
-                         ha='center')
-        plt.xlim(220, 230)
-        plt.ylim(-1.5, 1.5)
-        for r in rminmax:
-            plt.vlines(r, zminmax[0], zminmax[1], color='k')
-        for z in zminmax:
-            plt.hlines(z, rminmax[0], rminmax[1], color='k')
-        plt.xlabel('R (cm)')
-        plt.ylabel('Z (cm)')
-        plt.title('R/Z centers of BES 8x8 grids, and shot counts')
+    # if not noplot:
+    #     plt.plot(r, z, 'x')
+    #     for i, nshot in enumerate(nshots):
+    #         plt.annotate(repr(nshot),
+    #                      (r[i], z[i]),
+    #                      textcoords='offset points',
+    #                      xytext=(0,10),
+    #                      ha='center')
+    #     plt.xlim(220, 230)
+    #     plt.ylim(-1.5, 1.5)
+    #     for r in rminmax:
+    #         plt.vlines(r, zminmax[0], zminmax[1], color='k')
+    #     for z in zminmax:
+    #         plt.hlines(z, rminmax[0], rminmax[1], color='k')
+    #     plt.xlabel('R (cm)')
+    #     plt.ylabel('Z (cm)')
+    #     plt.title('R/Z centers of BES 8x8 grids, and shot counts')
     return shotlist
 
 
-def package_8x8_signals(input_h5file='metadata.hdf5',
+def package_8x8_signals(input_h5file='data/sample_metadata.hdf5',
                         max_shots=None,
-                        output_h5file='metadata_8x8.hdf5'):
+                        output_h5file='data/sample_metadata_8x8.hdf5',
+                        channels=None):
     input_h5file = Path(input_h5file)
     print(f'Using metadata in {input_h5file.as_posix()}')
     assert(input_h5file.exists())
@@ -364,4 +377,17 @@ def package_8x8_signals(input_h5file='metadata.hdf5',
         output_h5file=output_h5file,
         verbose=True,
         with_signals=True,
+        channels=channels,
         )
+
+
+if __name__=='__main__':
+    # get metadata from shotlist or csv
+    package_bes(input_csvfile='data/sample_shotlist.csv',
+                max_shots=2,
+                output_h5file='data/sample_metadata.hdf5',
+                verbose=True)
+    # filter metadata and save signals
+    package_8x8_signals(input_h5file='data/sample_metadata.hdf5',
+                        output_h5file='data/sample_metadata_8x8.hdf5',
+                        channels=[1,2])

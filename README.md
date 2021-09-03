@@ -2,12 +2,22 @@
 
 Code base for BES edge-ML at DIII-D
 
-- `edgeml/` - Module for packaging BES data and metadata in HDF5.
-Do `from edgeml import bes2hdf5`.  Add `<repo-dir>/edgeml/` to
-`PYTHONPATH`.
-- `elm-dataset-workflow/` - Python and shell scripts to generate ELM-relevant
-shotlists and elm candidates
-- `elm-labeling-tool/` - GUI for interactively labeling ELM events
-- `elm-training/` - NN models for ELM classification
+- `bes_data_tools/` - package for working with BES metadata and signals
+- `elm/` - work area for ELM prediction
 - `qhmode/` - work area for QH-mode classification
 - `ae/` - work area for AE classification
+
+In all areas, data (CSV, HDF5 files) are stored in `data/`, and plot figures
+are stored in `figures/`.
+
+
+## Tutorial
+
+To learn core functionality in `bes_data_tools` package, do
+
+```bash
+cd bes_data_tools
+python bes_data.py  # class for BES metadata and signals
+python package_h5.py   # package data in HDF5 files
+python plots.py  # plotting utilities
+```

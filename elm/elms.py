@@ -1,62 +1,20 @@
 from pathlib import Path
 import csv
 import numpy as np
-from edgeml import bes2hdf5
 import h5py
 import time as timelib
 
-
-# establish directories and CSV files in `elms/data`
-data_directory = Path(__file__).parent / 'data'
-data_directory.mkdir(exist_ok=True)
-metadata_directory = data_directory / 'metadata'
-metadata_directory.mkdir(exist_ok=True)
-signals_directory = data_directory / 'signals-8x8-only'
-signals_directory.mkdir(exist_ok=True)
-unlabeled_elms_directory = data_directory / 'unlabeled-elm-events'
-unlabeled_elms_directory.mkdir(exist_ok=True)
-shot_list_file = data_directory / 'shot-list.csv'
-elm_list_file = data_directory / 'elm-list.csv'
+from bes_data_tools.package_h5 import print_h5py_contents
 
 
-def package_metadata(max_shots=None):
-    print(f'Using shotlist {shot_list_file.as_posix()}')
-    assert(shot_list_file.exists())
-    shot_list = []
-    with shot_list_file.open() as csvfile:
-        reader = csv.DictReader(csvfile,
-                                fieldnames=None,
-                                skipinitialspace=True)
-        for irow, row in enumerate(reader):
-            shot_list.append(int(row['shot']))
-            if max_shots and irow > max_shots:
-                break
-    bes2hdf5.package_bes(shotlist=shot_list,
-                         verbose=True,
-                         with_signals=False)
-
-
-def package_signals_8x8_only(max_shots=None):
-    metadata_file = metadata_directory / 'bes_metadata.hdf5'
-    print(f'Using metadata in {metadata_file.as_posix()}')
-    assert(metadata_file.exists())
-    shot_list = bes2hdf5.make_8x8_sublist(
-            input_h5file=metadata_file,
-            upper_inboard_channel=56,
-            noplot=True)
-    if max_shots:
-        shot_list = shot_list[0:max_shots]
-    bes2hdf5.package_bes(shotlist=shot_list,
-                         verbose=True,
-                         with_signals=True)
-
-
-def package_unlabeled_elm_events(max_elms=None):
-    print(f'Using ELM list file {elm_list_file.as_posix()}')
-    assert(elm_list_file.exists())
+def package_unlabeled_elm_events(elm_csvfile='labeled_elms.csv',
+                                 max_elms=None):
+    elm_csvfile = Path(elm_csvfile)
+    print(f'Using ELM list file {elm_csvfile.as_posix()}')
+    assert(elm_csvfile.exists())
     elms = []
     t1 = timelib.time()
-    with elm_list_file.open() as csvfile:
+    with elm_csvfile.open() as csvfile:
         reader = csv.DictReader(csvfile,
                                 fieldnames=None,
                                 skipinitialspace=True)
@@ -65,7 +23,7 @@ def package_unlabeled_elm_events(max_elms=None):
                          'start_time': float(row['start_time']),
                          'stop_time': float(row['stop_time'])})
     unlabeled_elm_events_file = Path('elm-events.hdf5')  # local output file
-    metadata_file = signals_directory / 'bes_metadata.hdf5'
+    metadata_file = 'bes_metadata.hdf5'
     current_shot = 0
     signal_group = None
     failed_shots = []
@@ -75,8 +33,7 @@ def package_unlabeled_elm_events(max_elms=None):
             if max_elms and ielm > max_elms:
                 break
             if elm['shot'] != current_shot:
-                signal_file = signals_directory / \
-                              f"bes_signals_{elm['shot']:d}.hdf5"
+                signal_file = f"bes_signals_{elm['shot']:d}.hdf5"
                 if not signal_file.exists():
                     if elm['shot'] not in failed_shots:
                         print(f'File {signal_file.as_posix()} does not exist !!!')
@@ -112,18 +69,8 @@ def package_unlabeled_elm_events(max_elms=None):
             elm_event_group.create_dataset('time', data=time[time_mask])
     if signal_group:
         signal_group.close()
-    bes2hdf5.print_h5py_contents(unlabeled_elm_events_file)
+    print_h5py_contents(unlabeled_elm_events_file)
     print('Failed shots:', failed_shots)
     t2 = timelib.time()
     dt = t2 - t1
     print(f'Elapsed time: {int(dt) // 3600} hr {dt % 3600 / 60:.1f} min')
-
-
-# if __name__ == '__main__':
-    # shotlist = read_shotlist()
-    # package_shotlist_metadata(max_shots=4)
-    # bes2hdf5.print_metadata_summary('data/elm_metadata/bes_metadata.hdf5', only_8x8=True)
-    # shotlist = bes2hdf5.make_8x8_sublist(path='data/elm_metadata/bes_metadata.hdf5',
-    #                                      upper_inboard_channel=56)
-    # package_8x8_sublist()
-    # package_unlabeled_elm_events()
