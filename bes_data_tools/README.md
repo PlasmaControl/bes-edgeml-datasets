@@ -13,4 +13,6 @@ with an 8x8 spatial configuration.
 
 By default, data is read from and written to `data/`, and figures are saved
 to `figures/`.  These directories are created locally wherever the package or 
-modules are imported.
+modules are imported.  Internally, data files like `shotlist.csv` are interpreted as
+`data/shotlist.csv`, and figures like `plot.pdf` are interpreted as
+`figures/plots.pdf`.

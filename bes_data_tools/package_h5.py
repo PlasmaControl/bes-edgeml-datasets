@@ -24,11 +24,23 @@ except ImportError:
 
 
 # make standard directories
-Path('data').mkdir(exist_ok=True)
-Path('figures').mkdir(exist_ok=True)
+data_dir = Path('data')
+data_dir.mkdir(exist_ok=True)
 
 
-def print_h5py_contents(input_filename, skip_subgroups=False):
+def _config_data_file(data_file, must_exist=True):
+    data_file = Path(data_file)
+    if data_dir not in data_file.parents:
+        data_file = data_dir / data_file
+    if must_exist:
+        assert(data_file.exists())
+    return data_file
+
+
+def print_h5py_contents(input_hdf5file=None,
+                        skip_subgroups=False):
+    input_hdf5file = _config_data_file(input_hdf5file)
+    print(f'Summarizing HDF5 file {input_hdf5file.as_posix()}')
     # private function to print attributes, if any
     # groups or datasets may have attributes
     def print_attributes(obj):
@@ -56,26 +68,24 @@ def print_h5py_contents(input_filename, skip_subgroups=False):
 
     # the file object functions like a group
     # it is the top-level group, known as `root` or `/`
-    print(f'Contents of {input_filename}')
-    with h5py.File(input_filename, 'r') as file:
+    print(f'Contents of {input_hdf5file.as_posix()}')
+    with h5py.File(input_hdf5file.as_posix(), 'r') as file:
         # loop over key/value pairs at file root;
         # values may be a group or dataset
         recursively_print_content(file)
 
 
-def print_metadata_contents(path=None, only_8x8=False):
-    if not path:
-        path = '../elms/data/bes_metadata.hdf5'
-    if not isinstance(path, Path):
-        path = Path(path)
-    print(f'Summarizing metadata file {path.as_posix()}')
-    with h5py.File(path, 'r') as metadata_file:
+def print_metadata_contents(input_hdf5file=None,
+                            only_8x8=False):
+    input_hdf5file = _config_data_file(input_hdf5file)
+    print(f'Summarizing metadata file {input_hdf5file.as_posix()}')
+    with h5py.File(input_hdf5file, 'r') as metadata_file:
         config_8x8_group = metadata_file['configurations']['8x8_configurations']
         config_non_8x8_group = metadata_file['configurations']['non_8x8_configurations']
         if only_8x8:
             print_h5py_contents(config_8x8_group)
         else:
-            print_h5py_contents(path)
+            print_h5py_contents(input_hdf5file)
         for group in [config_8x8_group, config_non_8x8_group]:
             sum_shots = 0
             for config_group in group.values():
@@ -168,12 +178,13 @@ def _validate_bes_data(shot=None,
     shot_string = f'{bes_data.shot:d}'
     # signals
     if with_signals:
-        Path('data/signals').mkdir(parents=True, exist_ok=True)
+        signals_dir = data_dir / 'signals'
+        signals_dir.mkdir(exist_ok=True)
         if bes_data.signals is None:
             print(f'{bes_data.shot}: ERROR invalid BES signals')
             return -bes_data.shot
-        signal_file = f'data/signals/bes_signals_{shot_string}.hdf5'
-        with h5py.File(signal_file, 'w') as sfile:
+        signal_file = signals_dir / f'bes_signals_{shot_string}.hdf5'
+        with h5py.File(signal_file.as_posix(), 'w') as sfile:
             sfile.create_dataset('signals',
                                  data=bes_data.signals,
                                  compression='gzip',
@@ -229,7 +240,7 @@ def _validate_bes_data(shot=None,
 def package_bes(shotlist=(176778, 171472),
                 input_csvfile=None,
                 max_shots=None,
-                output_h5file='data/sample_metadata.hdf5',
+                output_hdf5file='sample_metadata.hdf5',
                 channels=None,
                 verbose=False,
                 with_signals=False,
@@ -238,9 +249,8 @@ def package_bes(shotlist=(176778, 171472),
     if input_csvfile:
         # override `shotlist`
         # use CSV file with 'shot' column to create `shotlist`
-        input_csvfile = Path(input_csvfile)
+        input_csvfile = _config_data_file(input_csvfile)
         print(f'Using shotlist {input_csvfile.as_posix()}')
-        assert(input_csvfile.exists())
         shotlist = []
         with input_csvfile.open() as csvfile:
             reader = csv.DictReader(csvfile,
@@ -254,9 +264,9 @@ def package_bes(shotlist=(176778, 171472),
     if channels is None:
         channels = np.arange(1,65)
     channels = np.array(channels)
-    output_h5file = Path(output_h5file)
+    output_hdf5file = _config_data_file(output_hdf5file, must_exist=False)
     t1 = time.time()
-    with h5py.File(output_h5file.as_posix(), 'w') as h5file:
+    with h5py.File(output_hdf5file.as_posix(), 'w') as h5file:
         valid_shot_counter = 0
         if use_concurrent:
             if not max_workers:
@@ -302,22 +312,22 @@ def package_bes(shotlist=(176778, 171472),
                     print(f'{-shot} INVALID return value')
     t2 = time.time()
     if verbose:
-        print_metadata_contents(path=output_h5file)
+        print_metadata_contents(input_hdf5file=output_hdf5file)
     dt = t2 - t1
     print(f'Packaging data elapsed time: {int(dt)//3600} hr {dt%3600/60:.1f} min')
     print(f'{valid_shot_counter} valid shots out of {shotlist.size} in input shot list')
 
-def make_8x8_sublist(input_h5file='data/sample_metadata.hdf5',
+def make_8x8_sublist(input_hdf5file='sample_metadata.hdf5',
                      upper_inboard_channel=None,
                      verbose=False,
                      r_range=(223, 227),
                      z_range=(-1.5, 1)):
-    input_h5file = Path(input_h5file)
+    input_hdf5file = _config_data_file(input_hdf5file)
+    shotlist = np.array((), dtype=np.int)
     # r = []
     # z = []
     # nshots = []
-    shotlist = np.array((), dtype=np.int)
-    with h5py.File(input_h5file, 'r') as metadata_file:
+    with h5py.File(input_hdf5file, 'r') as metadata_file:
         config_8x8_group = metadata_file['configurations']['8x8_configurations']
         for name, config in config_8x8_group.items():
             upper = config.attrs['upper_inboard_channel']
@@ -327,16 +337,16 @@ def make_8x8_sublist(input_h5file='data/sample_metadata.hdf5',
             r_avg = config.attrs['r_avg']
             z_avg = config.attrs['z_avg']
             z_position = config.attrs['z_position']
+            delta_z = z_position.max() - z_position.min()
+            valid = r_range[0] <= r_avg <= r_range[1] and \
+                    z_range[0] <= z_avg <= z_range[1] and \
+                    delta_z <= 12
+            if not valid:
+                continue
+            shotlist = np.append(shotlist, shots)
             # nshots.append(shots.size)
             # r.append(r_avg)
             # z.append(z_avg)
-            delta_z = z_position.max() - z_position.min()
-            valid_condition = \
-                r_range[0] <= r_avg <= r_range[1] and \
-                z_range[0] <= z_avg <= z_range[1] and \
-                delta_z <= 12
-            if valid_condition:
-                shotlist = np.append(shotlist, shots)
             if verbose:
                 print(f'8x8 config #{name} nshots {shots.size} ravg {r_avg:.2f} upper {upper}')
     print(f'Shots within r/z min/max limits: {shotlist.size}')
@@ -360,34 +370,32 @@ def make_8x8_sublist(input_h5file='data/sample_metadata.hdf5',
     return shotlist
 
 
-def package_8x8_signals(input_h5file='data/sample_metadata.hdf5',
+def package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
                         max_shots=None,
-                        output_h5file='data/sample_metadata_8x8.hdf5',
+                        output_hdf5file='sample_metadata_8x8.hdf5',
                         channels=None):
-    input_h5file = Path(input_h5file)
-    print(f'Using metadata in {input_h5file.as_posix()}')
-    assert(input_h5file.exists())
-    shot_list = make_8x8_sublist(
-            input_h5file=input_h5file,
-            upper_inboard_channel=56,
-            noplot=True)
+    input_hdf5file = _config_data_file(input_hdf5file)
+    print(f'Using metadata in {input_hdf5file.as_posix()}')
+    shotlist = make_8x8_sublist(
+            input_hdf5file=input_hdf5file,
+            upper_inboard_channel=56)
     if max_shots:
-        shot_list = shot_list[0:max_shots]
-    package_bes(shotlist=shot_list,
-        output_h5file=output_h5file,
-        verbose=True,
-        with_signals=True,
-        channels=channels,
-        )
+        shotlist = shotlist[0:max_shots]
+    package_bes(shotlist=shotlist,
+                output_hdf5file=output_hdf5file,
+                verbose=True,
+                with_signals=True,
+                channels=channels,
+                )
 
 
 if __name__=='__main__':
     # get metadata from shotlist or csv
-    package_bes(input_csvfile='data/sample_shotlist.csv',
+    package_bes(input_csvfile='sample_shotlist.csv',
                 max_shots=2,
-                output_h5file='data/sample_metadata.hdf5',
+                output_hdf5file='sample_metadata.hdf5',
                 verbose=True)
     # filter metadata and save signals
-    package_8x8_signals(input_h5file='data/sample_metadata.hdf5',
-                        output_h5file='data/sample_metadata_8x8.hdf5',
+    package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
+                        output_hdf5file='sample_metadata_8x8.hdf5',
                         channels=[1,2])

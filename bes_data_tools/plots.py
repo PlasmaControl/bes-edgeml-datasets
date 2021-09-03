@@ -8,16 +8,30 @@ from pathlib import Path
 import matplotlib.pyplot as plt
 import h5py
 
+try:
+    from .package_h5 import _config_data_file
+except ImportError:
+    from bes_data_tools.package_h5 import _config_data_file
+
 
 # make standard directories
-Path('data').mkdir(exist_ok=True)
-Path('figures').mkdir(exist_ok=True)
+fig_dir = Path('figures')
+fig_dir.mkdir(exist_ok=True)
+
+def _config_fig_file(fig_file):
+    fig_file = Path(fig_file)
+    if fig_dir not in fig_file.parents:
+        fig_file = fig_dir / fig_file
+    return fig_file
 
 
-def plot_layouts(input_h5file=None,
+
+def plot_layouts(input_hdf5file=None,
                  batch_and_save=False,
                  output_pdffile='configurations.pdf'):
-    with h5py.File(input_h5file, 'r') as hfile:
+    input_hdf5file = _config_data_file(input_hdf5file)
+    output_pdffile = _config_fig_file(output_pdffile)
+    with h5py.File(input_hdf5file.as_posix(), 'r') as hfile:
         print(hfile.filename)
         config_groups = hfile['configurations']['8x8_configurations']
         print(f'{len(config_groups)} 8x8 configurations')
@@ -61,4 +75,4 @@ def plot_layouts(input_h5file=None,
 if __name__=='__main__':
     plt.close('all')
     h5file = Path.home() / 'edgeml/qhmode/lh_metadata_8x8.hdf5'
-    plot_layouts(input_h5file=h5file)
+    plot_layouts(input_hdf5file=h5file)

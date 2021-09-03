@@ -11,11 +11,6 @@ import h5py
 import MDSplus
 
 
-# make standard directories
-Path('data').mkdir(exist_ok=True)
-Path('figures').mkdir(exist_ok=True)
-
-
 class BES_Data(object):
     _points = ['ip',
                'bt',
