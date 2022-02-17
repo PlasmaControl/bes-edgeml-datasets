@@ -17,15 +17,16 @@ conda info -e
 # prepare job dir in local scratch and copy inputs
 job_dir=/local-scratch/job_${SLURM_JOB_ID}
 mkdir $job_dir
-cp *metadata.hdf5 $job_dir
+cp data/*metadata.hdf5 $job_dir
 
 # move to job dir in local scratch
 cd $job_dir
 pwd -P
 
+python_stdout='get_signals.out'
+
 # do work
-##python ${SLURM_SUBMIT_DIR}/get_signals.py &> get_signals.txt
-python - <<'HEREDOC' &> get_signals.txt
+python - <<'HEREDOC' &> ${python_stdout}
 from bes_data_tools.package import package_signals_8x8_only
 package_signals_8x8_only(
     input_h5file='lh_metadata.hdf5',
@@ -37,10 +38,10 @@ HEREDOC
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 
-# move results from local scratch to submission dir
-mv bes_signals*.hdf5 ${SLURM_SUBMIT_DIR}
-mv *metadata_8x8.hdf5 ${SLURM_SUBMIT_DIR}
-mv get_signals.txt ${SLURM_SUBMIT_DIR}
+# move results to submission dir
+mv ${python_stdout} ${SLURM_SUBMIT_DIR}
+mv *metadata_8x8.hdf5 ${SLURM_SUBMIT_DIR}/data/
+mv bes_signals*.hdf5 ${SLURM_SUBMIT_DIR}/data/signals/
 
 date
 

@@ -6,10 +6,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import h5py
 
-try:
-    from ...bes2hdf5 import traverse_h5py
-except:
-    from edgeml.bes2hdf5 import traverse_h5py
+from bes_data_tools.package_h5 import print_h5py_contents
 
 data_dir = Path('data')
 figure_dir = Path('figures')
@@ -48,7 +45,7 @@ def combine_labeled_data_files():
     with h5py.File(combined_data_file, 'w') as combined_data:
         for ifile, original_data_file in enumerate(original_data_files):
             print(original_data_file)
-            traverse_h5py(original_data_file, skip_subgroups=True)
+            print_h5py_contents(original_data_file, skip_subgroups=True)
             with h5py.File(original_data_file, 'r') as original_data:
                 print(original_data.attrs['labeled_elms'].size, len(original_data))
                 # assert(original_data.attrs['labeled_elms'].size == len(original_data))
@@ -74,7 +71,7 @@ def combine_labeled_data_files():
         print(f'Number of groups: {len(combined_data)}')
         assert (ensure_unique(labeled_elms))
         assert (labeled_elms.size == len(combined_data))
-    traverse_h5py(combined_data_file, skip_subgroups=True)
+    print_h5py_contents(combined_data_file, skip_subgroups=True)
 
 
 def plot_pdfs(interactive=True):
@@ -296,7 +293,7 @@ candidate_bad_elms_2 = [
 ]
 
 if __name__=='__main__':
-    # combine_labeled_data_files()
-    plt.close('all')
-    plot_pdfs_2(interactive=False)
+    combine_labeled_data_files()
+    # plt.close('all')
+    # plot_pdfs_2(interactive=False)
     # remove_labeled_elms(candidate_bad_elms_2)

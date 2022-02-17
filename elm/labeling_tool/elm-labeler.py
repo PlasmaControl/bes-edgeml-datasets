@@ -6,12 +6,12 @@ import matplotlib.pyplot as plt
 from matplotlib import widgets
 import MDSplus
 import h5py
-from edgeml import bes2hdf5
+from bes_data_tools import package_h5
+
+elm_dir = Path(__file__).parent.parent
+elm_signals_file = elm_dir / 'data/unlabeled-elm-events/elm-events.hdf5'
 
 os.chdir('/fusion/projects/diagnostics/bes/smithdr/labeled-elms')
-
-repo_directory = bes2hdf5.repo_directory
-elm_signals_file = repo_directory / 'edgeml/elm/workflow/data/unlabeled-elm-events/elm-events.hdf5'
 
 elm_labeling_directory = Path().absolute()
 valid_users = ['smithdr', 'mckee', 'yanz', 'burkem']
@@ -25,7 +25,12 @@ labeled_elms_file = user_data_directory / f'labeled-elm-events-{user_name}.hdf5'
 
 class ElmTaggerGUI(object):
 
-    def __init__(self, save_pdf=False):
+    def __init__(
+            self,
+            save_pdf=False,
+            manual_elm_list=None
+        ):
+        self.manual_elm_list = manual_elm_list
         self.time_markers = [None, None, None, None]
         self.marker_label = ['Pre-ELM start',
                              'ELM start',
@@ -108,8 +113,8 @@ class ElmTaggerGUI(object):
         for elm_index in self.label_file:
             assert(int(elm_index) in self.labeled_elms)
             assert(int(elm_index) not in self.skipped_elms)
-        for elm_index in np.concatenate((self.labeled_elms, self.skipped_elms)):
-            assert ((elm_index - user_index) % 4 == 0)
+        # for elm_index in np.concatenate((self.labeled_elms, self.skipped_elms)):
+        #     assert ((elm_index - user_index) % 4 == 0)
         print('Labeled data file is valid')
 
     def on_close(self, *args, **kwargs):
@@ -121,7 +126,7 @@ class ElmTaggerGUI(object):
             self.elm_data_file.close()
         # if self.fig and plt.fignum_exists(self.fig.number):
         #     plt.close(self.fig)
-        bes2hdf5.print_h5py_contents(labeled_elms_file)
+        package_h5.print_h5py_contents(labeled_elms_file)
 
     # def __del__(self):
     #     self.fig.close()
@@ -187,7 +192,10 @@ class ElmTaggerGUI(object):
         # data: get new ELM instance, plot new data
         rng_range = self.nelms//4-1
         while True:
-            candidate_index = self.rng.integers(0, rng_range)*4 + user_index
+            if self.manual_elm_list:
+                candidate_index = int(self.manual_elm_list.pop(0))
+            else:
+                candidate_index = self.rng.integers(0, rng_range) * 4 + user_index
             if (candidate_index in self.labeled_elms) or \
                     (candidate_index in self.skipped_elms):
                 continue
@@ -195,7 +203,7 @@ class ElmTaggerGUI(object):
                 continue
             self.elm_index = candidate_index
             break
-        assert((self.elm_index-user_index)%4 == 0)
+        # assert((self.elm_index-user_index)%4 == 0)
         elm_group = self.elm_data_file[f'{self.elm_index:05d}']
         self.shot = elm_group.attrs['shot']
         self.time = elm_group['time'][:]
@@ -342,6 +350,24 @@ class ElmTaggerGUI(object):
         plt.draw()
 
 
-ElmTaggerGUI(save_pdf=True)
+manual_elm_list = [# marginal ELMs
+                   9604, 1512, 9260, 9260, 1866, 9604, 9604, 8256,
+                   8256, 5777, 4248, 8310, 8415, 2824, 8571, 3777, 4335,
+                   1901, 4716, 642, 429, 2340, 2943, 8230, 6101,
+                   2963, 2868, 1924, 8387, 5752, 8274, 8709, 2461, 2533,
+                   8965, 929, 7542, 1088, 4, 9957, 5814, 714,
+                   756, 9282, 724, 7280, 7243, 1639, 3830, 937,
+                   8743, 4015, 1369, 8718, 4437, 7519, 4727, 8359, 5711,
+                   3762, 6067, 8625, 1503, 8019, 1196, 6261, 8922,
+                   8180, 9680, 6032, 1466, 2886, 1220,
+                   # long time-series ELMs
+                   6587, 8733, 6386,
+                   6546, 6222, 6344, 7959, 8931, 6387, 6363, 6067,
+                   8019, 6032, 5006, 6587, 9962, 331, 3777, 7200, 4716,
+                   4265, 23, 2943, 2963, 3229, 3123, 8965, 929,
+                   3860, 5814, 6869, 714, 8931, 1639, 7280, 937, 1369,
+                   3104, 1503, 1667, 7408, ]
+
+ElmTaggerGUI(save_pdf=True, manual_elm_list=None)
 
 plt.show()

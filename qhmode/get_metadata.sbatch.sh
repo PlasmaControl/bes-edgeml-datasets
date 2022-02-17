@@ -17,13 +17,14 @@ conda info -e
 # prepare work area in local scratch
 job_dir=/local-scratch/job_${SLURM_JOB_ID}
 mkdir $job_dir
-cp *shotlist.csv $job_dir
+cp data/*shotlist.csv $job_dir
 cd $job_dir
 pwd -P
 
+python_stdout='get_metadata.out'
+
 # do work
-##python ${SLURM_SUBMIT_DIR}/get_metadata.py &> get_metadata.txt
-python - <<'HEREDOC' &> get_metadata.txt
+python - <<'HEREDOC' &> ${python_stdout}
 from bes_data_tools.bes2hdf5 import package_bes
 package_bes(
     shotlist_csvfile='lh_shotlist.csv',
@@ -37,9 +38,9 @@ HEREDOC
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 
-# move work from local scratch to submission area
-mv *metadata.hdf5 ${SLURM_SUBMIT_DIR}
-mv get_metadata.txt ${SLURM_SUBMIT_DIR}
+# move results to submission dir
+mv ${python_stdout} ${SLURM_SUBMIT_DIR}
+mv *metadata.hdf5 ${SLURM_SUBMIT_DIR}/data/
 
 date
 

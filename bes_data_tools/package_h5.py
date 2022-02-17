@@ -30,10 +30,11 @@ data_dir.mkdir(exist_ok=True)
 
 def _config_data_file(data_file, must_exist=True):
     data_file = Path(data_file)
-    if data_dir not in data_file.parents:
+    if 'data' not in data_file.parent.as_posix():
         data_file = data_dir / data_file
     if must_exist:
-        assert(data_file.exists())
+        if not data_file.exists():
+            raise FileNotFoundError(f'File {data_file.as_posix()} not found.')
     return data_file
 
 
@@ -55,6 +56,7 @@ def print_h5py_contents(input_hdf5file=None,
         # loop over items in a group
         # items may be subgroup or dataset
         # items are key/value pairs
+        print(f'Group {group.name}')
         for key, value in group.items():
             if isinstance(value, h5py.Group):
                 if skip_subgroups:
@@ -63,7 +65,6 @@ def print_h5py_contents(input_hdf5file=None,
             if isinstance(value, h5py.Dataset):
                 print(f'  Dataset {key}:', value.shape, value.dtype)
                 print_attributes(value)
-        print(f'Group {group.name}')
         print_attributes(group)
 
     # the file object functions like a group
@@ -389,13 +390,33 @@ def package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
                 )
 
 
+def read_metadata(input_hdf5file='sample_metadata.hdf5',
+                  verbose=False):
+    input_hdf5file = _config_data_file(input_hdf5file)
+    with h5py.File(input_hdf5file.as_posix(), 'r') as hfile:
+        configuration_group = hfile['configurations']
+        metadata = []
+        for name, group in hfile.items():
+            if group == configuration_group:
+                continue
+            attrs = group.attrs
+            string = f"{attrs['shot']:6d}    " + \
+                     f"{attrs['date']:23}    " + \
+                     f"tstart {attrs['start_time']:6.1f}  " + \
+                     f"tstop {attrs['stop_time']:6.1f}  "
+            print(string)
+
+
+
+
 if __name__=='__main__':
-    # get metadata from shotlist or csv
-    package_bes(input_csvfile='sample_shotlist.csv',
-                max_shots=2,
-                output_hdf5file='sample_metadata.hdf5',
-                verbose=True)
-    # filter metadata and save signals
-    package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
-                        output_hdf5file='sample_metadata_8x8.hdf5',
-                        channels=[1,2])
+    # # get metadata from shotlist or csv
+    # package_bes(input_csvfile='sample_shotlist.csv',
+    #             max_shots=2,
+    #             output_hdf5file='sample_metadata.hdf5',
+    #             verbose=True)
+    # # filter metadata and save signals
+    # package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
+    #                     output_hdf5file='sample_metadata_8x8.hdf5',
+    #                     channels=[1,2])
+    read_metadata('sample_metadata.hdf5')
