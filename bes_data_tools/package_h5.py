@@ -20,7 +20,10 @@ import h5py
 try:
     from .bes_data import BES_Data
 except ImportError:
-    from bes_data_tools.bes_data import BES_Data
+    try:
+        from bes_data_tools.bes_data import BES_Data
+    except ImportError:
+        from bes_data import BES_Data
 
 
 # make standard directories
@@ -388,14 +391,38 @@ def package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
                 channels=channels,
                 )
 
+def downsample_elm_dataset(file=None):
+    assert(file is not None)
+    file = Path(file)
+    assert(file.exists())
+    newfile = file.parent / f'{file.stem}-small.hdf5'
+    with h5py.File(file, 'r') as source_h5, \
+        h5py.File(newfile, 'w') as small_h5:
+        group_names = list(source_h5.keys())
+        for group_name in group_names[::10]:
+            group = source_h5[group_name]
+            assert(isinstance(group, h5py.Group))
+            print(f'Copying group: {group.name}')
+            new_group = small_h5.create_group(group.name)
+            for dataset in group.values():
+                assert(isinstance(dataset, h5py.Dataset))
+                print(f'  Copying dataset: {dataset.name}')
+                new_group.create_dataset(dataset.name, data=dataset[:])
+            for attrname, attrvalue in group.attrs.items():
+                print(f'  Copying attribute: {attrname}')
+                new_group.attrs[attrname] = attrvalue
+
+
+
 
 if __name__=='__main__':
-    # get metadata from shotlist or csv
-    package_bes(input_csvfile='sample_shotlist.csv',
-                max_shots=2,
-                output_hdf5file='sample_metadata.hdf5',
-                verbose=True)
-    # filter metadata and save signals
-    package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
-                        output_hdf5file='sample_metadata_8x8.hdf5',
-                        channels=[1,2])
+    # # get metadata from shotlist or csv
+    # package_bes(input_csvfile='sample_shotlist.csv',
+    #             max_shots=2,
+    #             output_hdf5file='sample_metadata.hdf5',
+    #             verbose=True)
+    # # filter metadata and save signals
+    # package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
+    #                     output_hdf5file='sample_metadata_8x8.hdf5',
+    #                     channels=[1,2])
+    downsample_elm_dataset(file=Path.home() / 'Documents/Projects/data/labeled-elm-events.hdf5')
