@@ -16,9 +16,9 @@ for subdir in [data_dir, figure_dir]:
 # original labeled data
 original_data_dir = Path(
     '/fusion/projects/diagnostics/bes/smithdr/labeled-elms/data')
-assert(original_data_dir.exists())
+# assert(original_data_dir.exists())
 original_data_files = list(original_data_dir.glob('*/labeled-elm-events*.hdf5'))
-assert(original_data_files)
+# assert(original_data_files)
 
 # combined data file
 combined_data_file = data_dir / 'labeled-elm-events.hdf5'
@@ -32,6 +32,30 @@ def ensure_unique(array):
         array = np.array(array)
     array = np.sort(array)
     return np.array_equal(array, np.unique(array))
+
+
+def make_small_dataset(
+    original_file = None,
+    new_file = None,
+    max_elms = 5,
+):
+    original_file = Path(original_file)
+    assert(original_file.exists())
+
+    new_file = Path(new_file)
+
+    with h5py.File(original_file.as_posix(), 'r') as f, \
+        h5py.File(new_file.as_posix(), 'w') as nf:
+        i_elm = 0
+        for key, group in f.items():
+            new_group = nf.create_group(key)
+            for ds_key, ds_value in group.items():
+                new_group.create_dataset(ds_key, data=ds_value)
+            for attr_name, attr_value in group.attrs.items():
+                new_group.attrs[attr_name] = attr_value
+            i_elm += 1
+            if i_elm >= max_elms:
+                break
 
 
 def combine_labeled_data_files():
@@ -292,8 +316,13 @@ candidate_bad_elms_2 = [
     8906, 8934, 8950, 9575, 9838, 9894, 9898,
 ]
 
+
 if __name__=='__main__':
-    combine_labeled_data_files()
+    make_small_dataset(
+        original_file=Path.home()/'Documents/Projects/data/labeled-elm-events.hdf5',
+        new_file=Path.home()/'Documents/Projects/data/labeled-elm-events-10elms.hdf5',
+    )
+    # combine_labeled_data_files()
     # plt.close('all')
     # plot_pdfs_2(interactive=False)
     # remove_labeled_elms(candidate_bad_elms_2)
