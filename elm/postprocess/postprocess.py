@@ -37,7 +37,7 @@ def ensure_unique(array):
 def make_small_dataset(
     original_file = None,
     new_file = None,
-    max_elms = 5,
+    max_elms = 10,
 ):
     original_file = Path(original_file)
     assert(original_file.exists())
