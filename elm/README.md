@@ -8,15 +8,13 @@ in this OMFIT project:
 1) Run OMFIT script `make_shotlist.py` to perform D3DRDB query to get ELM
 -relevant shots.  Returns ~ 1500 shots.  Copy output file to `data/shot-list.csv`.
 
-2) Package BES metadata for ELM-relevant shotlist using `package_metadata()` 
-in `elms.py`. Submit a batch job using `package-metadata.slurm.sh`.  
-Gets metadata for ~ 1000 shots with BES data. Runtime ~ 1.5 hours.  when happy 
-with results, directory to `data/metadata/`.
+2) Package BES metadata for ELM-relevant shotlist using `package_bes()` 
+in `bes_data_tools/package_h5.py`. Gets metadata for ~ 1000 shots with BES data. Runtime ~ 1.5 hours.  When happy 
+with results, move directory to `data/metadata/`.
  
 3) Package BES metadata and signals for subset of shots with BES in 8x8
- configuration.  Use `package_signals_8x8_only()` in `elms.py`. Submit a batch job
- using `package-signals-8x8-only.slurm.sh`.  Returns ~ 350 shots with specified 8x8 BES data.
- Runtime ~ 11 hours.  When happy with results, directory to 
+ configuration.  Use `package_signals_8x8()` in `bes_data_toos/package_h5.py`. Returns ~ 350 shots with specified 8x8 BES data.
+ Runtime ~ 11 hours.  When happy with results, move directory to 
  `data/signals-8x8-only/`.
 
 4) Run OMFIT script `make-elm-list.py` to generate approximate timestamps for
