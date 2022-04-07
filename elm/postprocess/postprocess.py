@@ -21,7 +21,7 @@ original_data_files = list(original_data_dir.glob('*/labeled-elm-events*.hdf5'))
 # assert(original_data_files)
 
 # combined data file
-combined_data_file = data_dir / 'labeled-elm-events.hdf5'
+combined_data_file = data_dir / 'labeled-step_5_unlabeled_elm_events.hdf5'
 
 
 
@@ -319,7 +319,7 @@ candidate_bad_elms_2 = [
 
 if __name__=='__main__':
     make_small_dataset(
-        original_file=Path.home()/'Documents/Projects/data/labeled-elm-events.hdf5',
+        original_file=Path.home()/'Documents/Projects/data/labeled-step_5_unlabeled_elm_events.hdf5',
         new_file=Path.home()/'Documents/Projects/data/labeled-elm-events-10elms.hdf5',
     )
     # combine_labeled_data_files()

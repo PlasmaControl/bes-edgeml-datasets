@@ -1,80 +1,63 @@
 import time as timelib
 from pathlib import Path
-import os
+
 import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib import widgets
 import MDSplus
 import h5py
+
 from bes_data_tools import package_h5
-
-elm_dir = Path(__file__).parent.parent
-elm_signals_file = elm_dir / 'data/unlabeled-elm-events/elm-events.hdf5'
-
-os.chdir('/fusion/projects/diagnostics/bes/smithdr/labeled-elms')
-
-elm_labeling_directory = Path().absolute()
-valid_users = ['smithdr', 'mckee', 'yanz', 'burkem']
-user_name = os.environ['USER']
-user_index = valid_users.index(user_name)
-user_data_directory = Path(elm_labeling_directory / 'data' / user_name)
-user_data_directory.mkdir(parents=True, exist_ok=True)
-
-labeled_elms_file = user_data_directory / f'labeled-elm-events-{user_name}.hdf5'
 
 
 class ElmTaggerGUI(object):
 
     def __init__(
-            self,
-            save_pdf=False,
-            manual_elm_list=None
-        ):
+        self,
+        input_unlabeled_elm_event_file=None,
+        output_labeled_elm_event_filename=None,
+        save_pdf=True,
+        manual_elm_list=None
+    ):
         self.manual_elm_list = manual_elm_list
         self.time_markers = [None, None, None, None]
         self.marker_label = ['Pre-ELM start',
                              'ELM start',
                              'ELM end',
                              'Post-ELM end']
-        self.fig, self.axes = plt.subplots(ncols=3, figsize=[11.5, 4])
-        self.fig_num = self.fig.number
+        self.fig, self.axes = plt.subplots(nrows=3, figsize=[15, 8])
+        # self.fig_num = self.fig.number
         self.fig.canvas.mpl_connect('close_event', self.on_close)
         for axes in self.axes:
             axes.set_xlabel('Time (ms)')
-            axes.set_title('empty')
         self.axes[0].set_ylabel('Line avg dens (AU)')
         self.axes[1].set_ylabel('D alpha')
         self.axes[2].set_ylabel('BES')
-        plt.tight_layout(rect=(0, 0.15, 1, 1))
+        plt.suptitle('empty')
+        plt.tight_layout(rect=(0, 0.08, 1, 1))
 
         self.fig.canvas.mpl_connect('button_press_event', self.axis_click)
 
         self.save_pdf = save_pdf
 
-        # self.quit_button = widgets.Button(plt.axes([0.01, 0.05, 0.07, 0.075]),
-        #                                   'Quit',
-        #                                   color='lightsalmon',
-        #                                   hovercolor='red')
-        # self.quit_button.on_clicked(self.on_close)
-
-        self.skip_button = widgets.Button(plt.axes([0.01, 0.05, 0.07, 0.075]),
+        self.skip_button = widgets.Button(plt.axes([0.01, 0.02, 0.07, 0.04]),
                                           'Skip ELM',
                                           color='lightsalmon',
                                           hovercolor='red')
         self.skip_button.on_clicked(self.skip)
 
-        self.clear_button = widgets.Button(plt.axes([0.2, 0.05, 0.2, 0.075]),
+        self.clear_button = widgets.Button(plt.axes([0.2, 0.02, 0.2, 0.04]),
                                            'Clear markers',
                                            color='lightgray',
                                            hovercolor='darkgray')
         self.clear_button.on_clicked(self.clear_markers)
 
-        self.status_box = widgets.TextBox(plt.axes([0.5, 0.05, 0.2, 0.075]),
-                                         'Status:',
+        self.status_box = widgets.TextBox(plt.axes([0.5, 0.02, 0.2, 0.04]),
+                                          'Status:',
                                           color='w',
                                           hovercolor='w')
 
-        self.accept_button = widgets.Button(plt.axes([0.75, 0.05, 0.2, 0.075]),
+        self.accept_button = widgets.Button(plt.axes([0.75, 0.02, 0.2, 0.04]),
                                             'Accept markers',
                                             color='whitesmoke',
                                             hovercolor='whitesmoke')
@@ -82,14 +65,26 @@ class ElmTaggerGUI(object):
 
         self.multi = widgets.MultiCursor(self.fig.canvas, self.axes, color='r', lw=1)
 
-        self.elm_data_file = h5py.File(elm_signals_file, 'r')
-        self.nelms = len(self.elm_data_file)
+        assert Path(input_unlabeled_elm_event_file).exists()
+        self.unlabeled_elm_events_h5 = h5py.File(input_unlabeled_elm_event_file, 'r')
+        self.n_elms = len(self.unlabeled_elm_events_h5)
+        print(f'Unlabeled ELM event data file: {input_unlabeled_elm_event_file}')
+        print(f'  Number of ELM events: {self.n_elms}')
+        # shots = np.unique([elm_event.attrs['shot'] for elm_event in self.unlabeled_elm_events_h5.values()])
+        # print(f'  Number of unique shots: {shots.size}')
 
-        self.label_file = h5py.File(labeled_elms_file, 'a')
-        self.labeled_elms = self.label_file.attrs.setdefault('labeled_elms',
-                                                             np.array([], dtype=np.int))
-        self.skipped_elms = self.label_file.attrs.setdefault('skipped_elms',
-                                                             np.array([], dtype=np.int))
+        output_file = Path().resolve() / output_labeled_elm_event_filename
+        print(f'Output labeled ELM event file: {output_file}')
+        print(f'  File exists: {output_file.exists()}')
+        self.labeled_elm_events_h5 = h5py.File(output_file.as_posix(), 'a')
+
+        self.figures_dir = Path().resolve() / 'figures'
+        self.figures_dir.mkdir(exist_ok=True)
+
+        self.labeled_elms = self.labeled_elm_events_h5.attrs.setdefault('labeled_elms',
+                                                             np.array([], dtype=int))
+        self.skipped_elms = self.labeled_elm_events_h5.attrs.setdefault('skipped_elms',
+                                                             np.array([], dtype=int))
 
         self.validate_data_file()
 
@@ -105,36 +100,44 @@ class ElmTaggerGUI(object):
         self.vlines = []
         self.data_lines = []
         self.clear_and_get_new_elm()
+        plt.show()
 
     def validate_data_file(self):
-        if len(self.label_file) != self.labeled_elms.size:
-            self.labeled_elms = np.array([int(elm_index) for elm_index in self.label_file],
-                                         dtype=np.int)
-        for elm_index in self.label_file:
-            assert(int(elm_index) in self.labeled_elms)
-            assert(int(elm_index) not in self.skipped_elms)
-        # for elm_index in np.concatenate((self.labeled_elms, self.skipped_elms)):
-        #     assert ((elm_index - user_index) % 4 == 0)
+        if len(self.labeled_elm_events_h5) != self.labeled_elms.size:
+            self.labeled_elms = np.array([int(elm_index) for elm_index in self.labeled_elm_events_h5],
+                                         dtype=int)
+            self.labeled_elm_events_h5.attrs['labeled_elms'] = self.labeled_elms
+        for elm_index in self.labeled_elm_events_h5:
+            assert int(elm_index) in self.labeled_elms
+            assert int(elm_index) not in self.skipped_elms
         print('Labeled data file is valid')
 
-    def on_close(self, *args, **kwargs):
-        print('on_close')
-        self.validate_data_file()
-        if self.label_file:
-            self.label_file.close()
-        if self.elm_data_file:
-            self.elm_data_file.close()
-        # if self.fig and plt.fignum_exists(self.fig.number):
-        #     plt.close(self.fig)
-        package_h5.print_h5py_contents(labeled_elms_file)
+    def print_progress_summary(self):
+        print(f"Skipped ELMs: {self.skipped_elms.size}")
+        print(f"Labeled ELMs: {self.labeled_elms.size}")
+        shots, counts = np.unique(
+                [elm_event.attrs['shot'] for elm_event in self.labeled_elm_events_h5.values()],
+                return_counts=True,
+        )
+        print(f"Unique shots: {shots.size}")
+        print(f"Max ELMs for single shot: {counts.max()} ({np.count_nonzero(counts==counts.max())} shots with max)")
 
-    # def __del__(self):
-    #     self.fig.close()
+    def on_close(self, event):
+        print('on_close')
+        self.labeled_elm_events_h5.attrs['labeled_elms'] = self.labeled_elms
+        self.labeled_elm_events_h5.attrs['skipped_elms'] = self.skipped_elms
+        package_h5.print_h5py_contents(self.labeled_elm_events_h5.filename)
+        self.validate_data_file()
+        self.print_progress_summary()
+        if self.labeled_elm_events_h5:
+            self.labeled_elm_events_h5.close()
+        if self.unlabeled_elm_events_h5:
+            self.unlabeled_elm_events_h5.close()
 
     def skip(self, event):
         # log ELM index, then clear and get new ELM
         self.skipped_elms = np.append(self.skipped_elms, self.elm_index)
-        self.label_file.attrs['skipped_elms'] = self.skipped_elms
+        self.labeled_elm_events_h5.attrs['skipped_elms'] = self.skipped_elms
         self.clear_and_get_new_elm()
         plt.draw()
 
@@ -149,12 +152,11 @@ class ElmTaggerGUI(object):
 
     def accept(self, event):
         if self.save_pdf:
-            pdf_file = user_data_directory / \
+            pdf_file = self.figures_dir / \
                        f'elm_{self.elm_index:05d}_shot_{self.shot}.pdf'
             plt.savefig(pdf_file, format='pdf', transparent=True)
         self.labeled_elms = np.append(self.labeled_elms, self.elm_index)
-        self.label_file.attrs['labeled_elms'] = self.labeled_elms
-        print(f'Labeled ELMs: {self.labeled_elms.size}')
+        self.labeled_elm_events_h5.attrs['labeled_elms'] = self.labeled_elms
         self.log_elm_markers()
         self.clear_and_get_new_elm()
         plt.draw()
@@ -165,20 +167,19 @@ class ElmTaggerGUI(object):
         mask = np.logical_and(time >= self.time_markers[0],
                               time <= self.time_markers[3])
         time = time[mask]
-        signals = signals[:,mask]
+        signals = signals[:, mask]
         labels = np.zeros(time.shape, dtype=np.int8)
         mask = np.logical_and(time >= self.time_markers[1],
                               time <= self.time_markers[2])
         labels[mask] = 1
 
         groupname = f'{self.elm_index:05d}'
-        assert(groupname not in self.label_file)
-        elm_group = self.label_file.create_group(groupname)
+        assert(groupname not in self.labeled_elm_events_h5)
+        elm_group = self.labeled_elm_events_h5.create_group(groupname)
         elm_group.attrs['shot'] = self.shot
         elm_group.create_dataset('time', data=time)
         elm_group.create_dataset('signals', data=signals)
         elm_group.create_dataset('labels', data=labels)
-
 
     def clear_and_get_new_elm(self, event=None):
         # plots: remove vlines, remove data lines and legend
@@ -190,37 +191,45 @@ class ElmTaggerGUI(object):
         self.accept_button.color = 'whitesmoke'
         self.accept_button.hovercolor = 'whitesmoke'
         # data: get new ELM instance, plot new data
-        rng_range = self.nelms//4-1
+        rng_range = self.n_elms - 1
         while True:
             if self.manual_elm_list:
                 candidate_index = int(self.manual_elm_list.pop(0))
             else:
-                candidate_index = self.rng.integers(0, rng_range) * 4 + user_index
+                candidate_index = self.rng.integers(0, rng_range)
             if (candidate_index in self.labeled_elms) or \
                     (candidate_index in self.skipped_elms):
                 continue
-            if f'{candidate_index:05d}' not in self.elm_data_file:
+            if f'{candidate_index:05d}' not in self.unlabeled_elm_events_h5:
                 continue
             self.elm_index = candidate_index
+            # assert((self.elm_index-user_index)%4 == 0)
+            elm_group = self.unlabeled_elm_events_h5[f'{self.elm_index:05d}']
+            self.signals = elm_group['signals'][:, :]
+            max_signal = np.amax(self.signals[[19, 21, 23], :])
+            if max_signal < 9.9:
+                self.skipped_elms = np.append(self.skipped_elms, self.elm_index)
+                continue
+            self.shot = elm_group.attrs['shot']
+            self.time = elm_group['time'][:]
+            if self.time.size != self.signals.shape[1]:
+                self.skipped_elms = np.append(self.skipped_elms, self.elm_index)
+                continue
             break
-        # assert((self.elm_index-user_index)%4 == 0)
-        elm_group = self.elm_data_file[f'{self.elm_index:05d}']
-        self.shot = elm_group.attrs['shot']
-        self.time = elm_group['time'][:]
-        self.signals = elm_group['signals'][:,:]
         self.start_time = self.time[0]
         self.stop_time = self.time[-1]
         print(f'ELM index {self.elm_index}  shot {self.shot}')
         for axes in self.axes:
             axes.set_prop_cycle(None)
+        plt.suptitle(f'Shot {self.shot} | ELM index {self.elm_index}')
         self.plot_density()
         self.plot_bes()
         self.plot_dalpha()
-        for axes in self.axes:
+        for axes in self.axes.flat:
             plt.sca(axes)
             plt.legend(loc='upper right')
-            plt.title(f'Shot {self.shot} | ELM index {self.elm_index}')
             plt.xlim(self.start_time, self.stop_time)
+        self.print_progress_summary()
         plt.draw()
 
     def plot_density(self):
@@ -265,7 +274,7 @@ class ElmTaggerGUI(object):
 
     def plot_bes(self):
         plt.sca(self.axes[2])
-        decimate = self.time.size // 1500 + 1
+        decimate = self.time.size // 1000 + 1
         time = self.time[::decimate]
         for i_signal in [20, 22, 24]:
             data = self.signals[i_signal-1, ::decimate]
@@ -350,7 +359,7 @@ class ElmTaggerGUI(object):
         plt.draw()
 
 
-manual_elm_list = [# marginal ELMs
+manual_elm_list = [  # marginal ELMs
                    9604, 1512, 9260, 9260, 1866, 9604, 9604, 8256,
                    8256, 5777, 4248, 8310, 8415, 2824, 8571, 3777, 4335,
                    1901, 4716, 642, 429, 2340, 2943, 8230, 6101,
@@ -368,6 +377,14 @@ manual_elm_list = [# marginal ELMs
                    3860, 5814, 6869, 714, 8931, 1639, 7280, 937, 1369,
                    3104, 1503, 1667, 7408, ]
 
-ElmTaggerGUI(save_pdf=True, manual_elm_list=None)
 
-plt.show()
+if __name__=='__main__':
+    ElmTaggerGUI(
+        input_unlabeled_elm_event_file=(
+                Path().resolve().parent /
+                'data/step_5_unlabeled_elm_events_long_windows.hdf5'
+        ),
+        output_labeled_elm_event_filename='step_6_labeled_elm_events.hdf5',
+        save_pdf=True,
+        manual_elm_list=None,
+    )

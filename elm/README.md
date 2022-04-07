@@ -1,35 +1,41 @@
 # Workflow for generating ELM dataset
 
-OMFIT scripts discussed below are available under `elm-dataset-tools`
-in this OMFIT project:
+OMFIT scripts discussed below are available under `elm-tools` in this OMFIT project:
 `/fusion/projects/diagnostics/bes/smithdr/omfit/edgeml-dataset-tools.zip`
 
+Workflow steps:
 
-1) Run OMFIT script `make_shotlist.py` to perform D3DRDB query to get ELM
--relevant shots.  Returns ~ 1500 shots.  Copy output file to `data/shot-list.csv`.
+1) Use OMFIT to perform D3DRDB query to get ELM-relevant shots.
+Under `elm_tools` in OMFIT project, run `step_1_make_shotlist.py`.
+Returns ~ 1500 shots.
+Copy output file to `data/step_1_shotlist.csv`.
 
-2) Package BES metadata for ELM-relevant shotlist using `package_bes()` 
-in `bes_data_tools/package_h5.py`. Gets metadata for ~ 1000 shots with BES data. Runtime ~ 1.5 hours.  When happy 
-with results, move directory to `data/metadata/`.
+2) Run batch job and python script to get metadata for ~ 1000 shots with BES data.
+Submit batch job `step_2_package_metadata.sbatch.sh` which runs `bes_data_tools.package_h5.package_bes()`.
+Runtime ~ 1.5 hours.
+When happy with results, copy to `data/step_2_metadata.hdf5`.
  
-3) Package BES metadata and signals for subset of shots with BES in 8x8
- configuration.  Use `package_signals_8x8()` in `bes_data_toos/package_h5.py`. Returns ~ 350 shots with specified 8x8 BES data.
- Runtime ~ 11 hours.  When happy with results, move directory to 
- `data/signals-8x8-only/`.
+3) Run batch job and python script to package metadata and BES signals 
+for shots with valid 8x8 BES configuration.
+Submit batch job `step_3_package_signals_8x8_only.sbatch.sh` which runs `bes_data_tools.package_h5.package_signals_8x8()`.
+Returns ~ 350 shots with specified 8x8 BES data.
+Runtime ~ 11 hours.
+When happy with results, move directory to `data/step_3_signals_8x8_only/`.
 
-4) Run OMFIT script `make-elm-list.py` to generate approximate timestamps for
- ELM events. Link metadata file `data/signals-8x8-only/bes_metadata.hdf5` in
- OMFIT tree as `8x8-metadata`. Runtime ~ 1 hour. Copy output file to 
- `data/elm-list.csv`.
+4) Use OMFIT to generate approximate timestamps for ELM events.
+Link metadata file `data/step_3_signals_8x8_only/step_3_metadata.hdf5`
+in OMFIT tree as `step_3_8x8_metadata`.
+Run OMFIT script `step_4_make_elm_list.py`.
+Runtime ~ 1 hour.
+Copy output file to  `data/step_4_elm_list.csv`.
 
-5) Using BES signals from 3) and approximate ELM timestamps from 4), create a
-dataset with only ELM-relevent time windows by running 
-`package-unlabeled-elm-events()` in `elms.py`.  
-Submit batch job with `package-unlabeled-elm-events.sbatch.sh`.
-Runtime ~ 1 hour.  When happy with results, rename directory to 
-`data/unlabeled-elm-events/`.
+5) Run batch job and python script to create unlabeled dataset with unique ELM events.
+Submit batch job with `step_5_package-unlabeled-elm-events.sbatch.sh` which runs 
+`package-unlabeled-elm-events()` in `elms.py`.
+Runtime ~ 1 hour.
+When happy with results, rename directory to `data/step_5_unlabeled_elm_events/`.
 
-6) Run the ELM labeler tool in `../elm-labeling-tool/elm-labeler.py`.
+6) Run the ELM labeler tool in `step_6_labeling_tool/elm-labeler.py`.
 The user selects timeslices for 'no elm', 'start elm', 'stop elm', and 'end'.
 
 

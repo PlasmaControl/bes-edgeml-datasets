@@ -488,7 +488,7 @@ if __name__ == "__main__":
         f"elm_classification/model_checkpoints/signal_window_{sws}/multi_features_lookahead_{la}_unprocessed.pth",
     )
 
-    unlabeled_data_path = "elm-events.hdf5"
+    unlabeled_data_path = "step_5_unlabeled_elm_events.hdf5"
 
     # instantiate model
     model = get_model(sws)
