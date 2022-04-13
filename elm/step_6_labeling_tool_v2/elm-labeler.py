@@ -127,6 +127,7 @@ class ElmTaggerGUI(object):
         self.labeled_elm_events_h5.attrs['labeled_elms'] = self.labeled_elms
         self.labeled_elm_events_h5.attrs['skipped_elms'] = self.skipped_elms
         package_h5.print_h5py_contents(self.labeled_elm_events_h5.filename)
+        self.labeled_elm_events_h5.flush()
         self.validate_data_file()
         self.print_progress_summary()
         if self.labeled_elm_events_h5:
@@ -138,6 +139,7 @@ class ElmTaggerGUI(object):
         # log ELM index, then clear and get new ELM
         self.skipped_elms = np.append(self.skipped_elms, self.elm_index)
         self.labeled_elm_events_h5.attrs['skipped_elms'] = self.skipped_elms
+        self.labeled_elm_events_h5.flush()
         self.clear_and_get_new_elm()
         plt.draw()
 
@@ -158,6 +160,7 @@ class ElmTaggerGUI(object):
         self.labeled_elms = np.append(self.labeled_elms, self.elm_index)
         self.labeled_elm_events_h5.attrs['labeled_elms'] = self.labeled_elms
         self.log_elm_markers()
+        self.labeled_elm_events_h5.flush()
         self.clear_and_get_new_elm()
         plt.draw()
 
@@ -229,6 +232,7 @@ class ElmTaggerGUI(object):
             plt.sca(axes)
             plt.legend(loc='upper right')
             plt.xlim(self.start_time, self.stop_time)
+        self.labeled_elm_events_h5.flush()
         self.print_progress_summary()
         plt.draw()
 
