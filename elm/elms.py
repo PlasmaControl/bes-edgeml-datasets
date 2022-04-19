@@ -77,5 +77,75 @@ def package_unlabeled_elm_events(elm_csvfile='data/step_4_elm_list.csv',
     dt = t2 - t1
     print(f'Elapsed time: {int(dt) // 3600} hr {dt % 3600 / 60:.1f} min')
 
+
+def add_elm_events(dry_run=True):
+    current_file = Path('step_6_labeling_tool_v2/step_6_labeled_elm_events.hdf5').resolve()
+    assert current_file.exists()
+    print(f"Current file: {current_file}")
+
+    old_file = Path('postprocess/data/labeled-elm-events-2022-01-27.hdf5').resolve()
+    assert old_file.exists()
+    print(f"Old file: {old_file}")
+
+    with h5py.File(current_file, 'a') as cf, \
+            h5py.File(old_file, 'r') as of:
+
+        current_keys = np.unique([int(key) for key in cf])
+        print(f"Current file events: {current_keys.size}")
+        cf.attrs['labeled_elms'] = np.array([int(elm_event_key) for elm_event_key in cf], dtype=int)
+        cf.flush()
+        print(f"Current file labeled: {cf.attrs['labeled_elms'].size} skipped: {cf.attrs['skipped_elms'].size}")
+
+        old_keys = np.unique([int(key) for key in of])
+        print(f"Old file events: {old_keys.size}")
+        print(f"Old file labeled: {of.attrs['labeled_elms'].size} skipped: {of.attrs['skipped_elms'].size}")
+
+        # cf_skipped_elms = np.unique(np.append(cf_skipped_elms, of_skipped_elms))
+        # cf.attrs['skipped_elms'] = cf_skipped_elms
+        # cf.flush()
+        # print(f"Updated current file labeled: {cf_labeled_elms.size} skipped: {cf_skipped_elms.size}")
+
+        not_present_count = 0
+        for elm_event_key, elm_event in of.items():
+            assert isinstance(elm_event, h5py.Group)
+            assert 'labels' in elm_event
+            labels = np.array(elm_event['labels'], dtype=int)
+            last_inactive_elm = np.nonzero(labels==1)[0][0] - 1
+            assert last_inactive_elm > 0
+            if last_inactive_elm < 3400:
+                continue
+            print(f"ELM {elm_event_key} pre-ELM perioed: {last_inactive_elm}"
+            f"\t In current file?: {elm_event_key in cf}")
+            if elm_event_key not in cf:
+                elm_event_id = int(elm_event_key)
+                assert elm_event_id not in cf.attrs['labeled_elms']
+                if elm_event_id in cf.attrs['skipped_elms']:
+                    print(f"  In `skipped_elms` in current file, continuing")
+                    continue
+                not_present_count += 1
+                if not dry_run:
+                    new_group = cf.create_group(name=elm_event_key)
+                    for key, value in elm_event.items():
+                        new_group.create_dataset(name=key, data=value)
+                    for attr_key, attr_value in elm_event.attrs.items():
+                        new_group.attrs[attr_key] = attr_value
+                    cf_labeled_elms = np.append(cf_labeled_elms, elm_event_id)
+                    cf.attrs['labeled_elms'] = cf_labeled_elms
+                    cf.flush()
+
+        print(f"New ELM events to add: {not_present_count}")
+
+        for elm_event_key, elm_event in cf.items():
+            elm_event_id  = int(elm_event_key)
+            assert elm_event_id in cf.attrs['labeled_elms']
+            if elm_event_id in cf.attrs['skipped_elms']:
+                print(f"Event {elm_event_key} is in `skipped_elms`")
+                del cf[elm_event_key]
+                assert elm_event_key not in cf
+                print("  Removed")
+
+
+
 if __name__=='__main__':
-    package_unlabeled_elm_events(max_elms=3)
+    # package_unlabeled_elm_events(max_elms=3)
+    add_elm_events(dry_run=False)
