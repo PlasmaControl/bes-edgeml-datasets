@@ -1,5 +1,9 @@
 import time as timelib
 from pathlib import Path
+import subprocess
+import shutil
+from typing import Sequence, Union
+
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -381,6 +385,30 @@ manual_elm_list = [  # marginal ELMs
                    3860, 5814, 6869, 714, 8931, 1639, 7280, 937, 1369,
                    3104, 1503, 1667, 7408, ]
 
+def merge_pdfs():
+    inputs = sorted(Path().glob('figures/elm*.pdf'))
+    output = Path('labeled_elms.pdf')
+    gs_cmd = shutil.which('gs')
+    if gs_cmd is None:
+        return
+    if output.exists():
+        output.unlink()
+    print(f"Merging PDFs into file: {output.as_posix()}")
+    cmd = [
+        gs_cmd,
+        '-q',
+        '-dBATCH',
+        '-dNOPAUSE',
+        '-sDEVICE=pdfwrite',
+        '-dPDFSETTINGS=/prepress',
+        '-dCompatibilityLevel=1.4',
+    ]
+    cmd.append(f"-sOutputFile={output.as_posix()}")
+    for pdf_file in inputs:
+        cmd.append(f"{pdf_file.as_posix()}")
+    result = subprocess.run(cmd, check=True)
+    assert result.returncode == 0 and output.exists()
+
 
 if __name__=='__main__':
     ElmTaggerGUI(
@@ -392,3 +420,4 @@ if __name__=='__main__':
         save_pdf=True,
         manual_elm_list=None,
     )
+    # merge_pdfs()
