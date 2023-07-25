@@ -21,7 +21,8 @@ class ElmTaggerGUI(object):
         input_unlabeled_elm_event_file=None,
         output_labeled_elm_event_filename=None,
         save_pdf=True,
-        manual_elm_list=None
+        manual_elm_list=None,
+        merge_pdfs_on_close=True,
     ):
         self.manual_elm_list = manual_elm_list
         self.time_markers = [None, None, None, None]
@@ -71,10 +72,13 @@ class ElmTaggerGUI(object):
 
         assert Path(input_unlabeled_elm_event_file).exists()
         self.unlabeled_elm_events_h5 = h5py.File(input_unlabeled_elm_event_file, 'r')
+        self.candidate_elms = np.array([int(elm_key) for elm_key in self.unlabeled_elm_events_h5], dtype=int)
         self.n_elms = len(self.unlabeled_elm_events_h5)
+        self.last_index = self.candidate_elms.max()
+        # shots = np.unique([elm_event.attrs['shot'] for elm_event in self.unlabeled_elm_events_h5.values()])
         print(f'Unlabeled ELM event data file: {input_unlabeled_elm_event_file}')
         print(f'  Number of ELM events: {self.n_elms}')
-        # shots = np.unique([elm_event.attrs['shot'] for elm_event in self.unlabeled_elm_events_h5.values()])
+        print(f'  Last ELM index: {self.last_index}')
         # print(f'  Number of unique shots: {shots.size}')
 
         output_file = Path().resolve() / output_labeled_elm_event_filename
@@ -93,6 +97,13 @@ class ElmTaggerGUI(object):
         self.validate_data_file()
 
         self.rng = np.random.default_rng()
+
+        self.remaining_candidate_elms = np.setxor1d(self.candidate_elms, self.labeled_elms, assume_unique=True)
+        self.remaining_candidate_elms = np.setxor1d(self.remaining_candidate_elms, self.skipped_elms, assume_unique=True)
+        self.rng.shuffle(self.remaining_candidate_elms)
+        print(f"Remaining candidate ELMs: {self.remaining_candidate_elms.size}")
+        # assert (self.remaining_candidate_elms.size + self.labeled_elms.size + self.skipped_elms.size) == self.candidate_elms.size
+
         self.elm_index = None
         self.shot = None
         self.start_time = None
@@ -100,9 +111,11 @@ class ElmTaggerGUI(object):
         self.time = None
         self.signals = None
         self.connection = MDSplus.Connection('atlas.gat.com')
+        self.merge_pdfs_on_close = merge_pdfs_on_close
 
         self.vlines = []
         self.data_lines = []
+        # plt.show()
         self.clear_and_get_new_elm()
         plt.show()
 
@@ -119,6 +132,7 @@ class ElmTaggerGUI(object):
     def print_progress_summary(self):
         print(f"Skipped ELMs: {self.skipped_elms.size}")
         print(f"Labeled ELMs: {self.labeled_elms.size}")
+        print(f"Remaining candidate ELMs: {self.remaining_candidate_elms.size}")
         shots, counts = np.unique(
                 [elm_event.attrs['shot'] for elm_event in self.labeled_elm_events_h5.values()],
                 return_counts=True,
@@ -138,6 +152,8 @@ class ElmTaggerGUI(object):
             self.labeled_elm_events_h5.close()
         if self.unlabeled_elm_events_h5:
             self.unlabeled_elm_events_h5.close()
+        if self.merge_pdfs_on_close:
+            merge_pdfs()
 
     def skip(self, event):
         # log ELM index, then clear and get new ELM
@@ -198,12 +214,19 @@ class ElmTaggerGUI(object):
         self.accept_button.color = 'whitesmoke'
         self.accept_button.hovercolor = 'whitesmoke'
         # data: get new ELM instance, plot new data
-        rng_range = self.n_elms - 1
+        # rng_range = self.n_elms - 1
+        # attempts = 0
         while True:
-            if self.manual_elm_list:
-                candidate_index = int(self.manual_elm_list.pop(0))
-            else:
-                candidate_index = self.rng.integers(0, rng_range)
+            # attempts += 1
+            # if self.manual_elm_list:
+            #     candidate_index = int(self.manual_elm_list.pop(0))
+            # else:
+            #     candidate_index = self.rng.integers(0, rng_range+375)
+            if self.remaining_candidate_elms.size == 0:
+                print("No candidate ELMs remaining, closing")
+                self.on_close()
+            candidate_index, self.remaining_candidate_elms = \
+                self.remaining_candidate_elms[0], self.remaining_candidate_elms[1:]
             if (candidate_index in self.labeled_elms) or \
                     (candidate_index in self.skipped_elms):
                 continue
@@ -367,24 +390,6 @@ class ElmTaggerGUI(object):
         plt.draw()
 
 
-manual_elm_list = [  # marginal ELMs
-                   9604, 1512, 9260, 9260, 1866, 9604, 9604, 8256,
-                   8256, 5777, 4248, 8310, 8415, 2824, 8571, 3777, 4335,
-                   1901, 4716, 642, 429, 2340, 2943, 8230, 6101,
-                   2963, 2868, 1924, 8387, 5752, 8274, 8709, 2461, 2533,
-                   8965, 929, 7542, 1088, 4, 9957, 5814, 714,
-                   756, 9282, 724, 7280, 7243, 1639, 3830, 937,
-                   8743, 4015, 1369, 8718, 4437, 7519, 4727, 8359, 5711,
-                   3762, 6067, 8625, 1503, 8019, 1196, 6261, 8922,
-                   8180, 9680, 6032, 1466, 2886, 1220,
-                   # long time-series ELMs
-                   6587, 8733, 6386,
-                   6546, 6222, 6344, 7959, 8931, 6387, 6363, 6067,
-                   8019, 6032, 5006, 6587, 9962, 331, 3777, 7200, 4716,
-                   4265, 23, 2943, 2963, 3229, 3123, 8965, 929,
-                   3860, 5814, 6869, 714, 8931, 1639, 7280, 937, 1369,
-                   3104, 1503, 1667, 7408, ]
-
 def merge_pdfs():
     inputs = sorted(Path().glob('figures/elm*.pdf'))
     output = Path('labeled_elms.pdf')
@@ -393,7 +398,8 @@ def merge_pdfs():
         return
     if output.exists():
         output.unlink()
-    print(f"Merging PDFs into file: {output.as_posix()}")
+    print(f"Number of source files: {len(inputs)}")
+    print(f"Merging PDFs into file: {output.as_posix()}  (this can take ~30 s)")
     cmd = [
         gs_cmd,
         '-q',
@@ -408,6 +414,7 @@ def merge_pdfs():
         cmd.append(f"{pdf_file.as_posix()}")
     result = subprocess.run(cmd, check=True)
     assert result.returncode == 0 and output.exists()
+    print("Success")
 
 
 if __name__=='__main__':
@@ -419,5 +426,5 @@ if __name__=='__main__':
         output_labeled_elm_event_filename='step_6_labeled_elm_events.hdf5',
         save_pdf=True,
         manual_elm_list=None,
+        merge_pdfs_on_close=False,
     )
-    # merge_pdfs()
