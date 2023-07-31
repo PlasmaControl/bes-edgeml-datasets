@@ -11,7 +11,7 @@ filtered metadata.
 from pathlib import Path
 import csv
 import threading
-import concurrent
+import concurrent.futures
 import time
 import os
 import numpy as np
@@ -104,15 +104,13 @@ def print_metadata_contents(input_hdf5file=None,
 def _validate_configuration(input_bes_data,
                             config_8x8_group,
                             config_non_8x8_group):
-    max_index = np.array([0, 100])
+    max_index = np.array([0, 1000])
     r_position = input_bes_data.metadata['r_position']
     z_position = input_bes_data.metadata['z_position']
     for igroup, config_group in enumerate([config_8x8_group,
                                            config_non_8x8_group]):
         for config_index_str, config in config_group.items():
-            if config_index_str.startswith('0'):
-                config_index_str = config_index_str[1]
-            config_index = eval(config_index_str)
+            config_index = int(config_index_str)
             assert (isinstance(config, h5py.Group))
             assert ('r_position' in config.attrs and
                     'z_position' in config.attrs and
@@ -134,30 +132,21 @@ def _validate_configuration(input_bes_data,
                                                   input_bes_data.shot)
                 config.attrs['nshots'] = config.attrs['shots'].size
             return config_index
-    print(f'{input_bes_data.shot}: Configuration does not match existing configuration')
     # now test for 8x8 configuration
-    config_is_8x8 = True
-    for i in np.arange(8):
-        rdiff = np.diff(r_position[i + np.arange(8) * 8])
-        col_test = np.allclose(rdiff, np.zeros(rdiff.shape), atol=0.1)
-        zdiff = np.diff(z_position[i * 8 + np.arange(8)])
-        row_test = np.allclose(zdiff, np.zeros(zdiff.shape), atol=0.1)
-        config_is_8x8 = config_is_8x8 and col_test and row_test
-        if not config_is_8x8:
-            break
+    config_is_8x8 = input_bes_data.metadata['is_8x8']
     if config_is_8x8:
         new_index = max_index[0] + 1
         print(f'{input_bes_data.shot}: New 8x8 config index is {new_index}')
-        new_config = config_8x8_group.create_group(f'{new_index:02d}')
-        new_config.attrs['r_avg'] = np.mean(r_position).round(2)
-        new_config.attrs['z_avg'] = np.mean(z_position).round(2)
+        new_config = config_8x8_group.create_group(f'{new_index:04d}')
+        new_config.attrs['r_avg'] = input_bes_data.metadata['r_avg']
+        new_config.attrs['z_avg'] = input_bes_data.metadata['z_avg']
         z_first_column = z_position[np.arange(8) * 8]
         new_config.attrs['upper_inboard_channel'] = z_first_column.argmax() * 8
         new_config.attrs['lower_inboard_channel'] = z_first_column.argmin() * 8
     else:
         new_index = max_index[1] + 1
         print(f'{input_bes_data.shot}: New non-8x8 config index is {new_index}')
-        new_config = config_non_8x8_group.create_group(f'{new_index:d}')
+        new_config = config_non_8x8_group.create_group(f'{new_index:04d}')
     new_config.attrs['r_position'] = r_position
     new_config.attrs['z_position'] = z_position
     new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=np.int)
@@ -170,43 +159,36 @@ def _validate_bes_data(shot=None,
                        verbose=False,
                        with_signals=False,
                        metafile=None,
-                       lock=None):
+                       lock=None,
+                       only_8x8=True,
+                       only_standard_8x8=True,
+                       ):
 
-    bes_data = BES_Data(shot=shot,
-                        channels=channels,
-                        verbose=verbose,
-                        get_signals=with_signals)
+    bes_data = BES_Data(
+            shot=shot,
+            channels=channels,
+            verbose=verbose,
+            get_signals=with_signals,
+            only_8x8=only_8x8,
+            only_standard_8x8=only_standard_8x8,
+    )
     if bes_data.time is None:
         print(f'{bes_data.shot}: ERROR invalid BES_Data object')
-        return -bes_data.shot
+        return -1
     shot_string = f'{bes_data.shot:d}'
-    # signals
-    if with_signals:
-        signals_dir = data_dir / 'signals'
-        signals_dir.mkdir(exist_ok=True)
-        if bes_data.signals is None:
-            print(f'{bes_data.shot}: ERROR invalid BES signals')
-            return -bes_data.shot
-        signal_file = signals_dir / f'bes_signals_{shot_string}.hdf5'
-        with h5py.File(signal_file.as_posix(), 'w') as sfile:
-            sfile.create_dataset('signals',
-                                 data=bes_data.signals,
-                                 compression='gzip',
-                                 chunks=True)
-            sfile.create_dataset('time',
-                                 data=bes_data.time,
-                                 compression='gzip',
-                                 chunks=True)
-        if verbose:
-            print_h5py_contents(signal_file)
-        signal_mb = bes_data.signals.nbytes // 1024 // 1024
-        print(f'{bes_data.shot}: BES_Data size = {signal_mb} MB')
     # metadata attributes
     if lock:
         lock.acquire()
     configuration_group = metafile.require_group('configurations')
     config_8x8_group = configuration_group.require_group('8x8_configurations')
     config_non_8x8_group = configuration_group.require_group('non_8x8_configurations')
+    config_index = _validate_configuration(bes_data,
+                                           config_8x8_group,
+                                           config_non_8x8_group)
+    if only_8x8:
+        if config_index >= 1000:
+            print(f'{bes_data.shot}: ERROR not 8x8 config')
+            return -1
     shot_group = metafile.require_group(shot_string)
     for attr_name, attr_value in bes_data.metadata.items():
         if attr_name in shot_group.attrs:
@@ -218,9 +200,6 @@ def _validate_bes_data(shot=None,
                 assert (attr_value == shot_group.attrs[attr_name])
         else:
             shot_group.attrs[attr_name] = attr_value
-    config_index = _validate_configuration(bes_data,
-                                           config_8x8_group,
-                                           config_non_8x8_group)
     if 'configuration_index' in shot_group.attrs:
         assert (config_index == shot_group.attrs['configuration_index'])
     else:
@@ -237,19 +216,43 @@ def _validate_bes_data(shot=None,
                                        dtype=data.dtype)
     if lock:
         lock.release()
-    del bes_data
+    # signals
+    if with_signals:
+        signals_dir = data_dir / 'signals'
+        signals_dir.mkdir(exist_ok=True)
+        if bes_data.signals is None:
+            print(f'{bes_data.shot}: ERROR invalid BES signals')
+            return -1
+        signal_file = signals_dir / f'bes_signals_{shot_string}.hdf5'
+        with h5py.File(signal_file.as_posix(), 'w') as sfile:
+            sfile.create_dataset('signals',
+                                 data=bes_data.signals,
+                                 compression='gzip',
+                                 chunks=True)
+            sfile.create_dataset('time',
+                                 data=bes_data.time,
+                                 compression='gzip',
+                                 chunks=True)
+        if verbose:
+            print_h5py_contents(signal_file)
+        signal_mb = bes_data.signals.nbytes // 1024 // 1024
+        print(f'{bes_data.shot}: BES_Data size = {signal_mb} MB')
     return shot
 
 
-def package_bes(shotlist=(176778, 171472),
-                input_csvfile=None,
-                max_shots=None,
-                output_hdf5file='sample_metadata.hdf5',
-                channels=None,
-                verbose=False,
-                with_signals=False,
-                max_workers=2,
-                use_concurrent=False):
+def package_bes(
+        shotlist=[196554,196555,196559,196560],
+        input_csvfile=None,
+        max_shots=None,
+        output_hdf5file='metadata.hdf5',
+        channels=None,
+        verbose=False,
+        with_signals=False,
+        max_workers=2,
+        use_concurrent=False,
+        only_8x8=True,
+        only_standard_8x8=True,
+):
     if input_csvfile:
         # override `shotlist`
         # use CSV file with 'shot' column to create `shotlist`
@@ -257,17 +260,16 @@ def package_bes(shotlist=(176778, 171472),
         print(f'Using shotlist {input_csvfile.as_posix()}')
         shotlist = []
         with input_csvfile.open() as csvfile:
-            reader = csv.DictReader(csvfile,
-                                    fieldnames=None,
-                                    skipinitialspace=True)
+            reader = csv.DictReader(csvfile, skipinitialspace=True)
+            assert 'shot' in reader.fieldnames
             for irow, row in enumerate(reader):
                 if max_shots and irow+1 > max_shots:
                     break
                 shotlist.append(int(row['shot']))
-    shotlist = np.array(shotlist)
+    shotlist = np.array(shotlist, dtype=int)
     if channels is None:
         channels = np.arange(1,65)
-    channels = np.array(channels)
+    channels = np.array(channels, dtype=int)
     output_hdf5file = _config_data_file(output_hdf5file, must_exist=False)
     t1 = time.time()
     with h5py.File(output_hdf5file.as_posix(), 'w') as h5file:
@@ -287,7 +289,10 @@ def package_bes(shotlist=(176778, 171472),
                                              verbose=verbose,
                                              with_signals=with_signals,
                                              metafile=h5file,
-                                             lock=lock)
+                                             lock=lock,
+                                             only_8x8=only_8x8,
+                                             only_standard_8x8=only_standard_8x8,
+                                             )
                     futures.append(future)
                 # get results as workers finish
                 shot_count = 0
@@ -304,16 +309,19 @@ def package_bes(shotlist=(176778, 171472),
         else:
             for i, shot in enumerate(shotlist):
                 print(f'Trying {shot} ({i + 1} of {shotlist.size})')
-                shot = _validate_bes_data(shot=shot,
-                                          channels=channels,
-                                          verbose=verbose,
-                                          with_signals=with_signals,
-                                          metafile=h5file)
-                if shot and shot>0:
+                result = _validate_bes_data(
+                        shot=shot,
+                        channels=channels,
+                        verbose=verbose,
+                        with_signals=with_signals,
+                        metafile=h5file,
+                        only_8x8=only_8x8,
+                        only_standard_8x8=only_standard_8x8,
+                )
+                if result and result>0:
                     valid_shot_counter += 1
-                    print( f'{shot} good')
                 else:
-                    print(f'{-shot} INVALID return value')
+                    print(f'{shot}: INVALID return value')
     t2 = time.time()
     if verbose:
         print_metadata_contents(input_hdf5file=output_hdf5file)
@@ -433,16 +441,41 @@ def read_metadata(input_hdf5file='sample_metadata.hdf5',
             print(string)
 
 
+def dataset_stats(
+        hdf5_file='metadata.hdf5',
+):
+    hdf5_file = _config_data_file(hdf5_file, must_exist=True)
+    print(f"HDF5 file: {hdf5_file}")
+    ip_cw_bt_cw = ip_ccw_bt_cw = ip_cw_bt_ccw = ip_ccw_bt_ccw = 0
+    with h5py.File(hdf5_file, mode='r') as h5:
+        print(f"Top-level groups: {len(h5)}")
+        for group_key, group in h5.items():
+            if group_key.startswith('config'):
+                continue
+            if group.attrs['ip'] > 0:
+                if group.attrs['bt'] > 0:
+                    ip_cw_bt_cw += 1
+                else:
+                    ip_cw_bt_ccw += 1
+            else:
+                if group.attrs['bt'] > 0:
+                    ip_ccw_bt_cw += 1
+                else:
+                    ip_ccw_bt_ccw += 1
+    print(f"Ip CW, Bt CW: {ip_cw_bt_cw}")
+    print(f"Ip CW, Bt CCW: {ip_cw_bt_ccw}")
+    print(f"Ip CCW, Bt CW: {ip_ccw_bt_cw}")
+    print(f"Ip CCW, Bt CCW: {ip_ccw_bt_ccw}")
+    return
 
 
 if __name__=='__main__':
-    # # get metadata from shotlist or csv
-    # package_bes(input_csvfile='sample_shotlist.csv',
-    #             max_shots=2,
-    #             output_hdf5file='sample_metadata.hdf5',
-    #             verbose=True)
-    # # filter metadata and save signals
-    # package_8x8_signals(input_hdf5file='sample_metadata.hdf5',
-    #                     output_hdf5file='sample_metadata_8x8.hdf5',
-    #                     channels=[1,2])
-    read_metadata('sample_metadata.hdf5')
+    # package_bes(
+    #         # input_csvfile='big_shotlist.csv',
+    #         max_shots=5,
+    #         verbose=True,
+    #         # use_concurrent=True,
+    # )
+    dataset_stats(
+            hdf5_file='/home/smithdr/edgeml/elm/data/big_metadata.hdf5',
+    )

@@ -1,6 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -t 0-4
-#SBATCH -N1 -n8 --mem=16G
+#SBATCH -t 1-0 -N1 -n16 --mem=100G
 
 date
 
@@ -20,8 +19,25 @@ conda info -e
 #cd /local-scratch/${job_label}
 #pwd -P
 
+PYTHON_SCRIPT=$(cat << END
+
+from bes_data_tools.package_h5 import package_bes
+
+package_bes(
+    input_csvfile='big_shotlist.csv',
+    output_hdf5file='big_metadata.hdf5',
+    verbose=True,
+    use_concurrent=True,
+    max_workers=8,
+    only_standard_8x8=True,
+)
+
+END
+)
+
 # do work
-python -c "from bes_data_tools.package_h5 import package_bes; package_bes()"
+#python -c "from bes_data_tools.package_h5 import package_bes; package_bes()"
+python -c "${PYTHON_SCRIPT}"
 python_exit=$?
 echo "Python exit status: ${python_exit}"
 
