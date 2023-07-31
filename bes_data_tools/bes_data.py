@@ -15,6 +15,8 @@ class BES_Data(object):
                'pinj',
                'pinj_15l',
                'pinj_15r',
+            #    'nb150left',
+            #    'nb150right',
                ]
 
     def __init__(
@@ -120,7 +122,7 @@ class BES_Data(object):
                     if point_name == 'pinj':
                         date = self.connection.get(
                             f'getnci(\\{point_name}, "time_inserted")')
-                        self.metadata['date'] = date.date.decode('utf-8')
+                        self.metadata['date'] = str(date.date)
                     self.connection.closeTree('nb', self.shot)
                 else:
                     ptdata = f'_n = ptdata("{point_name}", {self.shot})'
@@ -130,12 +132,11 @@ class BES_Data(object):
                                            data_time <= self.time[-1])
                 data = data[time_mask]
                 data_time = data_time[time_mask]
-                if point_name == 'bt':
-                    print(f"Bt avg/std: {data.mean():.6f} {np.std(data):.6f}")
             except:
                 self.time = None
                 print(f'{self.shot}: ERROR for data node {point_name}')
-                return
+                # return
+                raise
             assert data.shape == data_time.shape
             setattr(self, point_name, data)
             if point_name == 'pinj' or 'pinj' not in point_name:

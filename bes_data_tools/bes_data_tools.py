@@ -11,20 +11,21 @@ import h5py
 
 
 class BES_Data(object):
-    _points = ['ip',
-               'bt',
-               'pinj',
-               'pinj_15l',
-               'pinj_15r',
-               ]
+    _points = [
+        'ip',
+        'bt',
+        'pinj',
+        'pinj_15l',
+        'pinj_15r',
+    ]
 
     def __init__(
-            self,
-            shot=176778,
-            channels=None,
-            only_8x8=True,
-            only_standard_8x8=True,
-        ):
+        self,
+        shot=196491,
+        channels=None,
+        only_8x8=False,
+        only_standard_8x8=False,
+    ):
         t1 = time.time()
         self.connection = MDSplus.Connection('atlas.gat.com')
         if channels is None:
@@ -33,31 +34,14 @@ class BES_Data(object):
         self.shot = shot
         self.channels = channels
         self.time = None
-        self.n_time = None
         self.signals = None
         self.metadata = None
         only_8x8 = only_8x8 or only_standard_8x8
         # get time array
-        ptdata = f'ptdata("bessu01", {self.shot})'
         try:
-            sigtime = self.connection.get(f'dim_of({ptdata})')
-            np.array(sigtime).round(4)
-        except:
-            print(f'{self.shot}: ERROR no BES slow time data')
-            self.time = None
-            return
-        ptdata = f'ptdata("besfu01", {self.shot})'
-        try:
+            ptdata = f'ptdata("besfu01", {self.shot})'
             sigtime = self.connection.get(f'dim_of({ptdata})')
             self.time = np.array(sigtime).round(4)
-        except:
-            self.time = None
-            print(f'{self.shot}: ERROR no BES fast time data')
-            return
-        n_time = self.connection.get(f'size({ptdata})')
-        self.n_time = n_time.data()
-        assert (self.n_time == self.time.size)
-        try:
             # get metadata
             self.connection.openTree('bes', self.shot)
             r_position = np.array(self.connection.get(r'\bes_r')).round(2)
@@ -65,10 +49,10 @@ class BES_Data(object):
             assert r_position.size == 64 and z_position.size == 64
             self.connection.closeTree('bes', self.shot)
         except:
-            print(f'{self.shot}: ERROR getting BES position metadata')
             self.time = None
+            print(f'{self.shot}: error with BES data')
             return
-        is_8x8 = is_standard_8x8 = False
+        self.is_8x8 = self.is_standard_8x8 = False
         for i in np.arange(8):
             # del-r of column i
             rdiff = np.diff(r_position[i + np.arange(8) * 8])
@@ -76,16 +60,16 @@ class BES_Data(object):
             # del-z of row i
             zdiff = np.diff(z_position[i * 8 + np.arange(8)])
             row_test = np.all(np.abs(zdiff) <= 0.13)
-            is_8x8 = col_test and row_test
-        if is_8x8:
+            self.is_8x8 = col_test and row_test
+        if self.is_8x8:
             z_first_column = z_position[np.arange(8) * 8]
-            is_standard_8x8 = (z_first_column.argmax() * 8 == 0) and \
-                              (z_first_column.argmin() * 8 == 56)
-        if only_8x8 and not is_8x8:
+            self.is_standard_8x8 = (z_first_column.argmax() == 0) and \
+                                   (z_first_column.argmin() * 8 == 56)
+        if only_8x8 and not self.is_8x8:
             self.time = None
             print(f'{self.shot}: ERROR not 8x8 config')
             return
-        if only_standard_8x8 and not is_standard_8x8:
+        if only_standard_8x8 and not self.is_standard_8x8:
             print(f'{self.shot}: ERROR not standard 8x8 config')
             self.time = None
             return
@@ -94,7 +78,7 @@ class BES_Data(object):
             'delta_time': np.diff(self.time[0:100]).mean().round(4),
             'start_time': self.time[0],
             'stop_time': self.time[-1],
-            'n_time': self.n_time,
+            'n_time': self.time.size,
             'time_units': 'ms',
             'r_position': r_position,
             'z_position': z_position,
@@ -102,10 +86,10 @@ class BES_Data(object):
             'date': '',
             'ip': 0.,
             'bt': 0.,
-            'is_8x8': is_8x8,
-            'is_standard_8x8': is_standard_8x8,
-            'r_avg': np.mean(r_position).round(1) if is_8x8 else 0.,
-            'z_avg': np.mean(z_position).round(1) if is_8x8 else 0.,
+            'is_8x8': self.is_8x8,
+            'is_standard_8x8': self.is_standard_8x8,
+            'r_avg': np.mean(r_position).round(1) if self.is_8x8 else 0.,
+            'z_avg': np.mean(z_position).round(1) if self.is_8x8 else 0.,
         }
         # get ip, beams, etc.
         for point_name in self._points:
@@ -118,7 +102,7 @@ class BES_Data(object):
                     if point_name == 'pinj':
                         date = self.connection.get(
                             f'getnci(\\{point_name}, "time_inserted")')
-                        self.metadata['date'] = date.date.decode('utf-8')
+                        self.metadata['date'] = str(date.date)
                     self.connection.closeTree('nb', self.shot)
                 else:
                     ptdata = f'_n = ptdata("{point_name}", {self.shot})'
@@ -136,7 +120,8 @@ class BES_Data(object):
             setattr(self, point_name, data)
             if point_name == 'pinj' or 'pinj' not in point_name:
                 setattr(self, f'{point_name}_time', data_time)
-        if self.pinj_15l.max() < 500e3:
+        pinj_15l_max = np.max(getattr(self, 'pinj_15l'))
+        if pinj_15l_max < 500e3:
             self.time = None
             print(f'{self.shot}: ERROR small pinj_15l')
             return
@@ -151,7 +136,7 @@ class BES_Data(object):
                 self.time = None
                 print(f'{self.shot}: ERROR {ptname}')
                 return
-        print(f'{self.shot}: {self.n_time} time points')
+        print(f'{self.shot}: {self.time.size} time points')
         print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
 
     def get_signals(
@@ -170,7 +155,7 @@ class BES_Data(object):
             tdi_vars.append(var)
             tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
             tdi_assignments.append(tmp)
-        self.signals = np.empty([self.channels.size, self.n_time])
+        self.signals = np.empty([self.channels.size, self.time.size])
         try:
             self.connection.get(', '.join(tdi_assignments))
             for i, tdi_var in enumerate(tdi_vars):
@@ -242,7 +227,7 @@ def _validate_configuration(input_bes_data,
         new_config = config_non_8x8_group.create_group(f'{new_index:d}')
     new_config.attrs['r_position'] = r_position
     new_config.attrs['z_position'] = z_position
-    new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=np.int)
+    new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=int)
     new_config.attrs['nshots'] = new_config.attrs['shots'].size
     return new_index
 
@@ -387,7 +372,7 @@ def package_bes_data(
                 else:
                     print(f'{-shot} INVALID return value')
     t2 = time.time()
-    print_metadata_contents(input_hdf5file=output_hdf5)
+    # print_metadata_contents(input_hdf5file=output_hdf5)
     dt = t2 - t1
     print(f'Packaging data elapsed time: {int(dt)//3600} hr {dt%3600/60:.1f} min')
     print(f'{valid_shot_counter} valid shots out of {shotlist.size} in input shot list')

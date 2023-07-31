@@ -1,13 +1,3 @@
-"""
-Functions to package BES metadata and signals in HDF5 files.
-
-`package_bes` is the primary function that packages metadata (signals are
-optional).
-
-`package_8x8_signals` filters metadata and saves HDF5 files for signals and
-filtered metadata.
-"""
-
 from pathlib import Path
 import csv
 import threading
@@ -149,7 +139,7 @@ def _validate_configuration(input_bes_data,
         new_config = config_non_8x8_group.create_group(f'{new_index:04d}')
     new_config.attrs['r_position'] = r_position
     new_config.attrs['z_position'] = z_position
-    new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=np.int)
+    new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=int)
     new_config.attrs['nshots'] = new_config.attrs['shots'].size
     return new_index
 
@@ -335,10 +325,7 @@ def make_8x8_sublist(input_hdf5file='sample_metadata.hdf5',
                      r_range=(223, 227),
                      z_range=(-1.5, 1)):
     input_hdf5file = _config_data_file(input_hdf5file)
-    shotlist = np.array((), dtype=np.int)
-    # r = []
-    # z = []
-    # nshots = []
+    shotlist = np.array((), dtype=int)
     with h5py.File(input_hdf5file, 'r') as metadata_file:
         config_8x8_group = metadata_file['configurations']['8x8_configurations']
         for name, config in config_8x8_group.items():
@@ -362,23 +349,6 @@ def make_8x8_sublist(input_hdf5file='sample_metadata.hdf5',
             if verbose:
                 print(f'8x8 config #{name} nshots {shots.size} ravg {r_avg:.2f} upper {upper}')
     print(f'Shots within r/z min/max limits: {shotlist.size}')
-    # if not noplot:
-    #     plt.plot(r, z, 'x')
-    #     for i, nshot in enumerate(nshots):
-    #         plt.annotate(repr(nshot),
-    #                      (r[i], z[i]),
-    #                      textcoords='offset points',
-    #                      xytext=(0,10),
-    #                      ha='center')
-    #     plt.xlim(220, 230)
-    #     plt.ylim(-1.5, 1.5)
-    #     for r in rminmax:
-    #         plt.vlines(r, zminmax[0], zminmax[1], color='k')
-    #     for z in zminmax:
-    #         plt.hlines(z, rminmax[0], rminmax[1], color='k')
-    #     plt.xlabel('R (cm)')
-    #     plt.ylabel('Z (cm)')
-    #     plt.title('R/Z centers of BES 8x8 grids, and shot counts')
     return shotlist
 
 
@@ -470,12 +440,12 @@ def dataset_stats(
 
 
 if __name__=='__main__':
-    # package_bes(
-    #         # input_csvfile='big_shotlist.csv',
-    #         max_shots=5,
-    #         verbose=True,
-    #         # use_concurrent=True,
-    # )
-    dataset_stats(
-            hdf5_file='/home/smithdr/edgeml/elm/data/big_metadata.hdf5',
+    package_bes(
+            # input_csvfile='big_shotlist.csv',
+            max_shots=5,
+            verbose=True,
+            # use_concurrent=True,
     )
+    # dataset_stats(
+    #         hdf5_file='/home/smithdr/edgeml/elm/data/big_metadata.hdf5',
+    # )

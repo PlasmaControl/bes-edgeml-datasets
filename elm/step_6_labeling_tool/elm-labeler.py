@@ -87,9 +87,9 @@ class ElmTaggerGUI(object):
 
         self.label_file = h5py.File(labeled_elms_file, 'a')
         self.labeled_elms = self.label_file.attrs.setdefault('labeled_elms',
-                                                             np.array([], dtype=np.int))
+                                                             np.array([], dtype=int))
         self.skipped_elms = self.label_file.attrs.setdefault('skipped_elms',
-                                                             np.array([], dtype=np.int))
+                                                             np.array([], dtype=int))
 
         self.validate_data_file()
 
@@ -109,7 +109,7 @@ class ElmTaggerGUI(object):
     def validate_data_file(self):
         if len(self.label_file) != self.labeled_elms.size:
             self.labeled_elms = np.array([int(elm_index) for elm_index in self.label_file],
-                                         dtype=np.int)
+                                         dtype=int)
         for elm_index in self.label_file:
             assert(int(elm_index) in self.labeled_elms)
             assert(int(elm_index) not in self.skipped_elms)
@@ -166,7 +166,7 @@ class ElmTaggerGUI(object):
                               time <= self.time_markers[3])
         time = time[mask]
         signals = signals[:,mask]
-        labels = np.zeros(time.shape, dtype=np.int8)
+        labels = np.zeros(time.shape, dtype=int8)
         mask = np.logical_and(time >= self.time_markers[1],
                               time <= self.time_markers[2])
         labels[mask] = 1

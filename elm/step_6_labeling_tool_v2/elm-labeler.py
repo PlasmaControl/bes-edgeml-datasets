@@ -191,7 +191,7 @@ class ElmTaggerGUI(object):
                               time <= self.time_markers[3])
         time = time[mask]
         signals = signals[:, mask]
-        labels = np.zeros(time.shape, dtype=np.int8)
+        labels = np.zeros(time.shape, dtype=int8)
         mask = np.logical_and(time >= self.time_markers[1],
                               time <= self.time_markers[2])
         labels[mask] = 1
