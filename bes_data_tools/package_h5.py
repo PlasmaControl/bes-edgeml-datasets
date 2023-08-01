@@ -91,22 +91,22 @@ def print_metadata_contents(input_hdf5file=None,
                 break
 
 
-def _validate_configuration(input_bes_data,
+def _validate_configuration(bes_data,
                             config_8x8_group,
                             config_non_8x8_group):
-    max_index = np.array([0, 1000])
-    r_position = input_bes_data.metadata['r_position']
-    z_position = input_bes_data.metadata['z_position']
+    config_indices = np.array([0, 1000])
+    r_position = bes_data.metadata['r_position']
+    z_position = bes_data.metadata['z_position']
     for igroup, config_group in enumerate([config_8x8_group,
                                            config_non_8x8_group]):
         for config_index_str, config in config_group.items():
             config_index = int(config_index_str)
-            assert (isinstance(config, h5py.Group))
             assert ('r_position' in config.attrs and
                     'z_position' in config.attrs and
                     'shots' in config.attrs)
-            max_index[igroup] = np.max([max_index[igroup],
-                                        config_index])
+            config_indices[igroup] = np.max(
+                [config_indices[igroup], config_index]
+            )
             # test if input data matches existing configuration
             if not np.allclose(r_position,
                                config.attrs['r_position'],
@@ -116,30 +116,30 @@ def _validate_configuration(input_bes_data,
                                config.attrs['z_position'],
                                atol=0.1):
                 continue
-            print(f'{input_bes_data.shot}: Configuration matches index {config_index}')
-            if input_bes_data.shot not in config.attrs['shots']:
+            print(f'{bes_data.shot}: Configuration matches index {config_index}')
+            if bes_data.shot not in config.attrs['shots']:
                 config.attrs['shots'] = np.append(config.attrs['shots'],
-                                                  input_bes_data.shot)
+                                                  bes_data.shot)
                 config.attrs['nshots'] = config.attrs['shots'].size
             return config_index
     # now test for 8x8 configuration
-    config_is_8x8 = input_bes_data.metadata['is_8x8']
+    config_is_8x8 = bes_data.metadata['is_8x8']
     if config_is_8x8:
-        new_index = max_index[0] + 1
-        print(f'{input_bes_data.shot}: New 8x8 config index is {new_index}')
+        new_index = config_indices[0] + 1
+        print(f'{bes_data.shot}: New 8x8 config index is {new_index}')
         new_config = config_8x8_group.create_group(f'{new_index:04d}')
-        new_config.attrs['r_avg'] = input_bes_data.metadata['r_avg']
-        new_config.attrs['z_avg'] = input_bes_data.metadata['z_avg']
+        new_config.attrs['r_avg'] = bes_data.metadata['r_avg']
+        new_config.attrs['z_avg'] = bes_data.metadata['z_avg']
         z_first_column = z_position[np.arange(8) * 8]
         new_config.attrs['upper_inboard_channel'] = z_first_column.argmax() * 8
         new_config.attrs['lower_inboard_channel'] = z_first_column.argmin() * 8
     else:
-        new_index = max_index[1] + 1
-        print(f'{input_bes_data.shot}: New non-8x8 config index is {new_index}')
+        new_index = config_indices[1] + 1
+        print(f'{bes_data.shot}: New non-8x8 config index is {new_index}')
         new_config = config_non_8x8_group.create_group(f'{new_index:04d}')
     new_config.attrs['r_position'] = r_position
     new_config.attrs['z_position'] = z_position
-    new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=int)
+    new_config.attrs['shots'] = np.array([bes_data.shot], dtype=int)
     new_config.attrs['nshots'] = new_config.attrs['shots'].size
     return new_index
 

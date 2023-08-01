@@ -1,8 +1,10 @@
 import time
+from typing import Iterable
 import os
 import csv
 import threading
 import concurrent.futures
+import contextlib
 from pathlib import Path
 
 import numpy as np
@@ -10,7 +12,7 @@ import MDSplus
 import h5py
 
 
-class BES_Data(object):
+class BES_Shot_Data:
     _points = [
         'ip',
         'bt',
@@ -168,217 +170,112 @@ class BES_Data(object):
         print(f'{self.shot}: Signal time = {time.time() - t1:.2f} s')
 
 
-def _validate_configuration(input_bes_data,
-                            config_8x8_group,
-                            config_non_8x8_group):
-    max_index = np.array([0, 100])
-    r_position = input_bes_data.metadata['r_position']
-    z_position = input_bes_data.metadata['z_position']
-    for igroup, config_group in enumerate([config_8x8_group,
-                                           config_non_8x8_group]):
-        for config_index_str, config in config_group.items():
-            if config_index_str.startswith('0'):
-                config_index_str = config_index_str[1]
-            config_index = eval(config_index_str)
-            assert (isinstance(config, h5py.Group))
-            assert ('r_position' in config.attrs and
-                    'z_position' in config.attrs and
-                    'shots' in config.attrs)
-            max_index[igroup] = np.max([max_index[igroup],
-                                        config_index])
-            # test if input data matches existing configuration
-            if not np.allclose(r_position,
-                               config.attrs['r_position'],
-                               atol=0.1):
-                continue
-            if not np.allclose(z_position,
-                               config.attrs['z_position'],
-                               atol=0.1):
-                continue
-            print(f'{input_bes_data.shot}: Configuration matches index {config_index}')
-            if input_bes_data.shot not in config.attrs['shots']:
-                config.attrs['shots'] = np.append(config.attrs['shots'],
-                                                  input_bes_data.shot)
-                config.attrs['nshots'] = config.attrs['shots'].size
-            return config_index
-    print(f'{input_bes_data.shot}: Configuration does not match existing configuration')
-    # now test for 8x8 configuration
-    config_is_8x8 = True
-    for i in np.arange(8):
-        rdiff = np.diff(r_position[i + np.arange(8) * 8])
-        col_test = np.allclose(rdiff, np.zeros(rdiff.shape), atol=0.1)
-        zdiff = np.diff(z_position[i * 8 + np.arange(8)])
-        row_test = np.allclose(zdiff, np.zeros(zdiff.shape), atol=0.1)
-        config_is_8x8 = config_is_8x8 and col_test and row_test
-        if not config_is_8x8:
-            break
-    if config_is_8x8:
-        new_index = max_index[0] + 1
-        print(f'{input_bes_data.shot}: New 8x8 config index is {new_index}')
-        new_config = config_8x8_group.create_group(f'{new_index:02d}')
-        new_config.attrs['r_avg'] = np.mean(r_position).round(2)
-        new_config.attrs['z_avg'] = np.mean(z_position).round(2)
-        z_first_column = z_position[np.arange(8) * 8]
-        new_config.attrs['upper_inboard_channel'] = z_first_column.argmax() * 8
-        new_config.attrs['lower_inboard_channel'] = z_first_column.argmin() * 8
-    else:
-        new_index = max_index[1] + 1
-        print(f'{input_bes_data.shot}: New non-8x8 config index is {new_index}')
-        new_config = config_non_8x8_group.create_group(f'{new_index:d}')
-    new_config.attrs['r_position'] = r_position
-    new_config.attrs['z_position'] = z_position
-    new_config.attrs['shots'] = np.array([input_bes_data.shot], dtype=int)
-    new_config.attrs['nshots'] = new_config.attrs['shots'].size
-    return new_index
+class BES_HDF5_Dataset:
 
+    def __init__(
+        self,
+        hdf5_file: str|Path = 'bes_data.hdf5',
+    ) -> None:
+        self.hdf5_file = Path(hdf5_file)
 
-def validate_bes_shot(shot=None,
-                      with_signals=False,
-                      metafile=None,
-                      lock=None,
-                      only_8x8=False,
-                      ):
-
-    bes_data = BES_Data(shot=shot)
-    if bes_data.time is None:
-        print(f'{bes_data.shot}: ERROR invalid BES_Data object')
-        return -shot
-    # metadata attributes
-    if lock:
-        lock.acquire()
-    configuration_group = metafile.require_group('configurations')
-    config_8x8_group = configuration_group.require_group('8x8_configurations')
-    config_non_8x8_group = configuration_group.require_group('non_8x8_configurations')
-    shot_group = metafile.require_group(f'{bes_data.shot}')
-    for attr_name, attr_value in bes_data.metadata.items():
-        if attr_name in shot_group.attrs:
-            if 'position' in attr_name:
-                assert (np.allclose(attr_value,
-                                    shot_group.attrs[attr_name],
-                                    atol=0.1))
+    def load_shotlist(
+        self,
+        csv_file: str|Path = '',
+        shotlist: Iterable[int] = (196554,196555,196559,196560),
+        truncate_hdf5: bool = False,
+        max_shots: int = None,
+        use_concurrent: bool = False,
+        only_8x8: bool = False,
+        only_standard_8x8: bool = False,
+    ) -> None:
+        if csv_file:
+            # read shotlist from CSV file; column `shot` must exist
+            csv_file = Path(csv_file)
+            assert csv_file.exists()
+            print(f'Using shotlist {csv_file.as_posix()}')
+            shotlist = []
+            with csv_file.open() as csvfile:
+                reader = csv.DictReader(csvfile, skipinitialspace=True)
+                assert 'shot' in reader.fieldnames
+                for irow, row in enumerate(reader):
+                    if max_shots and irow+1 > max_shots:
+                        break
+                    shotlist.append(int(row['shot']))
+        shotlist = np.array(shotlist, dtype=int)
+        assert shotlist.size > 0
+        if truncate_hdf5:
+            self.hdf5_file.unlink(missing_ok=True)
+        only_8x8 = only_8x8 and only_standard_8x8
+        with h5py.File(self.hdf5_file, 'a') as h5root:
+            valid_shot_counter = 0
+            configuration_group = h5root.require_group('configurations')
+            group_8x8 = configuration_group.require_group('8x8_configurations')
+            group_non_8x8 = configuration_group.require_group('non_8x8_configurations')
+            if use_concurrent:
+                pass
             else:
-                assert (attr_value == shot_group.attrs[attr_name])
-        else:
-            shot_group.attrs[attr_name] = attr_value
-    config_index = _validate_configuration(bes_data,
-                                           config_8x8_group,
-                                           config_non_8x8_group)
-    if 'configuration_index' in shot_group.attrs:
-        assert (config_index == shot_group.attrs['configuration_index'])
-    else:
-        shot_group.attrs['configuration_index'] = config_index
-    # metadata datasets
-    for point_name in bes_data._points:
-        for name in [f'{point_name}', f'{point_name}_time']:
-            data = getattr(bes_data, name, None)
-            if data is None:
-                continue
-            shot_group.require_dataset(name,
-                                       data=data,
-                                       shape=data.shape,
-                                       dtype=data.dtype)
-    if lock:
-        lock.release()
-    # signals
-    if with_signals:
-        signals_dir = Path('signals')
-        signals_dir.mkdir(exist_ok=True)
-        if bes_data.signals is None:
-            print(f'{bes_data.shot}: ERROR invalid BES signals')
-            return -bes_data.shot
-        bes_data.get_signals()
-        signal_file = signals_dir / f'bes_signals_{bes_data.shot}.hdf5'
-        with h5py.File(signal_file.as_posix(), 'w') as sfile:
-            sfile.create_dataset('signals',
-                                 data=bes_data.signals,
-                                 compression='gzip',
-                                 chunks=True)
-            sfile.create_dataset('time',
-                                 data=bes_data.time,
-                                 compression='gzip',
-                                 chunks=True)
-        # print_h5py_contents(signal_file)
-        # signal_mb = bes_data.signals.nbytes // 1024 // 1024
-        # print(f'{bes_data.shot}: BES_Data size = {signal_mb} MB')
-    return shot
-
-
-def package_bes_data(
-    shotlist=(176778, 171472, 184573, 178556),
-    input_shotlist_csv=None,
-    max_shots=None,
-    output_hdf5='metadata.hdf5',
-    with_signals=False,
-    use_concurrent=False,
-    max_workers=None,
-):
-    t1 = time.time()
-    if input_shotlist_csv:
-        input_shotlist_csv = Path(input_shotlist_csv)
-        assert input_shotlist_csv.exists()
-        print(f'Shotlist: {input_shotlist_csv.as_posix()}')
-        shotlist = []
-        with input_shotlist_csv.open() as csvfile:
-            reader = csv.DictReader(csvfile, skipinitialspace=True)
-            assert reader.fieldnames[0] == 'shot'
-            for irow, row in enumerate(reader):
-                if max_shots and irow+1 > max_shots:
-                    break
-                shotlist.append(int(row['shot']))
-    shotlist = np.array(shotlist, dtype=int)
-    output_hdf5 = Path(output_hdf5)
-    with h5py.File(output_hdf5.as_posix(), 'w') as metadata_file:
-        valid_shot_counter = 0
-        if use_concurrent:
-            if not max_workers:
-                max_workers = len(os.sched_getaffinity(0)) // 2
-            lock = threading.Lock()
-            with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
-                futures = []
-                # submit tasks to workers
                 for i, shot in enumerate(shotlist):
-                    print(f'{shot}: submitting to worker pool ({i+1} of {shotlist.size})')
-                    future = executor.submit(
-                        validate_bes_shot,
+                    print(f'Shot {shot} ({i + 1} of {shotlist.size})')
+                    result = self.validate_bes_shot(
                         shot=shot,
-                        with_signals=with_signals,
-                        metafile=metadata_file,
-                        lock=lock,
+                        group_8x8=group_8x8,
+                        group_non_8x8=group_non_8x8,
+                        only_8x8=only_8x8,
+                        only_standard_8x8=only_standard_8x8,
                     )
-                    futures.append(future)
-                # get results as workers finish
-                shot_count = 0
-                for future in concurrent.futures.as_completed(futures):
-                    shot_count += 1
-                    shot = future.result()
-                    if future.exception() is None and shot > 0:
+                    if result:
                         valid_shot_counter += 1
-                        print(f'{shot}: work finished ({shot_count} of {shotlist.size})')
-                    else:
-                        print(f'{-shot}: INVALID return value')
-                t_mid = time.time()
-                print(f'Worker pool elapsed time = {t_mid-t1:.2f} s')
-        else:
-            for i, shot in enumerate(shotlist):
-                print(f'Trying {shot} ({i + 1} of {shotlist.size})')
-                shot = validate_bes_shot(
-                    shot=shot,
-                    with_signals=with_signals,
-                    metafile=metadata_file,
-                )
-                if shot and shot>0:
-                    valid_shot_counter += 1
-                    print( f'{shot} good')
-                else:
-                    print(f'{-shot} INVALID return value')
-    t2 = time.time()
-    # print_metadata_contents(input_hdf5file=output_hdf5)
-    dt = t2 - t1
-    print(f'Packaging data elapsed time: {int(dt)//3600} hr {dt%3600/60:.1f} min')
-    print(f'{valid_shot_counter} valid shots out of {shotlist.size} in input shot list')
+    
+    def validate_bes_shot(
+        self,
+        shot: int,
+        group_8x8: h5py.Group,
+        group_non_8x8: h5py.Group,
+        only_8x8: bool = False,
+        only_standard_8x8: bool = False,
+        lock: threading.Lock = None,
+    ) -> bool:
+        bes_shot = BES_Shot_Data(
+            shot=shot,
+            only_8x8=only_8x8,
+            only_standard_8x8=only_standard_8x8,
+        )
+        if bes_shot.time is None:
+            return False
+        if lock is None:
+            lock = contextlib.nullcontext()
+        with lock:
+            config_index = None
+            for config_group in [group_8x8, group_non_8x8]:
+                for config_index_str, config in config_group.items():
+                    is_same = False
+                    for position in ['r_position','z_position']:
+                        is_same = np.allclose(
+                            bes_data.metadata[position],
+                            config.attrs[position],
+                            atol=0.12,
+                        )
+                        if not is_same:
+                            break
+                    if is_same:
+                        if shot not in config.attrs['shots']:
+                            config.attrs['shots'] = np.append(config.attrs['shots'], shot)
+                            config.attrs['nshots'] = config.attrs['shots'].size
+                        config_index = int(config_index_str)
+                    if config_index:
+                        break
+                if config_index:
+                    break
+            if config_index is None:
+                pass
+        return True
+        
 
 
 
 if __name__=='__main__':
-    bes_data = BES_Data(shot=184800)
-    bes_data.get_signals([1,2])
+    bes_data = BES_Shot_Data()
+    # bes_data.get_signals([1,2])
+
+    dataset = BES_HDF5_Dataset()
+    dataset.load_shotlist()
