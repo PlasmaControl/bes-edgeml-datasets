@@ -13,7 +13,7 @@ import h5py
 
 
 class BES_Shot_Data:
-    _points = [
+    _point_names = [
         'ip',
         'bt',
         'pinj',
@@ -38,6 +38,8 @@ class BES_Shot_Data:
         self.time = None
         self.signals = None
         self.metadata = None
+        self.inboard_column_channel_order = None
+        self.is_8x8 = self.is_standard_8x8 = False
         only_8x8 = only_8x8 or only_standard_8x8
         # get time array
         try:
@@ -46,27 +48,29 @@ class BES_Shot_Data:
             self.time = np.array(sigtime).round(4)
             # get metadata
             self.connection.openTree('bes', self.shot)
-            r_position = np.array(self.connection.get(r'\bes_r')).round(2)
-            z_position = -np.array(self.connection.get(r'\bes_z')).round(2)
+            r_position = np.array(self.connection.get(r'\bes_r')).round(1)
+            z_position = -np.array(self.connection.get(r'\bes_z')).round(1)
             assert r_position.size == 64 and z_position.size == 64
             self.connection.closeTree('bes', self.shot)
         except:
             self.time = None
             print(f'{self.shot}: error with BES data')
             return
-        self.is_8x8 = self.is_standard_8x8 = False
         for i in np.arange(8):
             # del-r of column i
             rdiff = np.diff(r_position[i + np.arange(8) * 8])
-            col_test = np.all(np.abs(rdiff) <= 0.13)
+            col_test = np.all(np.abs(rdiff) <= 0.12)
             # del-z of row i
             zdiff = np.diff(z_position[i * 8 + np.arange(8)])
-            row_test = np.all(np.abs(zdiff) <= 0.13)
+            row_test = np.all(np.abs(zdiff) <= 0.12)
             self.is_8x8 = col_test and row_test
         if self.is_8x8:
             z_first_column = z_position[np.arange(8) * 8]
-            self.is_standard_8x8 = (z_first_column.argmax() == 0) and \
-                                   (z_first_column.argmin() * 8 == 56)
+            self.inboard_column_channel_order = np.flip(z_first_column.argsort()) * 8
+            self.is_standard_8x8 = np.array_equal(
+                self.inboard_column_channel_order,
+                np.arange(8, dtype=int) * 8,
+            )
         if only_8x8 and not self.is_8x8:
             self.time = None
             print(f'{self.shot}: ERROR not 8x8 config')
@@ -92,15 +96,16 @@ class BES_Shot_Data:
             'is_standard_8x8': self.is_standard_8x8,
             'r_avg': np.mean(r_position).round(1) if self.is_8x8 else 0.,
             'z_avg': np.mean(z_position).round(1) if self.is_8x8 else 0.,
+            'inboard_column_channel_order': self.inboard_column_channel_order,
         }
         # get ip, beams, etc.
-        for point_name in self._points:
+        for point_name in self._point_names:
             try:
                 if point_name.startswith('pinj'):
                     self.connection.openTree('nb', self.shot)
-                    data = np.array(self.connection.get(f'\\{point_name}'))[::2]
+                    data = np.array(self.connection.get(f'\\{point_name}'), dtype=np.float32)[::4]
                     data_time = np.array(
-                            self.connection.get(f'dim_of(\\{point_name})'))[::2]
+                            self.connection.get(f'dim_of(\\{point_name})'), dtype=np.float32)[::4]
                     if point_name == 'pinj':
                         date = self.connection.get(
                             f'getnci(\\{point_name}, "time_inserted")')
@@ -108,8 +113,27 @@ class BES_Shot_Data:
                     self.connection.closeTree('nb', self.shot)
                 else:
                     ptdata = f'_n = ptdata("{point_name}", {self.shot})'
-                    data = np.array(self.connection.get(ptdata))[::8]
-                    data_time = np.array(self.connection.get('dim_of(_n)'))[::8]
+                    data = np.array(self.connection.get(ptdata), dtype=np.float32)[::8]
+                    data_time = np.array(self.connection.get('dim_of(_n)'), dtype=np.float32)[::8]
+                    # if point_name == 'bt':
+                    #     time_mask = data_time >= 0
+                    #     data = data[time_mask]
+                    #     data_time = data_time[time_mask]
+                    #     assert data.size == data_time.size
+                    #     max_bt = np.max(np.abs(data))
+                    #     valid_ind = np.flatnonzero(np.abs(data) > 0.98 * max_bt)
+                    #     data = data[0:valid_ind[-1]+1]
+                    #     data_time = data_time[0:valid_ind[-1]+1]
+                    #     assert data.size == data_time.size
+                    #     with open(f'shot_{shot}.csv', 'w', newline='') as csvfile:
+                    #         fieldnames = ['Time (ms)', 'Bt (T)']
+                    #         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
+                    #         writer.writeheader()
+                    #         rows = [
+                    #             {fieldnames[0]: data_time[i], fieldnames[1]: np.abs(data[i])}
+                    #             for i in range(data.size)
+                    #         ]
+                    #         writer.writerows(rows)
                 time_mask = np.logical_and(data_time >= self.time[0],
                                            data_time <= self.time[-1])
                 data = data[time_mask]
@@ -170,7 +194,7 @@ class BES_Shot_Data:
         print(f'{self.shot}: Signal time = {time.time() - t1:.2f} s')
 
 
-class BES_HDF5_Dataset:
+class BES_Metadata:
 
     def __init__(
         self,
@@ -203,79 +227,220 @@ class BES_HDF5_Dataset:
                     shotlist.append(int(row['shot']))
         shotlist = np.array(shotlist, dtype=int)
         assert shotlist.size > 0
-        if truncate_hdf5:
-            self.hdf5_file.unlink(missing_ok=True)
         only_8x8 = only_8x8 and only_standard_8x8
-        with h5py.File(self.hdf5_file, 'a') as h5root:
-            valid_shot_counter = 0
+        h5_mode = 'w' if truncate_hdf5 else 'a'
+        with h5py.File(self.hdf5_file, h5_mode) as h5root:
+            valid_shot_count = 0
             configuration_group = h5root.require_group('configurations')
             group_8x8 = configuration_group.require_group('8x8_configurations')
             group_non_8x8 = configuration_group.require_group('non_8x8_configurations')
             if use_concurrent:
-                pass
+                if not max_workers:
+                    max_workers = len(os.sched_getaffinity(0)) // 2
+                lock = threading.Lock()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for shot in shotlist:
+                        futures.append(
+                            executor.submit(
+                                self.check_channel_configuration,
+                                shot=shot,
+                                h5root=h5root,
+                                group_8x8=group_8x8,
+                                group_non_8x8=group_non_8x8,
+                                only_8x8=only_8x8,
+                                only_standard_8x8=only_standard_8x8,
+                                lock=lock,
+                            )
+                        )
+                    shot_count = 0
+                    for future in concurrent.futures.as_completed(futures):
+                        shot_count += 1
+                        result = future.result()
+                        if future.exception() is None and result:
+                            print(f'Shot {result} is good ({shot_count} of {shotlist.size})')
+                            valid_shot_count += 1
+                        else:
+                            print(f'Shot {result} is bad ({shot_count} of {shotlist.size})')
             else:
                 for i, shot in enumerate(shotlist):
                     print(f'Shot {shot} ({i + 1} of {shotlist.size})')
-                    result = self.validate_bes_shot(
+                    result = self.check_channel_configuration(
                         shot=shot,
+                        h5root=h5root,
                         group_8x8=group_8x8,
                         group_non_8x8=group_non_8x8,
                         only_8x8=only_8x8,
                         only_standard_8x8=only_standard_8x8,
                     )
                     if result:
-                        valid_shot_counter += 1
+                        valid_shot_count += 1
+            h5root.flush()
+            # count shots
+            n_shots = n_8x8_shots = n_standard_8x8_shots = n_non_8x8_shots = 0
+            n_pos_ip_pos_bt = n_pos_ip_neg_bt = n_neg_ip_pos_bt = n_neg_ip_neg_bt = 0
+            for group_name, group in h5root.items():
+                if group_name.startswith('config'):
+                    continue
+                n_shots += 1
+                if group.attrs['is_8x8']:
+                    n_8x8_shots += 1
+                else:
+                    n_non_8x8_shots += 1
+                if group.attrs['is_standard_8x8']:
+                    n_standard_8x8_shots += 1
+                if group.attrs['ip'] > 0:
+                    if group.attrs['bt'] > 0:
+                        n_pos_ip_pos_bt += 1
+                    else:
+                        n_pos_ip_neg_bt += 1
+                else:
+                    if group.attrs['bt'] > 0:
+                        n_neg_ip_pos_bt += 1
+                    else:
+                        n_neg_ip_neg_bt += 1
+            assert n_shots == n_8x8_shots + n_non_8x8_shots
+            assert n_shots == n_pos_ip_pos_bt + n_pos_ip_neg_bt + n_neg_ip_pos_bt + n_neg_ip_neg_bt
+            h5root.attrs['n_shots'] = n_shots
+            h5root.attrs['n_8x8_shots'] = n_8x8_shots
+            h5root.attrs['n_non_8x8_shots'] = n_non_8x8_shots
+            h5root.attrs['n_standard_8x8_shots'] = n_standard_8x8_shots
+            h5root.attrs['n_pos_ip_pos_bt'] = n_pos_ip_pos_bt
+            h5root.attrs['n_pos_ip_neg_bt'] = n_pos_ip_neg_bt
+            h5root.attrs['n_neg_ip_pos_bt'] = n_neg_ip_pos_bt
+            h5root.attrs['n_neg_ip_neg_bt'] = n_neg_ip_neg_bt
+            h5root.flush()
+            for config_group in [group_8x8, group_non_8x8]:
+                n_shots = 0
+                for config in config_group.values():
+                    n_shots += config.attrs['n_shots']
+                if 'non' in config_group.name:
+                    assert n_shots == h5root.attrs['n_non_8x8_shots']
+                else:
+                    assert n_shots == h5root.attrs['n_8x8_shots']
+                config_group.attrs['n_shots'] = n_shots
     
-    def validate_bes_shot(
+    def check_channel_configuration(
         self,
         shot: int,
+        h5root: h5py.File,
         group_8x8: h5py.Group,
         group_non_8x8: h5py.Group,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
         lock: threading.Lock = None,
-    ) -> bool:
-        bes_shot = BES_Shot_Data(
+    ) -> int:
+        bes_data = BES_Shot_Data(
             shot=shot,
             only_8x8=only_8x8,
             only_standard_8x8=only_standard_8x8,
         )
-        if bes_shot.time is None:
-            return False
+        if bes_data.time is None:
+            return 0
         if lock is None:
             lock = contextlib.nullcontext()
         with lock:
             config_index = None
-            for config_group in [group_8x8, group_non_8x8]:
+            config_index_count = [0, 1000]
+            # check for match to existing configuration
+            for igroup, config_group in enumerate([group_8x8, group_non_8x8]):
                 for config_index_str, config in config_group.items():
+                    config: h5py.Group
                     is_same = False
+                    config_index_count[igroup] = np.max(
+                        [config_index_count[igroup], int(config_index_str)]
+                    )
                     for position in ['r_position','z_position']:
                         is_same = np.allclose(
                             bes_data.metadata[position],
                             config.attrs[position],
-                            atol=0.12,
+                            atol=0.2,
                         )
                         if not is_same:
                             break
                     if is_same:
                         if shot not in config.attrs['shots']:
                             config.attrs['shots'] = np.append(config.attrs['shots'], shot)
-                            config.attrs['nshots'] = config.attrs['shots'].size
+                            config.attrs['n_shots'] = config.attrs['shots'].size
                         config_index = int(config_index_str)
-                    if config_index:
                         break
                 if config_index:
                     break
+            # create new configuration group
             if config_index is None:
-                pass
-        return True
+                if bes_data.metadata['is_8x8']:
+                    config_index = config_index_count[0] + 1
+                    new_config = group_8x8.create_group(f'{config_index:04d}')
+                    new_config.attrs['r_avg'] = bes_data.metadata['r_avg']
+                    new_config.attrs['z_avg'] = bes_data.metadata['z_avg']
+                    new_config.attrs['inboard_column_channel_order'] = bes_data.inboard_column_channel_order
+                else:
+                    config_index = config_index_count[1] + 1
+                    new_config = group_non_8x8.create_group(f'{config_index:04d}')
+                new_config.attrs['r_position'] = bes_data.metadata['r_position']
+                new_config.attrs['z_position'] = bes_data.metadata['z_position']
+                new_config.attrs['is_8x8'] = bes_data.is_8x8
+                new_config.attrs['is_standard_8x8'] = bes_data.is_standard_8x8
+                new_config.attrs['shots'] = np.array([bes_data.shot], dtype=int)
+                new_config.attrs['n_shots'] = new_config.attrs['shots'].size
+            assert config_index
+            # save shot metadata
+            shot_group = h5root.require_group(str(shot))
+            for attr_name, attr_value in bes_data.metadata.items():
+                shot_group.attrs[attr_name] = attr_value
+                shot_group.attrs['configuration_index'] = config_index
+            for point_name in bes_data._point_names:
+                for name in [f'{point_name}', f'{point_name}_time']:
+                    data = getattr(bes_data, name, None)
+                    if data is None:
+                        continue
+                    shot_group.require_dataset(
+                        name,
+                        data=data,
+                        shape=data.shape,
+                        dtype=data.dtype,
+                    )
+        return shot
+    
+    def print_hdf5_contents(self) -> None:
+        def print_attributes(obj) -> None:
+            for key, value in obj.attrs.items():
+                if isinstance(value, np.ndarray):
+                    print(f'  Attribute {key}:', value.shape, value.dtype)
+                else:
+                    print(f'  Attribute {key}:', value)
+        def recursively_print_content(group: h5py.Group) -> None:
+            print(f'Group {group.name}')
+            print_attributes(group)
+            for key, value in group.items():
+                if isinstance(value, h5py.Group):
+                    recursively_print_content(value)
+                if isinstance(value, h5py.Dataset):
+                    print(f'  Dataset {key}:', value.shape, value.dtype)
+                    print_attributes(value)
+        print(f'Contents of {self.hdf5_file}')
+        assert self.hdf5_file.exists()
+        with h5py.File(self.hdf5_file, 'r') as h5file:
+            recursively_print_content(h5file)
+
+    def print_hdf5_summary(self) -> None:
+        assert self.hdf5_file.exists()
+
+    def plot_metadata(
+        self,
+    ) -> None:
+        assert self.hdf5_file.exists()
+
+    def save_signals(
+        self,
+    ) -> None:
+        assert self.hdf5_file.exists()
         
 
-
-
 if __name__=='__main__':
-    bes_data = BES_Shot_Data()
+    # bes_data = BES_Shot_Data()
     # bes_data.get_signals([1,2])
 
-    dataset = BES_HDF5_Dataset()
-    dataset.load_shotlist()
+    dataset = BES_Metadata()
+    dataset.load_shotlist(truncate_hdf5=True)
+    dataset.print_hdf5_contents()
