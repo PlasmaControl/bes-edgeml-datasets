@@ -1,4 +1,5 @@
 import time
+from datetime import datetime
 from typing import Iterable
 import os
 import csv
@@ -8,6 +9,7 @@ import contextlib
 from pathlib import Path
 
 import numpy as np
+import matplotlib.pyplot as plt
 import MDSplus
 import h5py
 
@@ -27,9 +29,23 @@ class BES_Shot_Data:
         channels=None,
         only_8x8=False,
         only_standard_8x8=False,
+        connection=None,
     ):
         t1 = time.time()
-        self.connection = MDSplus.Connection('atlas.gat.com')
+        self.connection = connection
+        if self.connection is None:
+            tries = 0
+            while True:
+                tries += 1
+                try:
+                    self.connection = MDSplus.Connection('atlas.gat.com')
+                except:
+                    time.sleep(5)
+                    if tries <= 10:
+                        continue
+                    else:
+                        raise
+                break
         if channels is None:
             channels = np.arange(1, 65)
         channels = np.array(channels, dtype=int)
@@ -115,25 +131,6 @@ class BES_Shot_Data:
                     ptdata = f'_n = ptdata("{point_name}", {self.shot})'
                     data = np.array(self.connection.get(ptdata), dtype=np.float32)[::8]
                     data_time = np.array(self.connection.get('dim_of(_n)'), dtype=np.float32)[::8]
-                    # if point_name == 'bt':
-                    #     time_mask = data_time >= 0
-                    #     data = data[time_mask]
-                    #     data_time = data_time[time_mask]
-                    #     assert data.size == data_time.size
-                    #     max_bt = np.max(np.abs(data))
-                    #     valid_ind = np.flatnonzero(np.abs(data) > 0.98 * max_bt)
-                    #     data = data[0:valid_ind[-1]+1]
-                    #     data_time = data_time[0:valid_ind[-1]+1]
-                    #     assert data.size == data_time.size
-                    #     with open(f'shot_{shot}.csv', 'w', newline='') as csvfile:
-                    #         fieldnames = ['Time (ms)', 'Bt (T)']
-                    #         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
-                    #         writer.writeheader()
-                    #         rows = [
-                    #             {fieldnames[0]: data_time[i], fieldnames[1]: np.abs(data[i])}
-                    #             for i in range(data.size)
-                    #         ]
-                    #         writer.writerows(rows)
                 time_mask = np.logical_and(data_time >= self.time[0],
                                            data_time <= self.time[-1])
                 data = data[time_mask]
@@ -209,6 +206,7 @@ class BES_Metadata:
         truncate_hdf5: bool = False,
         max_shots: int = None,
         use_concurrent: bool = False,
+        max_workers: int = None,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
     ) -> None:
@@ -227,16 +225,17 @@ class BES_Metadata:
                     shotlist.append(int(row['shot']))
         shotlist = np.array(shotlist, dtype=int)
         assert shotlist.size > 0
-        only_8x8 = only_8x8 and only_standard_8x8
+        only_8x8 = only_8x8 or only_standard_8x8
         h5_mode = 'w' if truncate_hdf5 else 'a'
         with h5py.File(self.hdf5_file, h5_mode) as h5root:
             valid_shot_count = 0
             configuration_group = h5root.require_group('configurations')
             group_8x8 = configuration_group.require_group('8x8_configurations')
             group_non_8x8 = configuration_group.require_group('non_8x8_configurations')
+            connection = MDSplus.Connection('atlas.gat.com')
             if use_concurrent:
                 if not max_workers:
-                    max_workers = len(os.sched_getaffinity(0)) // 2
+                    max_workers = len(os.sched_getaffinity(0))
                 lock = threading.Lock()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = []
@@ -251,17 +250,37 @@ class BES_Metadata:
                                 only_8x8=only_8x8,
                                 only_standard_8x8=only_standard_8x8,
                                 lock=lock,
+                                connection=connection,
                             )
                         )
-                    shot_count = 0
-                    for future in concurrent.futures.as_completed(futures):
-                        shot_count += 1
-                        result = future.result()
-                        if future.exception() is None and result:
-                            print(f'Shot {result} is good ({shot_count} of {shotlist.size})')
-                            valid_shot_count += 1
-                        else:
-                            print(f'Shot {result} is bad ({shot_count} of {shotlist.size})')
+                    while True:
+                        time.sleep(60)
+                        running = 0
+                        done = 0
+                        valid_shot_count = 0
+                        for future in futures:
+                            running += int(future.running())
+                            done += int(future.done())
+                            if future.done():
+                                if future.result() and future.exception() is None:
+                                    valid_shot_count += 0
+                        with open('futures_status.txt', 'w') as txt_file:
+                            txt_file.write(f"{datetime.now()}\n")
+                            txt_file.write(f"Total futures: {len(futures)}\n")
+                            txt_file.write(f"Running: {running}\n")
+                            txt_file.write(f"Done: {done}\n")
+                            txt_file.write(f"Valid shots: {valid_shot_count}\n")
+                        if running == 0:
+                            break
+                    # shot_count = 0
+                    # for future in concurrent.futures.as_completed(futures):
+                    #     shot_count += 1
+                    #     result = future.result()
+                    #     if future.exception() is None and result:
+                    #         print(f'Shot {result} is good ({shot_count} of {shotlist.size})')
+                    #         valid_shot_count += 1
+                    #     else:
+                    #         print(f'Shot {result} is bad ({shot_count} of {shotlist.size})')
             else:
                 for i, shot in enumerate(shotlist):
                     print(f'Shot {shot} ({i + 1} of {shotlist.size})')
@@ -272,6 +291,7 @@ class BES_Metadata:
                         group_non_8x8=group_non_8x8,
                         only_8x8=only_8x8,
                         only_standard_8x8=only_standard_8x8,
+                        connection=connection,
                     )
                     if result:
                         valid_shot_count += 1
@@ -329,11 +349,13 @@ class BES_Metadata:
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
         lock: threading.Lock = None,
+        connection = None,
     ) -> int:
         bes_data = BES_Shot_Data(
             shot=shot,
             only_8x8=only_8x8,
             only_standard_8x8=only_standard_8x8,
+            connection=connection,
         )
         if bes_data.time is None:
             return 0
@@ -426,10 +448,26 @@ class BES_Metadata:
     def print_hdf5_summary(self) -> None:
         assert self.hdf5_file.exists()
 
-    def plot_metadata(
+    def plot_8x8_configurations(
         self,
     ) -> None:
         assert self.hdf5_file.exists()
+        with h5py.File(self.hdf5_file, 'r') as hfile:
+            total_shots = 0
+            plt.figure(figsize=(4,4))
+            plt.subplot(111)
+            for shot_key, shot_group in hfile.items():
+                if shot_key.startswith('config'):
+                    continue
+                plt.plot(shot_group.attrs['r_avg'], shot_group.attrs['z_avg'], 
+                         marker='x', ms=4, color='C0', alpha=0.5)
+            plt.xlim(218, 232)
+            plt.xlabel('R (cm)')
+            plt.ylim(-8, 8)
+            plt.ylabel('Z (cm)')
+            plt.gca().set_aspect('equal')
+            plt.tight_layout()
+            plt.savefig('8x8_configurations.pdf', format='pdf')
 
     def save_signals(
         self,
@@ -442,5 +480,6 @@ if __name__=='__main__':
     # bes_data.get_signals([1,2])
 
     dataset = BES_Metadata()
-    dataset.load_shotlist(truncate_hdf5=True)
+    dataset.load_shotlist(truncate_hdf5=True, use_concurrent=True, max_workers=2)
     dataset.print_hdf5_contents()
+    dataset.plot_8x8_configurations()
