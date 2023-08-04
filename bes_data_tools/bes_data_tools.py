@@ -263,7 +263,7 @@ class BES_Metadata:
                             done += int(future.done())
                             if future.done():
                                 if future.result() and future.exception() is None:
-                                    valid_shot_count += 0
+                                    valid_shot_count += 1
                         with open('futures_status.txt', 'w') as txt_file:
                             txt_file.write(f"{datetime.now()}\n")
                             txt_file.write(f"Total futures: {len(futures)}\n")
