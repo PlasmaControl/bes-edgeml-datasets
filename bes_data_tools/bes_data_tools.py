@@ -15,20 +15,14 @@ import h5py
 
 
 class BES_Shot_Data:
-    _point_names = [
-        'ip',
-        'bt',
-        'pinj',
-        'pinj_15l',
-        'pinj_15r',
-    ]
 
     def __init__(
         self,
-        shot=196491,
-        channels=None,
-        only_8x8=False,
-        only_standard_8x8=False,
+        shot=196560,
+        channels=np.arange(1, 65),
+        only_8x8=True,
+        only_standard_8x8=True,
+        max_delz=2.0,
         connection=None,
     ):
         t1 = time.time()
@@ -39,16 +33,12 @@ class BES_Shot_Data:
                 tries += 1
                 try:
                     self.connection = MDSplus.Connection('atlas.gat.com')
+                    break
                 except:
                     time.sleep(5)
                     if tries <= 10:
                         continue
-                    else:
-                        raise
-                break
-        if channels is None:
-            channels = np.arange(1, 65)
-        channels = np.array(channels, dtype=int)
+                    raise
         self.shot = shot
         self.channels = channels
         self.time = None
@@ -56,16 +46,23 @@ class BES_Shot_Data:
         self.metadata = None
         self.inboard_column_channel_order = None
         self.is_8x8 = self.is_standard_8x8 = False
+        self.delz_avg = None
+        self.point_names = [
+            'ip',
+            'bt',
+            'pinj',
+            'pinj_15l',
+            'pinj_15r',
+        ]
         only_8x8 = only_8x8 or only_standard_8x8
         # get time array
         try:
-            ptdata = f'ptdata("besfu01", {self.shot})'
-            sigtime = self.connection.get(f'dim_of({ptdata})')
-            self.time = np.array(sigtime).round(4)
-            # get metadata
+            sigtime = self.connection.get(f'dim_of(ptdata("besfu01", {self.shot}))')
+            self.time = np.array(sigtime)
+            # BES configuration metadata
             self.connection.openTree('bes', self.shot)
-            r_position = np.array(self.connection.get(r'\bes_r')).round(1)
-            z_position = -np.array(self.connection.get(r'\bes_z')).round(1)
+            r_position = np.array(self.connection.get(r'\bes_r'), dtype=np.float32)
+            z_position = -np.array(self.connection.get(r'\bes_z'), dtype=np.float32)
             assert r_position.size == 64 and z_position.size == 64
             self.connection.closeTree('bes', self.shot)
         except:
@@ -80,6 +77,8 @@ class BES_Shot_Data:
             zdiff = np.diff(z_position[i * 8 + np.arange(8)])
             row_test = np.all(np.abs(zdiff) <= 0.12)
             self.is_8x8 = col_test and row_test
+            if self.is_8x8 is False:
+                break
         if self.is_8x8:
             z_first_column = z_position[np.arange(8) * 8]
             self.inboard_column_channel_order = np.flip(z_first_column.argsort()) * 8
@@ -87,82 +86,101 @@ class BES_Shot_Data:
                 self.inboard_column_channel_order,
                 np.arange(8, dtype=int) * 8,
             )
-        if only_8x8 and not self.is_8x8:
+        if only_8x8 and (self.is_8x8 is False):
             self.time = None
             print(f'{self.shot}: ERROR not 8x8 config')
             return
-        if only_standard_8x8 and not self.is_standard_8x8:
+        if only_standard_8x8 and (self.is_standard_8x8 is False):
             print(f'{self.shot}: ERROR not standard 8x8 config')
             self.time = None
             return
+        self.delz_avg = np.abs(np.diff(z_position[np.arange(8)*8]).mean()).round(2)
+        if max_delz and self.delz_avg > max_delz:
+            self.time = None
+            print(f'{self.shot}: exceed max delz')
+            return
         self.metadata = {
             'shot': self.shot,
-            'delta_time': np.diff(self.time[0:100]).mean().round(4),
             'start_time': self.time[0],
             'stop_time': self.time[-1],
-            'n_time': self.time.size,
             'time_units': 'ms',
             'r_position': r_position,
             'z_position': z_position,
             'rz_units': 'cm',
-            'date': '',
-            'ip': 0.,
-            'bt': 0.,
             'is_8x8': self.is_8x8,
             'is_standard_8x8': self.is_standard_8x8,
-            'r_avg': np.mean(r_position).round(1) if self.is_8x8 else 0.,
-            'z_avg': np.mean(z_position).round(1) if self.is_8x8 else 0.,
-            'inboard_column_channel_order': self.inboard_column_channel_order,
+            'r_avg': np.mean(r_position).round(1) if self.is_8x8 else None,
+            'z_avg': np.mean(z_position).round(1) if self.is_8x8 else None,
+            'inboard_column_channel_order': self.inboard_column_channel_order if self.is_8x8 else None,
+            'delz_avg': self.delz_avg if self.is_8x8 else None,
         }
         # get ip, beams, etc.
-        for point_name in self._point_names:
-            try:
-                if point_name.startswith('pinj'):
+        try:
+            for node_name in ['ip', 'bt']:
+                result = self.get_signal(node_name, max_sample_rate=2e3)
+                setattr(self, node_name, result['data'])
+                setattr(self, f'{node_name}_time', result['time'])
+                signal: np.ndarray = getattr(self, node_name)
+                self.metadata[node_name] = (
+                    signal.max()
+                    if np.abs(signal.max()) > np.abs(signal.min())
+                    else signal.min()
+                )
+            for node_name in ['pinj', 'pinj_15l', 'pinj_15r']:
+                result = self.get_signal(node_name, tree='nb', max_sample_rate=10e3)
+                setattr(self, node_name, result['data'])
+                self.metadata[node_name] = result['data'].max()
+                if node_name == 'pinj':
+                    setattr(self, f'{node_name}_time', result['time'])
                     self.connection.openTree('nb', self.shot)
-                    data = np.array(self.connection.get(f'\\{point_name}'), dtype=np.float32)[::4]
-                    data_time = np.array(
-                            self.connection.get(f'dim_of(\\{point_name})'), dtype=np.float32)[::4]
-                    if point_name == 'pinj':
-                        date = self.connection.get(
-                            f'getnci(\\{point_name}, "time_inserted")')
-                        self.metadata['date'] = str(date.date)
+                    date = self.connection.get(f'getnci(\\pinj, "time_inserted")')
+                    self.metadata['date'] = str(date.date)
                     self.connection.closeTree('nb', self.shot)
-                else:
-                    ptdata = f'_n = ptdata("{point_name}", {self.shot})'
-                    data = np.array(self.connection.get(ptdata), dtype=np.float32)[::8]
-                    data_time = np.array(self.connection.get('dim_of(_n)'), dtype=np.float32)[::8]
-                time_mask = np.logical_and(data_time >= self.time[0],
-                                           data_time <= self.time[-1])
-                data = data[time_mask]
-                data_time = data_time[time_mask]
-            except:
-                self.time = None
-                print(f'{self.shot}: ERROR for data node {point_name}')
-                return
-            assert data.shape == data_time.shape
-            setattr(self, point_name, data)
-            if point_name == 'pinj' or 'pinj' not in point_name:
-                setattr(self, f'{point_name}_time', data_time)
-        pinj_15l_max = np.max(getattr(self, 'pinj_15l'))
-        if pinj_15l_max < 500e3:
+        except:
+            self.time = None
+            print(f'{self.shot}: ERROR for node {node_name}')
+            return
+        if self.metadata['pinj_15l'] < 500e3:
             self.time = None
             print(f'{self.shot}: ERROR small pinj_15l')
             return
-        for ptname in ['ip', 'bt']:
-            try:
-                data: np.ndarray = getattr(self, ptname)
-                if np.abs(data.max()) >= np.abs(data.min()):
-                    self.metadata[ptname] = data.max()
-                else:
-                    self.metadata[ptname] = data.min()
-            except:
-                self.time = None
-                print(f'{self.shot}: ERROR {ptname}')
-                return
-        print(f'{self.shot}: {self.time.size} time points')
-        print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
+        print(f'{self.shot}: Elapsed time = {time.time() - t1:.2f} s')
 
-    def get_signals(
+    def get_signal(
+        self,
+        node_name: str,
+        tree: str = None,  # MDSplus tree or None for PTDATA
+        max_sample_rate: int = None,  # max sample rate in Hz (approx)
+    ) -> dict:
+        if tree:
+            self.connection.openTree(tree, self.shot)
+            data = np.array(self.connection.get(f'\\{node_name}'), dtype=np.float32)
+            time = np.array(self.connection.get(f'dim_of(\\{node_name})'), dtype=np.float32)
+            self.connection.closeTree(tree, self.shot)
+        else:
+            ptdata = f'_n = ptdata("{node_name}", {self.shot})'
+            data = np.array(self.connection.get(ptdata), dtype=np.float32)
+            time = np.array(self.connection.get('dim_of(_n)'), dtype=np.float32)
+        if max_sample_rate:
+            rate = time.size / (time[-1]-time[0]) * 1e3  # sample rate in Hz
+            downsample_factor = int(rate / max_sample_rate)
+            if downsample_factor >= 2:
+                data = data[::downsample_factor]
+                time = time[::downsample_factor]
+        if self.time is not None:
+            time_mask = np.logical_and(
+                time >= self.time[0],
+                time <= self.time[-1],
+            )
+            data = data[time_mask]
+            time = time[time_mask]
+        return {
+            'point_name': node_name,
+            'data': data,
+            'time': time,
+        }
+
+    def get_bes_signals(
         self,
         channels=None,
     ):
@@ -202,13 +220,14 @@ class BES_Metadata:
     def load_shotlist(
         self,
         csv_file: str|Path = '',
-        shotlist: Iterable[int] = (196554,196555,196559,196560),
+        shotlist: Iterable[int] = (196554,196560),
         truncate_hdf5: bool = False,
         max_shots: int = None,
         use_concurrent: bool = False,
         max_workers: int = None,
-        only_8x8: bool = False,
-        only_standard_8x8: bool = False,
+        only_8x8: bool = True,
+        only_standard_8x8: bool = True,
+        max_delz: float = 2.0,
     ) -> None:
         if csv_file:
             # read shotlist from CSV file; column `shot` must exist
@@ -251,6 +270,7 @@ class BES_Metadata:
                                 only_standard_8x8=only_standard_8x8,
                                 lock=lock,
                                 connection=connection,
+                                max_delz=max_delz,
                             )
                         )
                     while True:
@@ -272,15 +292,6 @@ class BES_Metadata:
                             txt_file.write(f"Valid shots: {valid_shot_count}\n")
                         if running == 0:
                             break
-                    # shot_count = 0
-                    # for future in concurrent.futures.as_completed(futures):
-                    #     shot_count += 1
-                    #     result = future.result()
-                    #     if future.exception() is None and result:
-                    #         print(f'Shot {result} is good ({shot_count} of {shotlist.size})')
-                    #         valid_shot_count += 1
-                    #     else:
-                    #         print(f'Shot {result} is bad ({shot_count} of {shotlist.size})')
             else:
                 for i, shot in enumerate(shotlist):
                     print(f'Shot {shot} ({i + 1} of {shotlist.size})')
@@ -292,6 +303,7 @@ class BES_Metadata:
                         only_8x8=only_8x8,
                         only_standard_8x8=only_standard_8x8,
                         connection=connection,
+                        max_delz=max_delz,
                     )
                     if result:
                         valid_shot_count += 1
@@ -348,6 +360,7 @@ class BES_Metadata:
         group_non_8x8: h5py.Group,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
+        max_delz: float = None,
         lock: threading.Lock = None,
         connection = None,
     ) -> int:
@@ -356,6 +369,7 @@ class BES_Metadata:
             only_8x8=only_8x8,
             only_standard_8x8=only_standard_8x8,
             connection=connection,
+            max_delz=max_delz,
         )
         if bes_data.time is None:
             return 0
@@ -393,25 +407,23 @@ class BES_Metadata:
                 if bes_data.metadata['is_8x8']:
                     config_index = config_index_count[0] + 1
                     new_config = group_8x8.create_group(f'{config_index:04d}')
-                    new_config.attrs['r_avg'] = bes_data.metadata['r_avg']
-                    new_config.attrs['z_avg'] = bes_data.metadata['z_avg']
-                    new_config.attrs['inboard_column_channel_order'] = bes_data.inboard_column_channel_order
                 else:
                     config_index = config_index_count[1] + 1
                     new_config = group_non_8x8.create_group(f'{config_index:04d}')
-                new_config.attrs['r_position'] = bes_data.metadata['r_position']
-                new_config.attrs['z_position'] = bes_data.metadata['z_position']
-                new_config.attrs['is_8x8'] = bes_data.is_8x8
-                new_config.attrs['is_standard_8x8'] = bes_data.is_standard_8x8
                 new_config.attrs['shots'] = np.array([bes_data.shot], dtype=int)
                 new_config.attrs['n_shots'] = new_config.attrs['shots'].size
+                for key in ['r_position','z_position','is_8x8','is_standard_8x8']:
+                    new_config.attrs[key] = bes_data.metadata[key]
+                if bes_data.metadata['is_8x8']:
+                    for key in ['r_avg','z_avg','inboard_column_channel_order','delz_avg']:
+                        new_config.attrs[key] = bes_data.metadata[key]
             assert config_index
             # save shot metadata
             shot_group = h5root.require_group(str(shot))
             for attr_name, attr_value in bes_data.metadata.items():
                 shot_group.attrs[attr_name] = attr_value
                 shot_group.attrs['configuration_index'] = config_index
-            for point_name in bes_data._point_names:
+            for point_name in bes_data.point_names:
                 for name in [f'{point_name}', f'{point_name}_time']:
                     data = getattr(bes_data, name, None)
                     if data is None:
@@ -424,50 +436,209 @@ class BES_Metadata:
                     )
         return shot
     
+    @staticmethod
+    def print_attributes(obj) -> None:
+        for key, value in obj.attrs.items():
+            if isinstance(value, np.ndarray):
+                print(f'  Attribute {key}:', value.shape, value.dtype)
+            else:
+                print(f'  Attribute {key}:', value)
+
+    def recursively_print_content(self, group: h5py.Group) -> None:
+        print(f'Group {group.name}')
+        self.print_attributes(group)
+        for key, value in group.items():
+            if isinstance(value, h5py.Group):
+                self.recursively_print_content(value)
+            if isinstance(value, h5py.Dataset):
+                print(f'  Dataset {key}:', value.shape, value.dtype)
+                self.print_attributes(value)
+
     def print_hdf5_contents(self) -> None:
-        def print_attributes(obj) -> None:
-            for key, value in obj.attrs.items():
-                if isinstance(value, np.ndarray):
-                    print(f'  Attribute {key}:', value.shape, value.dtype)
-                else:
-                    print(f'  Attribute {key}:', value)
-        def recursively_print_content(group: h5py.Group) -> None:
-            print(f'Group {group.name}')
-            print_attributes(group)
-            for key, value in group.items():
-                if isinstance(value, h5py.Group):
-                    recursively_print_content(value)
-                if isinstance(value, h5py.Dataset):
-                    print(f'  Dataset {key}:', value.shape, value.dtype)
-                    print_attributes(value)
         print(f'Contents of {self.hdf5_file}')
         assert self.hdf5_file.exists()
         with h5py.File(self.hdf5_file, 'r') as h5file:
-            recursively_print_content(h5file)
+            self.recursively_print_content(h5file)
 
     def print_hdf5_summary(self) -> None:
+        print(f'Summary of {self.hdf5_file}')
         assert self.hdf5_file.exists()
+        with h5py.File(self.hdf5_file, 'r') as h5file:
+            print(f"Group {h5file.name}")
+            self.print_attributes(h5file)
+            config_group = h5file['configurations']
+            for group in config_group.values():
+                print(f"Group {group.name}")
+                self.print_attributes(group)
 
-    def plot_8x8_configurations(
-        self,
-    ) -> None:
+    def plot_ip_bt_histograms(
+            self, 
+            filename='ip_bt_hist.pdf',
+            **filter_kwargs,
+        ) -> None:
         assert self.hdf5_file.exists()
+        shotlist = []
+        if filter_kwargs:
+            shotlist = self.filter(**filter_kwargs)
         with h5py.File(self.hdf5_file, 'r') as hfile:
-            total_shots = 0
-            plt.figure(figsize=(4,4))
-            plt.subplot(111)
+            ip = np.zeros(len(hfile)) * np.NAN
+            bt = np.zeros(len(hfile)) * np.NAN
+            for i_key, (shot_key, shot_group) in enumerate(hfile.items()):
+                if shot_key.startswith('config'):
+                    continue
+                if shotlist and int(shot_key) not in shotlist:
+                    continue
+                ip[i_key] = shot_group.attrs['ip']
+                bt[i_key] = shot_group.attrs['bt']
+        ip = ip[np.isfinite(ip)]
+        bt = bt[np.isfinite(bt)]
+        plt.figure(figsize=(6,3))
+        plt.subplot(121)
+        plt.hist(ip/1e3, bins=21)
+        plt.xlabel('Ip (kA)')
+        plt.subplot(122)
+        plt.hist(bt, bins=21)
+        plt.xlabel('Bt (T)')
+        for axes in plt.gcf().axes:
+            axes.set_ylabel('Shot count')
+            axes.set_title(f'Shots: {ip.size}')
+        plt.tight_layout()
+        plt.savefig(filename, format='pdf')
+
+    def plot_8x8_rz_avg(
+            self, 
+            filename='8x8_configurations.pdf',
+            **filter_kwargs,
+        ) -> None:
+        assert self.hdf5_file.exists()
+        shotlist = []
+        if filter_kwargs:
+            shotlist = self.filter(**filter_kwargs)
+        with h5py.File(self.hdf5_file, 'r') as hfile:
+            r_avg = np.zeros(len(hfile)) * np.NAN
+            z_avg = np.zeros(len(hfile)) * np.NAN
+            # delz_avg = []
+            for i_key, (shot_key, shot_group) in enumerate(hfile.items()):
+                if shot_key.startswith('config'):
+                    continue
+                z_position = shot_group.attrs['z_position']
+                # delz = np.abs(np.diff(z_position[np.arange(8)*8]).mean())
+                # delz_avg.append(delz)
+                if shotlist and int(shot_key) not in shotlist:
+                    continue
+                r_avg[i_key] = shot_group.attrs['r_avg']
+                z_avg[i_key] = shot_group.attrs['z_avg']
+        r_avg = r_avg[np.isfinite(r_avg)]
+        z_avg = z_avg[np.isfinite(z_avg)]
+        plt.figure(figsize=(4,4))
+        plt.subplot(111)
+        plt.plot(r_avg, z_avg, 'xb', alpha=0.5)
+        plt.xlim(218, 232)
+        plt.xlabel('R (cm)')
+        plt.ylim(-8, 8)
+        plt.ylabel('Z (cm)')
+        plt.title(f'Shots: {r_avg.size}')
+        plt.gca().set_aspect('equal')
+        plt.tight_layout()
+        plt.savefig(filename, format='pdf')
+
+    def filter(
+            self,
+            r_avg=None,
+            z_avg=None,
+            ip=None,
+            bt=None,
+            pinj_15l=None,
+            pinj_15r=None,
+            only_standard_8x8=True,
+            export_csv=False,
+            export_metadata=False,
+            filename_prefix='filtered',
+    ) -> list:
+        shotlist = []
+        assert self.hdf5_file.exists()
+        inputs = {
+            'r_avg': r_avg,
+            'z_avg': z_avg,
+            'ip': ip,
+            'bt': bt,
+            'pinj_15l': pinj_15l,
+            'pinj_15r': pinj_15r,
+        }
+        candidate_shots = 0
+        with h5py.File(self.hdf5_file, 'r') as hfile:
+            input_violation_counts = {key: 0 for key in inputs}
             for shot_key, shot_group in hfile.items():
                 if shot_key.startswith('config'):
                     continue
-                plt.plot(shot_group.attrs['r_avg'], shot_group.attrs['z_avg'], 
-                         marker='x', ms=4, color='C0', alpha=0.5)
-            plt.xlim(218, 232)
-            plt.xlabel('R (cm)')
-            plt.ylim(-8, 8)
-            plt.ylabel('Z (cm)')
-            plt.gca().set_aspect('equal')
-            plt.tight_layout()
-            plt.savefig('8x8_configurations.pdf', format='pdf')
+                if only_standard_8x8 and not shot_group.attrs['is_standard_8x8']:
+                    continue
+                candidate_shots += 1
+                in_range = True
+                for input_key, input_value in inputs.items():
+                    if input_value and len(input_value)==2:
+                        if (shot_group.attrs[input_key] < input_value[0] or
+                            shot_group.attrs[input_key] > input_value[1]):
+                            in_range = False
+                            input_violation_counts[input_key] += 1
+                if in_range:
+                    shotlist.append(shot_group.attrs['shot'])
+        print(f'Valid shots with filter: {len(shotlist)} (total candidate shots {candidate_shots})')
+        for input_key, count in input_violation_counts.items():
+            print(f"  {input_key} violations: {count}  (range {inputs[input_key]})")
+        if export_csv:
+            with open(f"{filename_prefix}_shotlist.csv", 'w') as csvfile:
+                fields = ['shot', 'start_time', 'stop_time']
+                writer = csv.DictWriter(csvfile, fieldnames=fields)
+                writer.writeheader()
+                with h5py.File(self.hdf5_file, 'r') as hfile:
+                    shotlist_data = [
+                        {key: hfile[f'{shot}'].attrs[key] for key in fields}
+                        for shot in shotlist
+                    ]
+                writer.writerows(shotlist_data)
+        if export_metadata:
+            pass
+        return shotlist
+
+    def plot_configurations(self) -> None:
+        assert self.hdf5_file.exists()
+        with h5py.File(self.hdf5_file, 'r') as hfile:
+            config_group = hfile['configurations']['8x8_configurations']
+            assert len(config_group) > 0
+            _, axes = plt.subplots(nrows=4, ncols=3, figsize=(8.5,11))
+            i_page = 0
+            for i_config, (key, group) in enumerate(config_group.items()):
+                plot_axes = i_config%axes.size
+                if plot_axes == 0:
+                    for ax in axes.flat:
+                        ax.clear()
+                plt.sca(axes.flat[plot_axes])
+                plt.plot(
+                    group.attrs['r_position'], 
+                    group.attrs['z_position'],
+                    'xb',
+                    markersize=3,
+                )
+                plt.title(
+                    f"Config {key} | n_shots {group.attrs['n_shots']}",
+                    fontsize='medium',
+                )
+                plt.xlim(205, 235)
+                plt.xlabel('R (cm)')
+                plt.ylim(-10, 10)
+                plt.ylabel('Z (cm)')
+                plt.annotate(f"R_avg={group.attrs['r_avg']:.1f}", 
+                             xy=[0.05,0.12], xycoords='axes fraction', fontsize='x-small')
+                plt.annotate(f"Z_avg={group.attrs['z_avg']:.1f}",
+                             xy=[0.05,0.03], xycoords='axes fraction', fontsize='x-small')
+                plt.gca().set_aspect('equal')
+                if plot_axes == axes.size-1 or i_config == len(config_group)-1:
+                    i_page += 1
+                    plt.tight_layout()
+                    plt.savefig(f'configs_{i_page:02d}.pdf', format='pdf')
+
+
 
     def save_signals(
         self,
@@ -479,7 +650,28 @@ if __name__=='__main__':
     # bes_data = BES_Shot_Data()
     # bes_data.get_signals([1,2])
 
+    # dataset = BES_Metadata('/home/smithdr/ml/elm/data/big_metadata_v3.hdf5')
     dataset = BES_Metadata()
-    dataset.load_shotlist(truncate_hdf5=True, use_concurrent=True, max_workers=2)
+    dataset.load_shotlist(truncate_hdf5=True)
+    # # dataset.load_shotlist(truncate_hdf5=True, use_concurrent=False, max_workers=2)
     dataset.print_hdf5_contents()
-    dataset.plot_8x8_configurations()
+    # dataset.print_hdf5_summary()
+    # # dataset.plot_ip_bt_histograms()
+    # # dataset.plot_configurations()
+    # # dataset.plot_8x8_rz_avg()
+    # filter_kwargs = dict(
+    #     r_avg = [222.0, 227.5],
+    #     z_avg = [-1.5, 1],
+    #     ip = [0.6e6, 2e6],
+    #     bt = [-3, 0],
+    #     pinj_15l = [0.7e6, 2.5e6],
+    # )
+    # # dataset.plot_8x8_rz_avg(
+    # #     filename='filtered_config.pdf',
+    # #     **filter_kwargs,
+    # # )
+    # dataset.filter(
+    #     filename_prefix='filtered',
+    #     export_csv=True,
+    #     **filter_kwargs,
+    # )
