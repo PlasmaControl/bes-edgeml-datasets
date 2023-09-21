@@ -1,6 +1,0 @@
-numpy
-matplotlib
-h5py
-
-mdsplus
-mirpyidl
