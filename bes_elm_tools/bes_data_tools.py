@@ -14,7 +14,7 @@ import MDSplus
 import h5py
 
 
-class BES_Shot_Data:
+class Shot:
 
     def __init__(
         self,
@@ -218,7 +218,7 @@ class BES_Shot_Data:
         print(f'{self.shot}: Signal time = {time.time() - t1:.2f} s')
 
 
-class BES_H5_Data:
+class HDF5_Data:
 
     def __init__(
         self,
@@ -385,7 +385,7 @@ class BES_H5_Data:
         lock: threading.Lock = None,
         connection = None,
     ) -> int:
-        bes_data = BES_Shot_Data(
+        bes_data = Shot(
             connection=connection,
             shot=shot,
             only_8x8=only_8x8,
@@ -679,7 +679,7 @@ if __name__=='__main__':
     # bes_data = BES_Shot_Data()
     # bes_data.get_bes_signals([1,2])
 
-    dataset = BES_H5_Data()
+    dataset = HDF5_Data()
     dataset.load_shotlist(truncate_hdf5=True)
     # # dataset.load_shotlist(truncate_hdf5=True, use_concurrent=False, max_workers=2)
     dataset.print_hdf5_contents()

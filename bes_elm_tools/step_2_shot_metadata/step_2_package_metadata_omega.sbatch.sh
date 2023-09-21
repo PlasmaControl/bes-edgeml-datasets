@@ -15,7 +15,7 @@ echo $PYTHONPATH
 
 PYTHON_SCRIPT=$(cat << END
 
-from bes_data_tools.bes_data_tools import BES_Metadata
+from bes_elm_tools.bes_data_tools import BES_Metadata
 
 dataset = BES_Metadata(hdf5_file='data/big_metadata_v4.hdf5')
 dataset.load_shotlist(
