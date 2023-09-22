@@ -7,6 +7,7 @@ import threading
 import concurrent.futures
 import contextlib
 from pathlib import Path
+import dataclasses
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -14,49 +15,45 @@ import MDSplus
 import h5py
 
 
-class Shot:
+def make_mdsplus_connection() -> MDSplus.Connection:
+    tries = 0
+    success = False
+    while success is False:
+        try:
+            connection = MDSplus.Connection('atlas.gat.com')
+            success = True
+        except:
+            tries += 1
+            time.sleep(5)
+            if tries > 10:
+                raise
+    return connection
 
-    def __init__(
-        self,
-        shot: int = 196560,
-        channels: Iterable = np.arange(1, 65),
-        only_8x8: bool = None,
-        only_standard_8x8: bool = None,
-        max_delz: float = None,
-        only_pos_ip: bool = None,
-        only_neg_bt: bool = None,
-        min_pinj_15l: float = None,
-        connection: MDSplus.Connection = None,
-        skip_metadata: bool = False,
-    ):
+
+@dataclasses.dataclass
+class Shot:
+    shot: int = 196560
+    channels: Iterable = range(1, 65)
+    only_8x8: bool = False
+    only_standard_8x8: bool = False
+    only_pos_ip: bool = False
+    only_neg_bt: bool = False
+    max_delz: float = None
+    min_pinj_15l: float = None
+    connection: MDSplus.Connection = None
+    skip_metadata: bool = False
+    quiet: bool = False
+
+    def __post_init__(self):
         t1 = time.time()
-        self.connection = connection
         if self.connection is None:
-            tries = 0
-            while True:
-                tries += 1
-                try:
-                    self.connection = MDSplus.Connection('atlas.gat.com')
-                    break
-                except:
-                    time.sleep(5)
-                    if tries <= 10:
-                        continue
-                    raise
-        self.shot = shot
-        self.channels = np.array(channels, dtype=int)
+            self.connection = make_mdsplus_connection()
+        self.channels = np.array(self.channels, dtype=int)
         self.time = None
         self.signals = None
         self.metadata = None
-        self.inboard_column_channel_order = None
         self.is_8x8 = self.is_standard_8x8 = False
-        self.delz_avg = None
-        self.signal_names = [
-            'pinj',
-            'pinj_15l',
-            'pinj_15r',
-        ]
-        only_8x8 = only_8x8 or only_standard_8x8
+        self.only_8x8 = self.only_8x8 or self.only_standard_8x8
         # get time array
         try:
             sigtime = self.connection.get(f'dim_of(ptdata("besfu01", {self.shot}))')
@@ -71,7 +68,7 @@ class Shot:
             self.time = None
             print(f'{self.shot}: error with BES data')
             return
-        if skip_metadata:
+        if self.skip_metadata:
             return
         for i in np.arange(8):
             # del-r of column i
@@ -85,21 +82,21 @@ class Shot:
                 break
         if self.is_8x8:
             z_first_column = z_position[np.arange(8) * 8]
-            self.inboard_column_channel_order = np.flip(z_first_column.argsort()) * 8
+            inboard_column_channel_order = np.flip(z_first_column.argsort()) * 8
             self.is_standard_8x8 = np.array_equal(
-                self.inboard_column_channel_order,
+                inboard_column_channel_order,
                 np.arange(8, dtype=int) * 8,
             )
-        if only_8x8 and (self.is_8x8 is False):
+        if self.only_8x8 and (self.is_8x8 is False):
             self.time = None
             print(f'{self.shot}: ERROR not 8x8 config')
             return
-        if only_standard_8x8 and (self.is_standard_8x8 is False):
+        if self.only_standard_8x8 and (self.is_standard_8x8 is False):
             print(f'{self.shot}: ERROR not standard 8x8 config')
             self.time = None
             return
-        self.delz_avg = np.abs(np.diff(z_position[np.arange(8)*8]).mean()).round(2)
-        if max_delz and self.delz_avg > max_delz:
+        delz_avg = np.abs(np.diff(z_position[np.arange(8)*8]).mean()).round(2)
+        if self.max_delz and delz_avg > self.max_delz:
             self.time = None
             print(f'{self.shot}: exceed max delz')
             return
@@ -115,32 +112,29 @@ class Shot:
             'is_standard_8x8': self.is_standard_8x8,
             'r_avg': np.mean(r_position).round(1) if self.is_8x8 else None,
             'z_avg': np.mean(z_position).round(1) if self.is_8x8 else None,
-            'inboard_column_channel_order': self.inboard_column_channel_order if self.is_8x8 else None,
-            'delz_avg': self.delz_avg if self.is_8x8 else None,
+            'inboard_column_channel_order': inboard_column_channel_order if self.is_8x8 else None,
+            'delz_avg': delz_avg if self.is_8x8 else None,
         }
         # get ip, beams, etc.
         try:
             for node_name in ['ip', 'bt']:
                 result = self.get_signal(node_name, max_sample_rate=5e3)
-                # if node_name == 'ip':
-                #     setattr(self, node_name, result['data'])
-                #     setattr(self, f'{node_name}_time', result['time'])
                 signal:np.ndarray = result['data']
                 self.metadata[node_name] = (
                     signal.max()
                     if np.abs(signal.max()) > np.abs(signal.min())
                     else signal.min()
                 )
-                if only_pos_ip and node_name=='ip':
+                if self.only_pos_ip and node_name=='ip':
                     assert self.metadata[node_name] > 0
-                if only_neg_bt and node_name=='bt':
+                if self.only_neg_bt and node_name=='bt':
                     assert self.metadata[node_name] < 0
             for node_name in ['pinj', 'pinj_15l', 'pinj_15r']:
                 result = self.get_signal(node_name, tree='nb', max_sample_rate=5e3)
                 setattr(self, node_name, result['data'])
                 self.metadata[node_name] = result['data'].max()
-                if min_pinj_15l and node_name=='pinj_15l':
-                    assert self.metadata[node_name] > min_pinj_15l
+                if self.min_pinj_15l and node_name=='pinj_15l':
+                    assert self.metadata[node_name] > self.min_pinj_15l
                 if node_name == 'pinj':
                     setattr(self, f'{node_name}_time', result['time'])
                     self.connection.openTree('nb', self.shot)
@@ -151,7 +145,7 @@ class Shot:
             self.time = None
             print(f'{self.shot}: ERROR for node {node_name}')
             return
-        print(f'{self.shot}: Elapsed time = {time.time() - t1:.2f} s')
+        if not self.quiet: print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
 
     def get_signal(
         self,
@@ -197,7 +191,6 @@ class Shot:
         if channels:
             self.channels = np.array(channels, dtype=int)
         t1 = time.time()
-        print(f'{self.shot}: fetching {self.channels.size} BES signals')
         tdi_vars = []
         tdi_assignments = []
         for channel in self.channels:
@@ -215,16 +208,15 @@ class Shot:
             self.time = None
             self.signals = None
             return
-        print(f'{self.shot}: Signal time = {time.time() - t1:.2f} s')
+        if not self.quiet: print(f'{self.shot}: Signal time = {time.time() - t1:.2f} s')
 
 
+@dataclasses.dataclass
 class HDF5_Data:
+    hdf5_file: str|Path = 'test_metadata.hdf5'
 
-    def __init__(
-        self,
-        hdf5_file: str|Path = 'bes_data.hdf5',
-    ) -> None:
-        self.hdf5_file = Path(hdf5_file)
+    def __post_init__(self) -> None:
+        self.hdf5_file = Path(self.hdf5_file)
 
     def load_shotlist(
         self,
@@ -263,7 +255,7 @@ class HDF5_Data:
             configuration_group = h5root.require_group('configurations')
             group_8x8 = configuration_group.require_group('8x8_configurations')
             group_non_8x8 = configuration_group.require_group('non_8x8_configurations')
-            connection = MDSplus.Connection('atlas.gat.com')
+            connection = make_mdsplus_connection()
             if use_concurrent:
                 if not max_workers:
                     max_workers = len(os.sched_getaffinity(0))
@@ -394,6 +386,7 @@ class HDF5_Data:
             only_pos_ip=only_pos_ip,
             only_neg_bt=only_neg_bt,
             min_pinj_15l=min_pinj_15l,
+            quiet=True,
         )
         if bes_data.time is None:
             del bes_data
@@ -448,7 +441,7 @@ class HDF5_Data:
             for attr_name, attr_value in bes_data.metadata.items():
                 shot_group.attrs[attr_name] = attr_value
                 shot_group.attrs['configuration_index'] = config_index
-            for point_name in bes_data.signal_names:
+            for point_name in ['pinj', 'pinj_15l', 'pinj_15r']:
                 for name in [f'{point_name}', f'{point_name}_time']:
                     data = getattr(bes_data, name, None)
                     if data is None:
@@ -505,7 +498,7 @@ class HDF5_Data:
         assert self.hdf5_file.exists()
         shotlist = []
         if filter_kwargs:
-            shotlist = self.filter(**filter_kwargs)
+            shotlist = self.filter_and_export(**filter_kwargs)
         with h5py.File(self.hdf5_file, 'r') as hfile:
             ip = np.zeros(len(hfile)) * np.NAN
             bt = np.zeros(len(hfile)) * np.NAN
@@ -539,7 +532,7 @@ class HDF5_Data:
         assert self.hdf5_file.exists()
         shotlist = []
         if filter_kwargs:
-            shotlist = self.filter(**filter_kwargs)
+            shotlist = self.filter_and_export(**filter_kwargs)
         with h5py.File(self.hdf5_file, 'r') as hfile:
             r_avg = np.zeros(len(hfile)) * np.NAN
             z_avg = np.zeros(len(hfile)) * np.NAN
@@ -605,7 +598,7 @@ class HDF5_Data:
                     plt.tight_layout()
                     plt.savefig(f'configs_{i_page:02d}.pdf', format='pdf')
 
-    def filter(
+    def filter_shots(
             self,
             r_avg=None,
             z_avg=None,
@@ -615,8 +608,6 @@ class HDF5_Data:
             pinj_15r=None,
             only_standard_8x8=True,
             export_csv=False,
-            export_metadata=False,
-            export_max_shots=None,
             filename_prefix='filtered',
     ) -> list:
         shotlist = []
@@ -662,45 +653,27 @@ class HDF5_Data:
                         {key: hfile[f'{shot}'].attrs[key] for key in fields}
                         for shot in shotlist
                     ]
-                if export_max_shots:
-                    shotlist_data = shotlist_data[:export_max_shots]
                 writer.writerows(shotlist_data)
-        if export_metadata:
-            pass
+        # if export_data:
+        #     pass
         return shotlist
 
-    def save_signals(
-        self,
-    ) -> None:
-        assert self.hdf5_file.exists()
+    # def save_signals(
+    #     self,
+    # ) -> None:
+    #     assert self.hdf5_file.exists()
         
 
 if __name__=='__main__':
-    # bes_data = BES_Shot_Data()
+    # bes_data = Shot()
     # bes_data.get_bes_signals([1,2])
 
-    dataset = HDF5_Data()
-    dataset.load_shotlist(truncate_hdf5=True)
-    # # dataset.load_shotlist(truncate_hdf5=True, use_concurrent=False, max_workers=2)
+    # dataset = HDF5_Data()
+    # dataset.load_shotlist(truncate_hdf5=True)
+    # dataset.print_hdf5_contents()
+
+    dataset = HDF5_Data(
+        # hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v3.hdf5',
+        hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v5.hdf5',
+    )
     dataset.print_hdf5_contents()
-    # dataset.print_hdf5_summary()
-    # dataset.plot_ip_bt_histograms()
-    # dataset.plot_configurations()
-    # dataset.plot_8x8_rz_avg()
-    # filter_kwargs = dict(
-    #     r_avg = [222.0, 227.5],
-    #     z_avg = [-1.5, 1],
-    #     ip = [0.6e6, 2e6],
-    #     bt = [-3, 0],
-    #     pinj_15l = [0.7e6, 2.5e6],
-    # )
-    # dataset.filter(
-    #     filename_prefix='filtered',
-    #     export_csv=True,
-    #     # export_max_shots=5,
-    #     **filter_kwargs,
-    # )
-    # dataset.plot_8x8_rz_avg(
-    #     filename='filtered_config.pdf',
-    #     **filter_kwargs,
-    # )

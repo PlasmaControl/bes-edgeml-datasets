@@ -121,7 +121,7 @@ class Elm_List:
                                 shape=node_data[tag].shape,
                                 dtype=node_data[tag].dtype,
                             )
-                    node_names = ['FS02', 'FS03', 'FS04', 'FS05']
+                    node_names = ['FS03', 'FS04', 'FS05']
                     for i_node, node_name in enumerate(node_names):
                         print(f'  Getting node `{node_name}`')
                         signal_dict = bes_data.get_signal(

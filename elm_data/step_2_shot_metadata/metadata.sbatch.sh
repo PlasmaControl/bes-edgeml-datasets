@@ -15,19 +15,20 @@ echo $PYTHONPATH
 
 PYTHON_SCRIPT=$(cat << END
 
-from bes_elm_tools.bes_data_tools import BES_Metadata
+from elm_data.data_tools import HDF5_Data
 
-dataset = BES_Metadata(hdf5_file='data/big_metadata_v4.hdf5')
+dataset = HDF5_Data(
+    hdf5_file='metadata_v5.hdf5',
+)
 dataset.load_shotlist(
-    csv_file='data/big_shotlist.csv',
+    csv_file='/home/smithdr/ml/elm_data/step_1_shotlist_from_D3DRDB/shotlist.csv',
     truncate_hdf5=True, 
     use_concurrent=True, 
 )
-dataset.print_hdf5_contents()
 dataset.print_hdf5_summary()
-# dataset.plot_8x8_rz_avg()
-# dataset.plot_ip_bt_histograms()
-# dataset.plot_configurations()
+dataset.plot_8x8_rz_avg()
+dataset.plot_ip_bt_histograms()
+dataset.plot_configurations()
 
 END
 )
