@@ -55,7 +55,10 @@ class Shot:
         self.is_8x8 = self.is_standard_8x8 = False
         self.only_8x8 = self.only_8x8 or self.only_standard_8x8
         # get BES time array
-        self.bes_time = np.array(self.connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'))
+        self.bes_time = np.array(
+            self.connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'),
+            dtype=np.float32,
+        )
         assert self.bes_time.size > 0
         self.start_time = self.bes_time[0]
         self.stop_time = self.bes_time[-1]
@@ -177,10 +180,10 @@ class Shot:
                 setattr(self, f'{node_name}_time', signal_dict['time'])
         if not self.quiet: print(f'{self.shot}: Non-BES signal time = {time.time() - t1:.2f} s')
 
-    def get_bes_signals(self, channels: Iterable = tuple()):
+    def get_bes_signals(self, channels: Iterable = tuple(), max_sample_rate: float = None):
         self.channels = np.array(channels, dtype=int) if channels else self.channels
         assert np.all(self.channels > 0)
-        self.bes_signals = np.empty([self.channels.size, self.bes_time.size])
+        self.bes_signals = np.empty([self.channels.size, self.bes_time.size], dtype=np.float32)
         t1 = time.time()
         tdi_vars = []
         tdi_assignments = []
@@ -191,7 +194,13 @@ class Shot:
             tdi_assignments.append(tmp)
         self.connection.get(', '.join(tdi_assignments))
         for i, tdi_var in enumerate(tdi_vars):
-            self.bes_signals[i, :] = np.array(self.connection.get(tdi_var))
+            self.bes_signals[i, :] = np.array(self.connection.get(tdi_var), dtype=np.float32)
+        if max_sample_rate:
+            rate = np.mean(np.diff(self.bes_time[:1000])) * 1e3
+            downsample_factor = int(rate / max_sample_rate)
+            if downsample_factor >= 2:
+                self.bes_signals = self.bes_signals[:, ::downsample_factor]
+                self.bes_time = self.bes_time[::downsample_factor]
         if not self.quiet: print(f'{self.shot}: BES signal time = {time.time() - t1:.2f} s')
 
     def get_signal(
@@ -300,7 +309,6 @@ class HDF5_Data:
                             )
                         )
                     while True:
-                        time.sleep(60)
                         running = 0
                         done = 0
                         valid_shot_count = 0
@@ -308,7 +316,7 @@ class HDF5_Data:
                             running += int(future.running())
                             done += int(future.done())
                             if future.done():
-                                if future.result() and future.exception() is None:
+                                if (future.result() is not None) and (future.exception() is None):
                                     valid_shot_count += 1
                         with open('futures_status.txt', 'w') as txt_file:
                             txt_file.write(f"{datetime.now()}\n")
@@ -318,6 +326,7 @@ class HDF5_Data:
                             txt_file.write(f"Valid shots: {valid_shot_count}\n")
                         if running == 0:
                             break
+                        time.sleep(60)
             else:
                 for i, shot in enumerate(shotlist):
                     print(f'Shot {shot} ({i + 1} of {shotlist.size})')
@@ -398,10 +407,10 @@ class HDF5_Data:
         inputs = {
             'r_avg': r_avg,
             'z_avg': z_avg,
-            'ip': ip,
-            'bt': bt,
-            'pinj_15l': pinj_15l,
-            'pinj_15r': pinj_15r,
+            'ip_extremum': ip,
+            'bt_extremum': bt,
+            'pinj_15l_max': pinj_15l,
+            'pinj_15r_max': pinj_15r,
         }
         candidate_shots = 0
         with h5py.File(self.hdf5_file, 'r') as hfile:
@@ -414,7 +423,7 @@ class HDF5_Data:
                 candidate_shots += 1
                 in_range = True
                 for input_key, input_value in inputs.items():
-                    if input_value and len(input_value)==2:
+                    if input_value is not None and len(input_value)==2:
                         if (shot_group.attrs[input_key] < input_value[0] or
                             shot_group.attrs[input_key] > input_value[1]):
                             in_range = False
@@ -461,8 +470,8 @@ class HDF5_Data:
             for i_key, (shot_key, shot_group) in enumerate(hfile.items()):
                 if shot_key.startswith('config'): continue
                 if shotlist and int(shot_key) not in shotlist: continue
-                ip[i_key] = shot_group.attrs['ip']
-                bt[i_key] = shot_group.attrs['bt']
+                ip[i_key] = shot_group.attrs['ip_extremum']
+                bt[i_key] = shot_group.attrs['bt_extremum']
         ip = ip[np.isfinite(ip)]
         bt = bt[np.isfinite(bt)]
         plt.figure(figsize=(6,3))
@@ -566,6 +575,7 @@ class HDF5_Data:
             )
         except:
             print(f"Data for shot {shot} failed")
+            return None
         if lock is None:
             lock = contextlib.nullcontext()
         with lock:

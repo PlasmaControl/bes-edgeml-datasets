@@ -1,12 +1,13 @@
+import numpy as np
 from elm_data.data_tools import HDF5_Data
 
 dataset = HDF5_Data(
-    hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v5.hdf5',
+    hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v6.hdf5',
 )
 dataset.print_hdf5_summary()
 
 filtered_shotlist = dataset.filter_shots(
-    r_avg = [223.0, 227.5],
+    r_avg = [223.0, 228.0],
     z_avg = [-1.5, 1],
     ip = [0.8e6, 2e6],
     bt = [-3, -1.8],
