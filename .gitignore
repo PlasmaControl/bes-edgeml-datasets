@@ -9,6 +9,8 @@ figures/
 *.csv
 *.hdf5
 
+futures*.txt
+
 !bes_data_tools/data/sample_shotlist.csv
 
 __pycache__/

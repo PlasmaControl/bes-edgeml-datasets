@@ -1,5 +1,0 @@
-2023-09-22 12:05:45.325620
-Total futures: 10
-Running: 0
-Done: 10
-Valid shots: 10

@@ -34,7 +34,7 @@ def make_mdsplus_connection() -> MDSplus.Connection:
 @dataclasses.dataclass
 class Shot:
     shot: int = 196560
-    channels: Iterable = tuple()
+    channels: Iterable = None
     with_other_signals: bool = False
     only_8x8: bool = False
     only_standard_8x8: bool = False
@@ -49,6 +49,8 @@ class Shot:
         t1 = time.time()
         if self.connection is None:
             self.connection = make_mdsplus_connection()
+        if self.channels is None:
+            self.channels = []
         self.channels = np.array(self.channels, dtype=int)
         self.bes_signals = None
         # self.metadata = None
@@ -168,7 +170,7 @@ class Shot:
             setattr(self, node_name, signal_dict['data'])
             if i_node==0:
                 setattr(self, 'FS_time', signal_dict['time'])
-        node_names = ['denv2f']
+        node_names = ['denv3f']
         for i_node, node_name in enumerate(node_names):
             signal_dict = self.get_signal(
                 node_name=node_name,
@@ -180,7 +182,11 @@ class Shot:
                 setattr(self, f'{node_name}_time', signal_dict['time'])
         if not self.quiet: print(f'{self.shot}: Non-BES signal time = {time.time() - t1:.2f} s')
 
-    def get_bes_signals(self, channels: Iterable = tuple(), max_sample_rate: float = None):
+    def get_bes_signals(
+            self, 
+            channels: Iterable = None, 
+            max_sample_rate: float = 200,
+    ):
         self.channels = np.array(channels, dtype=int) if channels else self.channels
         assert np.all(self.channels > 0)
         self.bes_signals = np.empty([self.channels.size, self.bes_time.size], dtype=np.float32)
@@ -196,8 +202,8 @@ class Shot:
         for i, tdi_var in enumerate(tdi_vars):
             self.bes_signals[i, :] = np.array(self.connection.get(tdi_var), dtype=np.float32)
         if max_sample_rate:
-            rate = np.mean(np.diff(self.bes_time[:1000])) * 1e3
-            downsample_factor = int(rate / max_sample_rate)
+            rate = np.mean(np.diff(self.bes_time[:1000])) * 1e3  # kHz
+            downsample_factor = int(np.rint(rate / max_sample_rate))
             if downsample_factor >= 2:
                 self.bes_signals = self.bes_signals[:, ::downsample_factor]
                 self.bes_time = self.bes_time[::downsample_factor]
@@ -255,6 +261,8 @@ class HDF5_Data:
         max_shots: int = None,
         use_concurrent: bool = False,
         max_workers: int = None,
+        channels: Iterable = None,
+        with_other_signals: bool = False,
         only_8x8: bool = True,
         only_standard_8x8: bool = True,
         max_delz: float = 2.0,
@@ -298,6 +306,8 @@ class HDF5_Data:
                                 h5root=h5root,
                                 group_8x8=group_8x8,
                                 group_non_8x8=group_non_8x8,
+                                channels=channels,
+                                with_other_signals=with_other_signals,
                                 only_8x8=only_8x8,
                                 only_standard_8x8=only_standard_8x8,
                                 lock=lock,
@@ -335,6 +345,8 @@ class HDF5_Data:
                         h5root=h5root,
                         group_8x8=group_8x8,
                         group_non_8x8=group_non_8x8,
+                        channels=channels,
+                        with_other_signals=with_other_signals,
                         only_8x8=only_8x8,
                         only_standard_8x8=only_standard_8x8,
                         connection=connection,
@@ -552,6 +564,8 @@ class HDF5_Data:
         h5root: h5py.File,
         group_8x8: h5py.Group,
         group_non_8x8: h5py.Group,
+        channels: Iterable = None,
+        with_other_signals: bool = False,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
         max_delz: float = None,
@@ -563,6 +577,8 @@ class HDF5_Data:
     ) -> int:
         try:
             bes_data = Shot(
+                channels=channels,
+                with_other_signals=with_other_signals,
                 connection=connection,
                 shot=shot,
                 only_8x8=only_8x8,
@@ -575,6 +591,7 @@ class HDF5_Data:
             )
         except:
             print(f"Data for shot {shot} failed")
+            # raise
             return None
         if lock is None:
             lock = contextlib.nullcontext()
@@ -682,12 +699,11 @@ if __name__=='__main__':
     # bes_data.print_contents()
 
 
-    dataset = HDF5_Data()
-    dataset.load_shotlist(truncate_hdf5=True)
-    dataset.print_hdf5_contents()
+    # dataset = HDF5_Data()
+    # dataset.load_shotlist(truncate_hdf5=True, channels=[23], with_other_signals=True)
+    # dataset.print_hdf5_contents()
 
-    # # dataset = HDF5_Data(
-    # #     # hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v3.hdf5',
-    # #     hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v5.hdf5',
-    # # )
-    # # dataset.print_hdf5_contents()
+    dataset = HDF5_Data(
+        hdf5_file='/home/smithdr/ml/elm_data/step_4_shot_partial_data/data_v1.hdf5',
+    )
+    dataset.print_hdf5_contents()
