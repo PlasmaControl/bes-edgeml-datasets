@@ -202,8 +202,8 @@ class Shot:
         for i, tdi_var in enumerate(tdi_vars):
             self.bes_signals[i, :] = np.array(self.connection.get(tdi_var), dtype=np.float32)
         if max_sample_rate:
-            rate = np.mean(np.diff(self.bes_time[:1000])) * 1e3  # kHz
-            downsample_factor = int(np.rint(rate / max_sample_rate))
+            sample_rate = 1 / np.mean(np.diff(self.bes_time[:1000]))  # kHz
+            downsample_factor = int(np.rint(sample_rate / max_sample_rate))
             if downsample_factor >= 2:
                 self.bes_signals = self.bes_signals[:, ::downsample_factor]
                 self.bes_time = self.bes_time[::downsample_factor]
@@ -699,11 +699,11 @@ if __name__=='__main__':
     # bes_data.print_contents()
 
 
-    # dataset = HDF5_Data()
-    # dataset.load_shotlist(truncate_hdf5=True, channels=[23], with_other_signals=True)
-    # dataset.print_hdf5_contents()
-
-    dataset = HDF5_Data(
-        hdf5_file='/home/smithdr/ml/elm_data/step_4_shot_partial_data/data_v1.hdf5',
-    )
+    dataset = HDF5_Data()
+    dataset.load_shotlist(truncate_hdf5=True, channels=[23], with_other_signals=True)
     dataset.print_hdf5_contents()
+
+    # dataset = HDF5_Data(
+    #     hdf5_file='/home/smithdr/ml/elm_data/step_4_shot_partial_data/data_v1.hdf5',
+    # )
+    # dataset.print_hdf5_contents()
