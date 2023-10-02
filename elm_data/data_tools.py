@@ -42,6 +42,7 @@ class Shot:
     only_neg_bt: bool = False
     max_delz: float = None
     min_pinj_15l: float = None
+    min_sustained_15l: float = None
     connection: MDSplus.Connection = None
     quiet: bool = False
 
@@ -138,6 +139,20 @@ class Shot:
                 self.data = str(date.date)
                 self.connection.closeTree('nb', self.shot)
         if self.min_pinj_15l: assert self.pinj_15l_max > self.min_pinj_15l
+        if self.min_sustained_15l:
+            mask = self.pinj_15l >= 600e3
+            change = np.diff(np.array(mask, dtype=int))
+            i_on = np.flatnonzero(change == 1)
+            i_off = np.flatnonzero(change == -1)
+            assert i_on.size == i_off.size
+            valid = False
+            for i1, i2 in zip(i_on, i_off):
+                assert i2 >= i1
+                delt = self.pinj_time[i2] - self.pinj_time[i1]
+                if delt >= self.min_sustained_15l:
+                    valid = True
+                    break
+            assert valid
         if not self.quiet: print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
         # get other signals
         if self.with_other_signals:
@@ -269,9 +284,10 @@ class HDF5_Data:
         only_8x8: bool = True,
         only_standard_8x8: bool = True,
         max_delz: float = 2.0,
-        only_pos_ip=True,
-        only_neg_bt=True,
-        min_pinj_15l=600e3,
+        only_pos_ip: bool = True,
+        only_neg_bt: bool = True,
+        min_pinj_15l: float = 600e3,
+        min_sustained_15l: float = 300.,
     ) -> None:
         if csv_file:
             # read shotlist from CSV file; column `shot` must exist
@@ -319,6 +335,7 @@ class HDF5_Data:
                                 only_neg_bt=only_neg_bt,
                                 only_pos_ip=only_pos_ip,
                                 min_pinj_15l=min_pinj_15l,
+                                min_sustained_15l=min_sustained_15l,
                             )
                         )
                     while True:
@@ -357,6 +374,7 @@ class HDF5_Data:
                         only_neg_bt=only_neg_bt,
                         only_pos_ip=only_pos_ip,
                         min_pinj_15l=min_pinj_15l,
+                        min_sustained_15l=min_sustained_15l,
                     )
                     if result:
                         valid_shot_count += 1
@@ -575,6 +593,7 @@ class HDF5_Data:
         only_pos_ip=True,
         only_neg_bt=True,
         min_pinj_15l=700e3,
+        min_sustained_15l=300,
         lock: threading.Lock = None,
         connection = None,
     ) -> int:
@@ -590,6 +609,7 @@ class HDF5_Data:
                 only_pos_ip=only_pos_ip,
                 only_neg_bt=only_neg_bt,
                 min_pinj_15l=min_pinj_15l,
+                min_sustained_15l=min_sustained_15l,
                 quiet=True,
             )
         except:
@@ -698,6 +718,7 @@ if __name__=='__main__':
     # bes_data = Shot(
     #     channels=np.arange(2)+1,
     #     with_other_signals=True,
+    #     min_sustained_15l=300,
     # )
     # bes_data.print_contents()
 
