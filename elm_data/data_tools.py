@@ -95,21 +95,6 @@ class Shot:
         # metadata
         self.r_avg = np.mean(self.r_position).round(1) if self.is_8x8 else None
         self.z_avg = np.mean(self.z_position).round(1) if self.is_8x8 else None
-        # self.metadata = {
-        #     'shot': self.shot,
-        #     'start_time': self.start_time,
-        #     'stop_time': self.stop_time,
-        #     'time_units': 'ms',
-        #     'r_position': self.r_position,
-        #     'z_position': self.z_position,
-        #     'rz_units': 'cm',
-        #     'is_8x8': self.is_8x8,
-        #     'is_standard_8x8': self.is_standard_8x8,
-        #     'r_avg': self.r_avg,
-        #     'z_avg': self.z_avg,
-        #     'inboard_column_channel_order': self.inboard_column_channel_order,
-        #     'delz_avg': self.delz_avg,
-        # }
         # get ip, beams, etc.
         for node_name in ['ip', 'bt']:
             result = self.get_signal(node_name, max_sample_rate=5e3)
@@ -121,6 +106,27 @@ class Shot:
             setattr(self, f'{node_name}_pos_phi', True if extremum>0 else False)
         if self.only_pos_ip: assert self.ip_pos_phi is True
         if self.only_neg_bt: assert self.bt_pos_phi is False
+        # get BES signals
+        if self.channels.size > 0:
+            self.get_bes_signals()
+        # mask for early Ip termination
+        ip_mask = np.flatnonzero(self.ip>=150e3)
+        ip_stop_time = self.ip_time[ip_mask[-1]]
+        if ip_stop_time + 200 < self.stop_time:
+            bes_mask = self.bes_time <= ip_stop_time+200
+            self.bes_time = self.bes_time[bes_mask]
+            if self.bes_signals is not None:
+                new_signals = self.bes_signals[:, bes_mask]
+                self.bes_signals = new_signals
+            self.start_time = self.bes_time[0]
+            self.stop_time = self.bes_time[-1]
+            for node_name in ['ip', 'bt']:
+                signal = getattr(self, node_name)
+                signal_time = getattr(self, f'{node_name}_time')
+                mask = signal_time <= self.stop_time
+                setattr(self, node_name, signal[mask])
+                setattr(self, f'{node_name}_time', signal_time[mask])
+        # get NB
         for node_name in ['pinj', 'pinj_15l', 'pinj_15r']:
             result = self.get_signal(node_name, tree='nb', max_sample_rate=5e3)
             setattr(self, node_name, result['data'])
@@ -133,9 +139,6 @@ class Shot:
                 self.connection.closeTree('nb', self.shot)
         if self.min_pinj_15l: assert self.pinj_15l_max > self.min_pinj_15l
         if not self.quiet: print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
-        # get BES signals
-        if self.channels.size > 0:
-            self.get_bes_signals()
         # get other signals
         if self.with_other_signals:
             self.get_other_siganls()
