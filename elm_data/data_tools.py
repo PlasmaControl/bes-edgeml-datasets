@@ -34,13 +34,12 @@ def make_mdsplus_connection() -> MDSplus.Connection:
 @dataclasses.dataclass
 class Shot:
     shot: int = 196560
-    channels: Iterable = None
+    channels: Iterable[int] = None
     with_other_signals: bool = False
     only_8x8: bool = False
     only_standard_8x8: bool = False
     only_pos_ip: bool = False
     only_neg_bt: bool = False
-    max_delz: float = None
     min_pinj_15l: float = None
     min_sustained_15l: float = None
     connection: MDSplus.Connection = None
@@ -62,14 +61,14 @@ class Shot:
             self.connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'),
             dtype=np.float32,
         )
-        assert self.bes_time.size > 0
+        assert self.bes_time.size > 0, f'Shot {self.shot} has bad BES time data'
         self.start_time = self.bes_time[0]
         self.stop_time = self.bes_time[-1]
         # get BES configuration metadata
         self.connection.openTree('bes', self.shot)
         self.r_position = np.array(self.connection.get(r'\bes_r'), dtype=np.float32)
         self.z_position = -np.array(self.connection.get(r'\bes_z'), dtype=np.float32)
-        assert self.r_position.size == 64 and self.z_position.size == 64
+        assert self.r_position.size == 64 and self.z_position.size == 64, f'Shot {self.shot} has bad BES position data'
         self.connection.closeTree('bes', self.shot)
         for i in np.arange(8):
             # del-r of column i
@@ -81,21 +80,21 @@ class Shot:
             self.is_8x8 = col_test and row_test
             if self.is_8x8 is False:
                 break
-        if self.only_8x8: assert self.is_8x8
-        self.inboard_column_channel_order = None
+        if self.only_8x8:
+            assert self.is_8x8, f'Shot {self.shot} is not 8x8'
+        self.delz_avg = self.r_avg = self.z_avg = self.inboard_column_channel_order = None
         if self.is_8x8:
+            self.delz_avg = np.abs(np.diff(self.z_position[np.arange(8)*8]).mean()).round(2)
+            self.r_avg = np.mean(self.r_position).round(1)
+            self.z_avg = np.mean(self.z_position).round(1)
             z_first_column = self.z_position[np.arange(8) * 8]
             self.inboard_column_channel_order = np.flip(z_first_column.argsort()) * 8
             self.is_standard_8x8 = np.array_equal(
                 self.inboard_column_channel_order,
                 np.arange(8, dtype=int) * 8,
             )
-        if self.only_standard_8x8: assert self.is_standard_8x8
-        self.delz_avg = np.abs(np.diff(self.z_position[np.arange(8)*8]).mean()).round(2) if self.is_8x8 else None
-        if self.max_delz: assert self.delz_avg <= self.max_delz
-        # metadata
-        self.r_avg = np.mean(self.r_position).round(1) if self.is_8x8 else None
-        self.z_avg = np.mean(self.z_position).round(1) if self.is_8x8 else None
+        if self.only_standard_8x8:
+            assert self.is_standard_8x8, f'Shot {self.shot} is not standard 8x8'
         # get ip, beams, etc.
         for node_name in ['ip', 'bt']:
             result = self.get_signal(node_name, max_sample_rate=5e3)
@@ -105,20 +104,22 @@ class Shot:
             extremum = signal.max() if np.abs(signal.max()) > np.abs(signal.min()) else signal.min()
             setattr(self, f'{node_name}_extremum', extremum)
             setattr(self, f'{node_name}_pos_phi', True if extremum>0 else False)
-        if self.only_pos_ip: assert self.ip_pos_phi is True
-        if self.only_neg_bt: assert self.bt_pos_phi is False
+        if self.only_pos_ip:
+            assert self.ip_pos_phi is True, f'Shot {self.shot} has negative Ip (pos is normal)'
+        if self.only_neg_bt:
+            assert self.bt_pos_phi is False, f'Shot {self.shot} has positive Bt (neg is normal)'
         # get BES signals
         if self.channels.size > 0:
             self.get_bes_signals()
         # mask for early Ip termination
-        ip_mask = np.flatnonzero(self.ip>=150e3)
+        ip_mask = np.flatnonzero(self.ip >= 400e3)
         ip_stop_time = self.ip_time[ip_mask[-1]]
-        if ip_stop_time + 200 < self.stop_time:
-            bes_mask = self.bes_time <= ip_stop_time+200
+        if ip_stop_time - 100 < self.stop_time:
+            bes_mask = self.bes_time <= ip_stop_time-100
             self.bes_time = self.bes_time[bes_mask]
             if self.bes_signals is not None:
-                new_signals = self.bes_signals[:, bes_mask]
-                self.bes_signals = new_signals
+                # new_signals = self.bes_signals[:, bes_mask]
+                self.bes_signals = self.bes_signals[:, bes_mask]
             self.start_time = self.bes_time[0]
             self.stop_time = self.bes_time[-1]
             for node_name in ['ip', 'bt']:
@@ -138,21 +139,23 @@ class Shot:
                 date = self.connection.get(f'getnci(\\pinj, "time_inserted")')
                 self.data = str(date.date)
                 self.connection.closeTree('nb', self.shot)
-        if self.min_pinj_15l: assert self.pinj_15l_max > self.min_pinj_15l
+        # check for minimum PINJ_15L power
+        if self.min_pinj_15l:
+            assert self.pinj_15l_max > self.min_pinj_15l, f'Shot {self.shot} has low PINJ_15l'
+        # check for minimum sustained PINJ_15L
         if self.min_sustained_15l:
-            mask = self.pinj_15l >= 600e3
+            mask = self.pinj_15l >= 500e3
             change = np.diff(np.array(mask, dtype=int))
             i_on = np.flatnonzero(change == 1)
             i_off = np.flatnonzero(change == -1)
-            assert i_on.size == i_off.size
-            valid = False
-            for i1, i2 in zip(i_on, i_off):
-                assert i2 >= i1
-                delt = self.pinj_time[i2] - self.pinj_time[i1]
-                if delt >= self.min_sustained_15l:
-                    valid = True
-                    break
-            assert valid
+            if i_off[0] > i_on[0] and i_on.size == i_off.size:
+                valid = False
+                for i1, i2 in zip(i_on, i_off):
+                    delt = self.pinj_time[i2] - self.pinj_time[i1]
+                    if delt >= self.min_sustained_15l:
+                        valid = True
+                        break
+                assert valid, f'Shot {self.shot} does not have sustained PINJ_15l'
         if not self.quiet: print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
         # get other signals
         if self.with_other_signals:
@@ -206,7 +209,7 @@ class Shot:
             max_sample_rate: float = 200,
     ):
         self.channels = np.array(channels, dtype=int) if channels else self.channels
-        assert np.all(self.channels > 0)
+        assert np.all(self.channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
         self.bes_signals = np.empty([self.channels.size, self.bes_time.size], dtype=np.float32)
         t1 = time.time()
         tdi_vars = []
@@ -233,15 +236,18 @@ class Shot:
             tree: str = None,  # MDSplus tree or None for PTDATA
             max_sample_rate: int = None,  # max sample rate in Hz (approx)
     ) -> dict:
-        if tree:
-            self.connection.openTree(tree, self.shot)
-            data = np.array(self.connection.get(f'\\{node_name}'), dtype=np.float32)
-            time = np.array(self.connection.get(f'dim_of(\\{node_name})'), dtype=np.float32)
-            self.connection.closeTree(tree, self.shot)
-        else:
-            ptdata = f'_n = ptdata("{node_name}", {self.shot})'
-            data = np.array(self.connection.get(ptdata), dtype=np.float32)
-            time = np.array(self.connection.get('dim_of(_n)'), dtype=np.float32)
+        try:
+            if tree:
+                self.connection.openTree(tree, self.shot)
+                data = np.array(self.connection.get(f'\\{node_name}'), dtype=np.float32)
+                time = np.array(self.connection.get(f'dim_of(\\{node_name})'), dtype=np.float32)
+                self.connection.closeTree(tree, self.shot)
+            else:
+                ptdata = f'_n = ptdata("{node_name}", {self.shot})'
+                data = np.array(self.connection.get(ptdata), dtype=np.float32)
+                time = np.array(self.connection.get('dim_of(_n)'), dtype=np.float32)
+        except Exception as e:
+            assert False, f'Shot {self.shot} bad data for node {node_name} ({e.__class__.__name__})'
         if data.size < time.size:
             time = time[:data.size]
         if max_sample_rate:
@@ -279,15 +285,14 @@ class HDF5_Data:
         max_shots: int = None,
         use_concurrent: bool = False,
         max_workers: int = None,
-        channels: Iterable = None,
+        channels: Iterable[int] = None,
         with_other_signals: bool = False,
-        only_8x8: bool = True,
-        only_standard_8x8: bool = True,
-        max_delz: float = 2.0,
-        only_pos_ip: bool = True,
-        only_neg_bt: bool = True,
-        min_pinj_15l: float = 600e3,
-        min_sustained_15l: float = 300.,
+        only_8x8: bool = False,
+        only_standard_8x8: bool = False,
+        only_pos_ip: bool = False,
+        only_neg_bt: bool = False,
+        min_pinj_15l: float = None,  # power in W
+        min_sustained_15l: float = None,  # time in ms
     ) -> None:
         if csv_file:
             # read shotlist from CSV file; column `shot` must exist
@@ -331,7 +336,6 @@ class HDF5_Data:
                                 only_standard_8x8=only_standard_8x8,
                                 lock=lock,
                                 connection=connection,
-                                max_delz=max_delz,
                                 only_neg_bt=only_neg_bt,
                                 only_pos_ip=only_pos_ip,
                                 min_pinj_15l=min_pinj_15l,
@@ -370,7 +374,6 @@ class HDF5_Data:
                         only_8x8=only_8x8,
                         only_standard_8x8=only_standard_8x8,
                         connection=connection,
-                        max_delz=max_delz,
                         only_neg_bt=only_neg_bt,
                         only_pos_ip=only_pos_ip,
                         min_pinj_15l=min_pinj_15l,
@@ -427,11 +430,12 @@ class HDF5_Data:
             self,
             r_avg=None,
             z_avg=None,
-            ip=None,
-            bt=None,
-            pinj_15l=None,
-            pinj_15r=None,
-            only_standard_8x8=True,
+            delz_avg=None,
+            ip_extremum=None,
+            bt_extremum=None,
+            pinj_15l_max=None,
+            pinj_15r_max=None,
+            only_standard_8x8=False,
             export_csv=True,
             filename_prefix='filtered',
     ) -> list:
@@ -440,10 +444,11 @@ class HDF5_Data:
         inputs = {
             'r_avg': r_avg,
             'z_avg': z_avg,
-            'ip_extremum': ip,
-            'bt_extremum': bt,
-            'pinj_15l_max': pinj_15l,
-            'pinj_15r_max': pinj_15r,
+            'delz_avg': delz_avg,
+            'ip_extremum': ip_extremum,
+            'bt_extremum': bt_extremum,
+            'pinj_15l_max': pinj_15l_max,
+            'pinj_15r_max': pinj_15r_max,
         }
         candidate_shots = 0
         with h5py.File(self.hdf5_file, 'r') as hfile:
@@ -589,7 +594,6 @@ class HDF5_Data:
         with_other_signals: bool = False,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
-        max_delz: float = None,
         only_pos_ip=True,
         only_neg_bt=True,
         min_pinj_15l=700e3,
@@ -605,16 +609,14 @@ class HDF5_Data:
                 shot=shot,
                 only_8x8=only_8x8,
                 only_standard_8x8=only_standard_8x8,
-                max_delz=max_delz,
                 only_pos_ip=only_pos_ip,
                 only_neg_bt=only_neg_bt,
                 min_pinj_15l=min_pinj_15l,
                 min_sustained_15l=min_sustained_15l,
                 quiet=True,
             )
-        except:
-            print(f"Data for shot {shot} failed")
-            # raise
+        except Exception as e:
+            print(f"Shot {shot} failed: {e}")
             return None
         if lock is None:
             lock = contextlib.nullcontext()
@@ -679,19 +681,6 @@ class HDF5_Data:
                     )
                 else:
                     shot_group.attrs[attr_name] = attr
-            # for attr_name, attr_value in bes_data.metadata.items():
-            #     shot_group.attrs[attr_name] = attr_value
-            # for point_name in ['pinj', 'pinj_15l', 'pinj_15r']:
-            #     for name in [f'{point_name}', f'{point_name}_time']:
-            #         data = getattr(bes_data, name, None)
-            #         if data is None:
-            #             continue
-            #         shot_group.require_dataset(
-            #             name,
-            #             data=data,
-            #             shape=data.shape,
-            #             dtype=data.dtype,
-            #         )
             h5root.flush()
         return shot
     
@@ -722,12 +711,12 @@ if __name__=='__main__':
     # )
     # bes_data.print_contents()
 
-
     dataset = HDF5_Data()
     dataset.load_shotlist(truncate_hdf5=True, channels=[23], with_other_signals=True)
     dataset.print_hdf5_contents()
 
     # dataset = HDF5_Data(
-    #     hdf5_file='/home/smithdr/ml/elm_data/step_4_shot_partial_data/data_v1.hdf5',
+    #     # hdf5_file='/home/smithdr/ml/elm_data/step_4_shot_partial_data/data_v1.hdf5',
+    #     hdf5_file='/home/smithdr/ml/elm_data/step_4_shot_partial_data/data_v2.hdf5',
     # )
     # dataset.print_hdf5_contents()

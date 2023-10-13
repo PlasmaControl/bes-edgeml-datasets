@@ -13,6 +13,7 @@ conda info -e
 module list
 echo $PYTHONPATH
 
+
 PYTHON_SCRIPT=$(cat << END
 
 from elm_data.data_tools import HDF5_Data
@@ -24,6 +25,11 @@ dataset.load_shotlist(
     csv_file='/home/smithdr/ml/elm_data/step_1_shotlist_from_D3DRDB/shotlist.csv',
     truncate_hdf5=True, 
     use_concurrent=True, 
+    only_standard_8x8 = True,
+    only_pos_ip = True,
+    only_neg_bt = True,
+    min_pinj_15l = 500e3,  # power in W
+    min_sustained_15l = 300.,  # time in ms
 )
 dataset.print_hdf5_summary()
 dataset.plot_8x8_rz_avg()
@@ -32,6 +38,8 @@ dataset.plot_configurations()
 
 END
 )
+
+echo ${PYTHON_SCRIPT}
 
 # do work
 python -c "${PYTHON_SCRIPT}"

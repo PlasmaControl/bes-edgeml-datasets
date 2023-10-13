@@ -18,7 +18,7 @@ PYTHON_SCRIPT=$(cat << END
 from elm_data.data_tools import HDF5_Data
 
 dataset = HDF5_Data(
-    hdf5_file='data_v2.hdf5',
+    hdf5_file='data_v3.hdf5',
 )
 dataset.load_shotlist(
     csv_file='/home/smithdr/ml/elm_data/step_3_filter_metadata/filtered_shotlist.csv',
