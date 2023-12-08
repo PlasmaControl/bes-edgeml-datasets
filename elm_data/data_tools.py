@@ -137,7 +137,7 @@ class Shot:
                 setattr(self, f'{node_name}_time', result['time'])
                 self.connection.openTree('nb', self.shot)
                 date = self.connection.get(f'getnci(\\pinj, "time_inserted")')
-                self.data = str(date.date)
+                self.date = str(date.date)
                 self.connection.closeTree('nb', self.shot)
         # check for minimum PINJ_15L power
         if self.min_pinj_15l:
@@ -307,6 +307,7 @@ class HDF5_Data:
                     if max_shots and irow+1 > max_shots: break
                     shotlist.append(int(row['shot']))
         shotlist = np.array(shotlist, dtype=int)
+        print(f"Shots in shotlist: {shotlist.size}")
         assert shotlist.size > 0
         only_8x8 = only_8x8 or only_standard_8x8
         h5_mode = 'w' if truncate_hdf5 else 'a'

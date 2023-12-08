@@ -31,6 +31,7 @@ dataset.load_shotlist(
     min_pinj_15l = 500e3,  # power in W
     min_sustained_15l = 300.,  # time in ms
 )
+dataset.print_hdf5_contents()
 dataset.print_hdf5_summary()
 dataset.plot_8x8_rz_avg()
 dataset.plot_ip_bt_histograms()
