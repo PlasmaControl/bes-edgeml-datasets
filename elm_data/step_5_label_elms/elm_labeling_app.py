@@ -8,6 +8,7 @@ import scipy.signal, scipy.fft
 import h5py
 import ipywidgets as widgets
 
+from ..data_tools import print_hdf5_contents
 
 @dataclasses.dataclass(eq=False)
 class BES_ELM_Labeling_App:
@@ -19,6 +20,9 @@ class BES_ELM_Labeling_App:
 
         self.data_hdf5_file = Path(self.data_hdf5_file)
         self.elm_labels_hdf5_file = Path(self.elm_labels_hdf5_file).absolute()
+
+        # print_hdf5_contents(self.data_hdf5_file, summary=True)
+        print_hdf5_contents(self.elm_labels_hdf5_file, summary=True)
 
         # prepare MPL figure
         with plt.ioff():

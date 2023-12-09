@@ -16,6 +16,30 @@ import MDSplus
 import h5py
 
 
+def print_hdf5_contents(hdf5_file: Path|str, summary:bool = False):
+    print(f'Contents of {hdf5_file}')
+    with h5py.File(hdf5_file, 'r') as h5file:
+        _recursively_print_content(h5file, summary=summary)
+
+def _recursively_print_content(group: h5py.Group, summary:bool = False):
+    print(f'Group {group.name} with {len(group)} elements')
+    if not summary:
+        _print_attributes(group)
+    for key, value in group.items():
+        if isinstance(value, h5py.Group):
+            _recursively_print_content(value, summary=summary)
+        if isinstance(value, h5py.Dataset):
+            print(f'  Dataset {key}:', value.shape, value.dtype)
+            if not summary:
+                _print_attributes(value)
+
+def _print_attributes(obj: h5py.Group|h5py.Dataset):
+    for key, value in obj.attrs.items():
+        if isinstance(value, np.ndarray):
+            print(f'  Attribute {key}:', value.shape, value.dtype)
+        else:
+            print(f'  Attribute {key}:', value)
+
 def make_mdsplus_connection() -> MDSplus.Connection:
     tries = 0
     success = False
