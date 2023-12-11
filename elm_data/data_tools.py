@@ -16,22 +16,40 @@ import MDSplus
 import h5py
 
 
-def print_hdf5_contents(hdf5_file: Path|str, summary:bool = False):
+def print_hdf5_contents(hdf5_file: Path|str, **kwargs):
     print(f'Contents of {hdf5_file}')
     with h5py.File(hdf5_file, 'r') as h5file:
-        _recursively_print_content(h5file, summary=summary)
+        _recursively_print_content(h5file, level=0, **kwargs)
 
-def _recursively_print_content(group: h5py.Group, summary:bool = False):
+def _recursively_print_content(
+        group: h5py.Group, 
+        summary:bool = False, 
+        level: int=0, 
+        max_level=10,
+        max_items=None,
+):
     print(f'Group {group.name} with {len(group)} elements')
-    if not summary:
-        _print_attributes(group)
+    if not summary: _print_attributes(group)
+    if level >= max_level:
+        print('Reached max level')
+        return
+    i_items = 0
     for key, value in group.items():
+        if max_items and i_items >= max_items:
+            print('Skipping additional items...')
+            break
+        i_items += 1
         if isinstance(value, h5py.Group):
-            _recursively_print_content(value, summary=summary)
+            _recursively_print_content(
+                value, 
+                summary=summary, 
+                level=level+1,
+                max_level=max_level,
+                max_items=max_items,
+            )
         if isinstance(value, h5py.Dataset):
             print(f'  Dataset {key}:', value.shape, value.dtype)
-            if not summary:
-                _print_attributes(value)
+            if not summary: _print_attributes(value)
 
 def _print_attributes(obj: h5py.Group|h5py.Dataset):
     for key, value in obj.attrs.items():
@@ -57,7 +75,7 @@ def make_mdsplus_connection() -> MDSplus.Connection:
 
 @dataclasses.dataclass
 class Shot:
-    shot: int = 196560
+    shot: int = 162303
     channels: Iterable[int] = None
     with_other_signals: bool = False
     only_8x8: bool = False
@@ -335,11 +353,12 @@ class HDF5_Data:
         assert shotlist.size > 0
         only_8x8 = only_8x8 or only_standard_8x8
         h5_mode = 'w' if truncate_hdf5 else 'a'
-        with h5py.File(self.hdf5_file, h5_mode) as h5root:
+        with h5py.File(self.hdf5_file, h5_mode) as root:
             valid_shot_count = 0
-            configuration_group = h5root.require_group('configurations')
-            group_8x8 = configuration_group.require_group('8x8_configurations')
-            group_non_8x8 = configuration_group.require_group('non_8x8_configurations')
+            root.require_group('shots')
+            root.require_group('configurations')
+            group_8x8 = root['configurations'].require_group('8x8_configurations')
+            group_non_8x8 = root['configurations'].require_group('non_8x8_configurations')
             connection = make_mdsplus_connection()
             if use_concurrent:
                 if not max_workers:
@@ -352,7 +371,7 @@ class HDF5_Data:
                             executor.submit(
                                 self._check_channel_configuration,
                                 shot=shot,
-                                h5root=h5root,
+                                h5root=root,
                                 group_8x8=group_8x8,
                                 group_non_8x8=group_non_8x8,
                                 channels=channels,
@@ -391,7 +410,7 @@ class HDF5_Data:
                     print(f'Shot {shot} ({i + 1} of {shotlist.size})')
                     result = self._check_channel_configuration(
                         shot=shot,
-                        h5root=h5root,
+                        h5root=root,
                         group_8x8=group_8x8,
                         group_non_8x8=group_non_8x8,
                         channels=channels,
@@ -406,49 +425,46 @@ class HDF5_Data:
                     )
                     if result:
                         valid_shot_count += 1
-            h5root.flush()
             # count shots
             n_shots = n_8x8_shots = n_standard_8x8_shots = n_non_8x8_shots = 0
             n_pos_ip_pos_bt = n_pos_ip_neg_bt = n_neg_ip_pos_bt = n_neg_ip_neg_bt = 0
-            for group_name, group in h5root.items():
-                if group_name.startswith('config'):
-                    continue
+            for shot_str in root['shots']:
+                shot_group = root['shots'][shot_str]
                 n_shots += 1
-                if group.attrs['is_8x8']:
+                if shot_group.attrs['is_8x8']:
                     n_8x8_shots += 1
                 else:
                     n_non_8x8_shots += 1
-                if group.attrs['is_standard_8x8']:
+                if shot_group.attrs['is_standard_8x8']:
                     n_standard_8x8_shots += 1
-                if group.attrs['ip_pos_phi'] is True:
-                    if group.attrs['bt_pos_phi'] is True:
+                if shot_group.attrs['ip_pos_phi'] is True:
+                    if shot_group.attrs['bt_pos_phi'] is True:
                         n_pos_ip_pos_bt += 1
                     else:
                         n_pos_ip_neg_bt += 1
                 else:
-                    if group.attrs['bt_pos_phi'] is True:
+                    if shot_group.attrs['bt_pos_phi'] is True:
                         n_neg_ip_pos_bt += 1
                     else:
                         n_neg_ip_neg_bt += 1
             assert n_shots == n_8x8_shots + n_non_8x8_shots
             assert n_shots == n_pos_ip_pos_bt + n_pos_ip_neg_bt + n_neg_ip_pos_bt + n_neg_ip_neg_bt
-            h5root.attrs['n_shots'] = n_shots
-            h5root.attrs['n_8x8_shots'] = n_8x8_shots
-            h5root.attrs['n_non_8x8_shots'] = n_non_8x8_shots
-            h5root.attrs['n_standard_8x8_shots'] = n_standard_8x8_shots
-            h5root.attrs['n_pos_ip_pos_bt'] = n_pos_ip_pos_bt
-            h5root.attrs['n_pos_ip_neg_bt'] = n_pos_ip_neg_bt
-            h5root.attrs['n_neg_ip_pos_bt'] = n_neg_ip_pos_bt
-            h5root.attrs['n_neg_ip_neg_bt'] = n_neg_ip_neg_bt
-            h5root.flush()
+            root.attrs['n_shots'] = n_shots
+            root.attrs['n_8x8_shots'] = n_8x8_shots
+            root.attrs['n_non_8x8_shots'] = n_non_8x8_shots
+            root.attrs['n_standard_8x8_shots'] = n_standard_8x8_shots
+            root.attrs['n_pos_ip_pos_bt'] = n_pos_ip_pos_bt
+            root.attrs['n_pos_ip_neg_bt'] = n_pos_ip_neg_bt
+            root.attrs['n_neg_ip_pos_bt'] = n_neg_ip_pos_bt
+            root.attrs['n_neg_ip_neg_bt'] = n_neg_ip_neg_bt
             for config_group in [group_8x8, group_non_8x8]:
                 n_shots = 0
                 for config in config_group.values():
                     n_shots += config.attrs['n_shots']
                 if 'non' in config_group.name:
-                    assert n_shots == h5root.attrs['n_non_8x8_shots']
+                    assert n_shots == root.attrs['n_non_8x8_shots']
                 else:
-                    assert n_shots == h5root.attrs['n_8x8_shots']
+                    assert n_shots == root.attrs['n_8x8_shots']
                 config_group.attrs['n_shots'] = n_shots
     
     def filter_shots(
@@ -476,13 +492,14 @@ class HDF5_Data:
             'pinj_15r_max': pinj_15r_max,
         }
         candidate_shots = 0
-        with h5py.File(self.hdf5_file, 'r') as hfile:
+        with h5py.File(self.hdf5_file, 'r') as root:
             input_violation_counts = {key: 0 for key in inputs}
-            for shot_key, shot_group in hfile.items():
-                if shot_key.startswith('config'):
-                    continue
-                if only_standard_8x8 and not shot_group.attrs['is_standard_8x8']:
-                    continue
+            for shot_key in root['shots']:
+                # if shot_key.startswith('config'):
+                #     continue
+                # if only_standard_8x8 and not shot_group.attrs['is_standard_8x8']:
+                #     continue
+                shot_group = root['shots'][shot_key]
                 candidate_shots += 1
                 in_range = True
                 for input_key, input_value in inputs.items():
@@ -503,9 +520,9 @@ class HDF5_Data:
                 fields = ['shot', 'start_time', 'stop_time']
                 writer = csv.DictWriter(csvfile, fieldnames=fields)
                 writer.writeheader()
-                with h5py.File(self.hdf5_file, 'r') as hfile:
+                with h5py.File(self.hdf5_file, 'r') as root:
                     shotlist_data = [
-                        {key: hfile[f'{shot}'].attrs[key] for key in fields}
+                        {key: root['shots'][str(shot)].attrs[key] for key in fields}
                         for shot in shotlist
                     ]
                 writer.writerows(shotlist_data)
@@ -513,24 +530,24 @@ class HDF5_Data:
 
     def print_hdf5_contents(self):
         print(f'Contents of {self.hdf5_file}')
-        with h5py.File(self.hdf5_file, 'r') as h5file:
-            self._recursively_print_content(h5file)
+        with h5py.File(self.hdf5_file, 'r') as root:
+            self._recursively_print_content(root)
 
     def print_hdf5_summary(self):
         print(f'Summary of {self.hdf5_file}')
-        with h5py.File(self.hdf5_file, 'r') as h5file:
-            print(f"Group {h5file.name}")
-            self._print_attributes(h5file)
-            config_group = h5file['configurations']
+        with h5py.File(self.hdf5_file, 'r') as root:
+            print(f"Group {root.name}")
+            self._print_attributes(root)
+            config_group = root['configurations']
             for group in config_group.values():
                 print(f"Group {group.name}")
                 self._print_attributes(group)
 
     def plot_ip_bt_histograms(self, filename='', shotlist=tuple()):
-        with h5py.File(self.hdf5_file, 'r') as hfile:
-            ip = np.zeros(len(hfile)) * np.NAN
-            bt = np.zeros(len(hfile)) * np.NAN
-            for i_key, (shot_key, shot_group) in enumerate(hfile.items()):
+        with h5py.File(self.hdf5_file, 'r') as root:
+            ip = np.zeros(len(root)) * np.NAN
+            bt = np.zeros(len(root)) * np.NAN
+            for i_key, (shot_key, shot_group) in enumerate(root.items()):
                 if shot_key.startswith('config'): continue
                 if shotlist and int(shot_key) not in shotlist: continue
                 ip[i_key] = shot_group.attrs['ip_extremum']
@@ -551,10 +568,10 @@ class HDF5_Data:
         plt.savefig(filename if filename else 'ip_bt_hist.pdf', format='pdf')
 
     def plot_8x8_rz_avg(self, filename='', shotlist=tuple()):
-        with h5py.File(self.hdf5_file, 'r') as hfile:
-            r_avg = np.zeros(len(hfile)) * np.NAN
-            z_avg = np.zeros(len(hfile)) * np.NAN
-            for i_key, (shot_key, shot_group) in enumerate(hfile.items()):
+        with h5py.File(self.hdf5_file, 'r') as root:
+            r_avg = np.zeros(len(root)) * np.NAN
+            z_avg = np.zeros(len(root)) * np.NAN
+            for i_key, (shot_key, shot_group) in enumerate(root.items()):
                 if shot_key.startswith('config'): continue
                 if shotlist and int(shot_key) not in shotlist: continue
                 r_avg[i_key] = shot_group.attrs['r_avg']
@@ -574,8 +591,8 @@ class HDF5_Data:
         plt.savefig(filename if filename else '8x8_configurations.pdf', format='pdf')
 
     def plot_configurations(self) -> None:
-        with h5py.File(self.hdf5_file, 'r') as hfile:
-            config_group = hfile['configurations']['8x8_configurations']
+        with h5py.File(self.hdf5_file, 'r') as root:
+            config_group = root['configurations']['8x8_configurations']
             assert len(config_group) > 0
             _, axes = plt.subplots(nrows=4, ncols=3, figsize=(8.5,11))
             i_page = 0
@@ -689,7 +706,7 @@ class HDF5_Data:
                         new_config.attrs[key] = getattr(bes_data, key)
             assert config_index
             # save shot metadata
-            shot_group = h5root.require_group(str(shot))
+            shot_group = h5root['shots'].require_group(str(shot))
             shot_group.attrs['configuration_index'] = config_index
             for attr_name in dir(bes_data):
                 if attr_name.startswith('_'): continue
@@ -706,26 +723,42 @@ class HDF5_Data:
                     )
                 else:
                     shot_group.attrs[attr_name] = attr
-            h5root.flush()
         return shot
     
     @staticmethod
     def _print_attributes(obj: h5py.Group|h5py.Dataset):
-        for key, value in obj.attrs.items():
-            if isinstance(value, np.ndarray):
-                print(f'  Attribute {key}:', value.shape, value.dtype)
+        for key in obj.attrs:
+            item = obj.attrs[key]
+            if isinstance(item, np.ndarray):
+                print(f'  Attribute {key}: shape {item.shape} dtype {item.dtype}')
+            elif isinstance(item, Iterable):
+                print(f'  Attribute {key}: len {len(item)}')
             else:
-                print(f'  Attribute {key}:', value)
+                print(f'  Attribute {key}: value {item} type {type(item)}')
 
     def _recursively_print_content(self, group: h5py.Group):
         print(f'Group {group.name}')
+        n_subgroups = 0
+        n_datasets = 0
+        for key in group:
+            item = group[key]
+            if isinstance(item, h5py.Group):
+                n_subgroups += 1
+            elif isinstance(item, h5py.Dataset):
+                n_datasets += 1
+            else:
+                raise ValueError
+        print(f'  {n_datasets} datasets and {n_subgroups} subgroups')
         self._print_attributes(group)
-        for key, value in group.items():
-            if isinstance(value, h5py.Group):
-                self._recursively_print_content(value)
-            if isinstance(value, h5py.Dataset):
-                print(f'  Dataset {key}:', value.shape, value.dtype)
-                self._print_attributes(value)
+        for key in group:
+            item = group[key]
+            if isinstance(item, h5py.Group):
+                self._recursively_print_content(item)
+            elif isinstance(item, h5py.Dataset):
+                print(f'  Dataset {key}:', item.shape, item.dtype)
+                self._print_attributes(item)
+            else:
+                raise ValueError
 
 
 if __name__=='__main__':

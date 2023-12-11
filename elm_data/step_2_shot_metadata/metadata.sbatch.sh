@@ -19,7 +19,7 @@ PYTHON_SCRIPT=$(cat << END
 from elm_data.data_tools import HDF5_Data
 
 dataset = HDF5_Data(
-    hdf5_file='metadata_v6.hdf5',
+    hdf5_file='metadata_v7.hdf5',
 )
 dataset.load_shotlist(
     csv_file='/home/smithdr/ml/elm_data/step_1_shotlist_from_D3DRDB/shotlist.csv',

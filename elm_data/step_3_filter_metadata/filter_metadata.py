@@ -2,7 +2,7 @@ import numpy as np
 from elm_data.data_tools import HDF5_Data
 
 dataset = HDF5_Data(
-    hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v6.hdf5',
+    hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v7.hdf5',
 )
 dataset.print_hdf5_summary()
 
