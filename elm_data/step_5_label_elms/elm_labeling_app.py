@@ -8,7 +8,7 @@ import scipy.signal, scipy.fft
 import h5py
 import ipywidgets as widgets
 
-from elm_data.data_tools import print_hdf5_contents
+# from elm_data.data_tools import print_hdf5_contents
 
 @dataclasses.dataclass(eq=False)
 class BES_ELM_Labeling_App:
@@ -20,9 +20,6 @@ class BES_ELM_Labeling_App:
 
         self.data_hdf5_file = Path(self.data_hdf5_file)
         self.elm_labels_hdf5_file = Path(self.elm_labels_hdf5_file).absolute()
-
-        print_hdf5_contents(self.data_hdf5_file, summary=True, max_level=2, max_items=2)
-        print_hdf5_contents(self.elm_labels_hdf5_file, summary=True, max_level=3, max_items=3)
 
         # prepare MPL figure
         with plt.ioff():
@@ -39,12 +36,12 @@ class BES_ELM_Labeling_App:
         self.toolbar = self.canvas.toolbar
 
         with h5py.File(self.data_hdf5_file) as root:
-            shots = [int(group_name) for group_name in root if not group_name.startswith('config')]
+            shots = [int(group_name) for group_name in root['shots']]
         print(f"HDF5 data file: {self.data_hdf5_file}")
         print(f"  Shots: {len(shots)}")
         numpy.random.default_rng().shuffle(shots)
-        for shot in [179453, 189113, 191672, 179873, 166434]:
-            shots.insert(0, shot)
+        # for shot in [179453, 189113, 191672, 179873, 166434]:
+        #     shots.insert(0, shot)
 
         # create if needed, and truncate or append
         if self.truncate:
@@ -54,10 +51,12 @@ class BES_ELM_Labeling_App:
                 root.create_group(name='shots')
             if 'elms' not in root:
                 root.create_group(name='elms')
+            if 'excluded_shots' not in root.attrs:
+                root.attrs['excluded_shots'] = np.array([], dtype=int)
             labeled_shots = [int(shot) for shot in root['shots']]
             labeled_elms = [int(elm) for elm in root['elms']]
             print(f"HDF5 labeled ELM file: {self.elm_labels_hdf5_file}")
-            print(f"  {len(labeled_elms)} ELMs from {len(labeled_shots)} shots")
+            print(f"  {len(labeled_elms)} ELMs from {len(labeled_shots)} shots ({len(root.attrs['excluded_shots'])} excluded shots)")
 
         self.shot = None
         self.next_shot = (shot for shot in shots)
@@ -205,10 +204,14 @@ class BES_ELM_Labeling_App:
         ):
             assert 'shots' in labels_file
             assert 'elms' in labels_file
-            shot_str = f'{self.shot:d}'
+            shot_str = str(self.shot)
             assert shot_str not in labels_file['shots']
+            shot_data_group = data_file['shots'][shot_str]
+            # self.axes[0].plot(np.array(group['pinj_time']), np.array(group['pinj_15l'])/1e6, label='PINJ_15L (MW)')
+            for i_interval in range(len(self.elm_cycle_intervals)):
+                t_start, t_stop = self.elm_cycle_intervals[i_interval]
+                #TODO test for Pnb
             shot_group = labels_file['shots'].create_group(name=shot_str)
-            shot_data_group = data_file[shot_str]
             for key, value in shot_data_group.attrs.items():
                 shot_group.attrs[key] = value
             for key, value in shot_data_group.items():
@@ -234,53 +237,16 @@ class BES_ELM_Labeling_App:
                 next_i_elm += 1
             shot_group.attrs['shot_intervals'] = shot_intervals
 
-            # if 'shots' not in labels_file.attrs:
-            #     labels_file.attrs['shots'] = []
-            # existing_shots: list = labels_file.attrs['shots']
-            # assert self.shot not in existing_shots
-            # for shot in existing_shots:
-            #     assert f'{shot}:d' in labels_file['shots']
-            # for existing_shot_str in labels_file['shots']:
-            #     assert int(existing_shot_str) in existing_shots
-            # add shot metadata under root.shots
-            # shot_str = f'{self.shot:d}'
 
     def load_new_shot(self, *_):
         self.status_label.value = 'State: saving and loading new shot...'
         shots = []
         if self.shot and self.elm_cycle_intervals:
             self.save_elm_cycles_for_shot()
-            # with h5py.File(self.elm_labels_hdf5_file, 'a') as root:
-        #         assert 'shots' in root
-        #         assert 'elms' in root
-        #         shot_str = f'{self.shot:d}'
-        #         assert shot_str not in root['shots']
-        #         shot_group = root.create_group(name=shot_str)
-        #         # if 'shot_intervals' not in root.attrs:
-        #         #     root.attrs['shot_intervals'] = {}
-        #         # shot_intervals = root.attrs['shot_intervals'].copy()
-        #         # if self.shot not in shot_intervals:
-        #         #     shot_intervals[self.shot] = []
-        #         elms = [int(elm_str) for elm_str in root['elms']]
-        #         next_i_elm = np.max(elms) + 1 if elms else 0
-        #         for t_start, t_stop in self.elm_cycle_intervals:
-        #             t_mid = (t_start+t_stop)/2
-        #             skip = False
-        #             for interval in shot_intervals[self.shot]:
-        #                 if t_mid >=interval[0] and t_mid <= interval[1]:
-        #                     skip = True
-        #                     break
-        #             if skip:
-        #                 continue
-        #             elm_group = root.create_group(f"{next_i_elm:06d}")
-        #             elm_group.attrs['shot'] = self.shot
-        #             elm_group.attrs['t_start'] = t_start
-        #             elm_group.attrs['t_shot'] = t_stop
-        #             shot_intervals[self.shot].append([t_start, t_stop])
-        #             next_i_elm += 1
-        #         shots = [shot for shot in shot_intervals]
-        #         root.attrs['shot_intervals'] = shot_intervals
-        #         print(f"Saved {len(self.elm_cycle_intervals)} ELMs for shot {self.shot} (total ELMs {len(root)})")
+        else:
+            if self.shot:
+                with h5py.File(self.elm_labels_hdf5_file, 'a') as root:
+                    root.attrs['excluded_shots'] = np.append(root.attrs['excluded_shots'], self.shot)
         # load new shot
         with h5py.File(self.elm_labels_hdf5_file, 'a') as root:
             shots = [int(shot_str) for shot_str in root['shots']]
@@ -292,10 +258,7 @@ class BES_ELM_Labeling_App:
         self.elm_cycle_spans = []
         self.elm_cycle_intervals = []
         with h5py.File(self.data_hdf5_file) as data_root:
-            group = data_root[str(self.shot)]
-            # print(f"New shot: {self.shot}")
-            # for attr, value in group.attrs.items():
-            #     print(f"  {attr}:  {value}")
+            group = data_root['shots'][str(self.shot)]
             self.mouse_guide_lines = []
             self.vspans = [ [] for ax in self.axes ]
             for ax in self.axes:
@@ -388,8 +351,9 @@ class BES_ELM_Labeling_App:
     def append_elm_cycle(self, t_start, t_stop):
         if t_stop <= t_start:
             return
+        t_mid = (t_start + t_stop)/2
         for t_start_stop in self.elm_cycle_intervals:
-            if t_start == t_start_stop[0] or t_stop == t_start_stop[1]:
+            if t_mid >= t_start_stop[0] and t_mid <= t_start_stop[1]:
                 return
         self.elm_cycle_intervals.append([t_start, t_stop])
         self.elm_cycle_spans.append(
@@ -406,17 +370,30 @@ class BES_ELM_Labeling_App:
         for i_elm in range(n_elm_cycles):
             t_start, t_stop = self.elm_cycle_intervals[i_elm]
             if t_delete >= t_start and t_delete <= t_stop:
-                # print(f"Deleting ELM cycle {t_start:.3f}-{t_stop:.3f} ms")
                 self.elm_cycle_intervals.pop(i_elm)
                 for span in self.elm_cycle_spans[i_elm]:
                     span.remove()
                 self.elm_cycle_spans.pop(i_elm)
                 break
-        # for i, elm_times in enumerate(self.elm_cycle_start_stop):
-        #     print(f"{i}  {elm_times[0]:.3f}  {elm_times[1]:.3f}")
         self.status()
 
-    def create_time_range(self):
+    def on_mouse_click_callback(self, mouse_event):
+        if self.toolbar.mode.startswith(('pan','zoom')) or len(self.mouse_guide_lines)==0:
+            return
+        if self.is_delete_active:
+            self.delete_elm_cycle(mouse_event.xdata)
+            return
+        # otherwise, mouse clicks are marking ELMs (auto or manual)
+        if self.t_start is None:
+            self.t_start = mouse_event.xdata
+            for line in self.start_click_tmp_line:
+                line.set_xdata([self.t_start, self.t_start])
+        else:
+            self.t_stop = mouse_event.xdata
+            for line in self.start_click_tmp_line:
+                line.set_xdata([np.nan, np.nan])
+        if not self.t_start or not self.t_stop:
+            return
         if self.mode_selection.index == 0:
             # auto ELM (1 or more) start/stop segmentation
             assert self.t_start and self.t_stop
@@ -440,25 +417,4 @@ class BES_ELM_Labeling_App:
             self.append_elm_cycle(self.t_start, self.t_stop)
         self.t_start = None
         self.t_stop = None
-        # for i, elm_times in enumerate(self.elm_cycle_start_stop):
-        #     print(f"{i}  {elm_times[0]:.3f}  {elm_times[1]:.3f}")
         self.status()
-
-    def on_mouse_click_callback(self, mouse_event):
-        if self.toolbar.mode.startswith(('pan','zoom')) or len(self.mouse_guide_lines)==0:
-            return
-        if self.is_delete_active:
-            self.delete_elm_cycle(mouse_event.xdata)
-            return
-        # otherwise, mouse clicks are marking ELMs (auto or manual)
-        if self.t_start is None:
-            self.t_start = mouse_event.xdata
-            for line in self.start_click_tmp_line:
-                line.set_xdata([self.t_start, self.t_start])
-        else:
-            self.t_stop = mouse_event.xdata
-            for line in self.start_click_tmp_line:
-                line.set_xdata([np.nan, np.nan])
-        if self.t_start and self.t_stop:
-            self.create_time_range()
-        return
