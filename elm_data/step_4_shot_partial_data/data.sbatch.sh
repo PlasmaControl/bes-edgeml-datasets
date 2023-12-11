@@ -17,9 +17,7 @@ PYTHON_SCRIPT=$(cat << END
 
 from elm_data.data_tools import HDF5_Data
 
-dataset = HDF5_Data(
-    hdf5_file='data_v4.hdf5',
-)
+dataset = HDF5_Data(hdf5_file='data_v5.hdf5')
 dataset.load_shotlist(
     csv_file='/home/smithdr/ml/elm_data/step_3_filter_metadata/filtered_shotlist.csv',
     channels=[21,23],
@@ -27,7 +25,7 @@ dataset.load_shotlist(
     truncate_hdf5=True, 
     use_concurrent=True, 
 )
-dataset.print_hdf5_summary()
+dataset.print_hdf5_contents(print_attributes=False, print_datasets=False)
 
 dataset.plot_8x8_rz_avg()
 dataset.plot_ip_bt_histograms()

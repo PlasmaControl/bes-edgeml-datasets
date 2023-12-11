@@ -16,47 +16,50 @@ import MDSplus
 import h5py
 
 
-def print_hdf5_contents(hdf5_file: Path|str, **kwargs):
-    print(f'Contents of {hdf5_file}')
-    with h5py.File(hdf5_file, 'r') as h5file:
-        _recursively_print_content(h5file, level=0, **kwargs)
-
-def _recursively_print_content(
-        group: h5py.Group, 
-        summary:bool = False, 
-        level: int=0, 
-        max_level=10,
-        max_items=None,
+def print_hdf5_contents(
+        hdf5_file: Path|str,
+        print_attributes: bool = True,
+        print_datasets: bool = True,
 ):
-    print(f'Group {group.name} with {len(group)} elements')
-    if not summary: _print_attributes(group)
-    if level >= max_level:
-        print('Reached max level')
-        return
-    i_items = 0
-    for key, value in group.items():
-        if max_items and i_items >= max_items:
-            print('Skipping additional items...')
-            break
-        i_items += 1
-        if isinstance(value, h5py.Group):
-            _recursively_print_content(
-                value, 
-                summary=summary, 
-                level=level+1,
-                max_level=max_level,
-                max_items=max_items,
-            )
-        if isinstance(value, h5py.Dataset):
-            print(f'  Dataset {key}:', value.shape, value.dtype)
-            if not summary: _print_attributes(value)
 
-def _print_attributes(obj: h5py.Group|h5py.Dataset):
-    for key, value in obj.attrs.items():
-        if isinstance(value, np.ndarray):
-            print(f'  Attribute {key}:', value.shape, value.dtype)
-        else:
-            print(f'  Attribute {key}:', value)
+    def _print_attributes(obj: h5py.Group|h5py.Dataset):
+        more_indent = '  ' if isinstance(obj, h5py.Dataset) else ''
+        for key in obj.attrs:
+            item = obj.attrs[key]
+            if isinstance(item, np.ndarray):
+                print(more_indent + f'  Attribute {key}: shape {item.shape} dtype {item.dtype}')
+            elif isinstance(item, Iterable):
+                print(more_indent + f'  Attribute {key}: len {len(item)}')
+            else:
+                print(more_indent + f'  Attribute {key}: value {item} type {type(item)}')
+
+    def _recursively_print_content(group: h5py.Group):
+        n_subgroups = 0
+        n_datasets = 0
+        for key in group:
+            item = group[key]
+            if isinstance(item, h5py.Group):
+                n_subgroups += 1
+            elif isinstance(item, h5py.Dataset):
+                n_datasets += 1
+            else:
+                raise ValueError
+        print(f'Group {group.name}: {n_datasets} datasets, {n_subgroups} subgroups, and {len(group.attrs)} attributes')
+        if print_attributes: _print_attributes(group)
+        for key in group:
+            item = group[key]
+            if isinstance(item, h5py.Group):
+                _recursively_print_content(item)
+            elif isinstance(item, h5py.Dataset):
+                if print_datasets: print(f'  Dataset {key}:', item.shape, item.dtype)
+                if print_attributes: _print_attributes(item)
+            else:
+                raise ValueError
+
+    print(f'Contents of {hdf5_file}')
+    with h5py.File(hdf5_file, 'r') as root:
+        _recursively_print_content(root)
+
 
 def make_mdsplus_connection() -> MDSplus.Connection:
     tries = 0
@@ -528,28 +531,14 @@ class HDF5_Data:
                 writer.writerows(shotlist_data)
         return shotlist
 
-    def print_hdf5_contents(self):
-        print(f'Contents of {self.hdf5_file}')
-        with h5py.File(self.hdf5_file, 'r') as root:
-            self._recursively_print_content(root)
-
-    def print_hdf5_summary(self):
-        print(f'Summary of {self.hdf5_file}')
-        with h5py.File(self.hdf5_file, 'r') as root:
-            print(f"Group {root.name}")
-            self._print_attributes(root)
-            config_group = root['configurations']
-            for group in config_group.values():
-                print(f"Group {group.name}")
-                self._print_attributes(group)
-
     def plot_ip_bt_histograms(self, filename='', shotlist=tuple()):
         with h5py.File(self.hdf5_file, 'r') as root:
-            ip = np.zeros(len(root)) * np.NAN
-            bt = np.zeros(len(root)) * np.NAN
-            for i_key, (shot_key, shot_group) in enumerate(root.items()):
+            ip = np.zeros(len(root['shots'])) * np.NAN
+            bt = np.zeros(len(root['shots'])) * np.NAN
+            for i_key, shot_key in enumerate(root['shots']):
                 if shot_key.startswith('config'): continue
                 if shotlist and int(shot_key) not in shotlist: continue
+                shot_group = root['shots'][shot_key]
                 ip[i_key] = shot_group.attrs['ip_extremum']
                 bt[i_key] = shot_group.attrs['bt_extremum']
         ip = ip[np.isfinite(ip)]
@@ -569,11 +558,12 @@ class HDF5_Data:
 
     def plot_8x8_rz_avg(self, filename='', shotlist=tuple()):
         with h5py.File(self.hdf5_file, 'r') as root:
-            r_avg = np.zeros(len(root)) * np.NAN
-            z_avg = np.zeros(len(root)) * np.NAN
-            for i_key, (shot_key, shot_group) in enumerate(root.items()):
+            r_avg = np.zeros(len(root['shots'])) * np.NAN
+            z_avg = np.zeros(len(root['shots'])) * np.NAN
+            for i_key, shot_key in enumerate(root['shots']):
                 if shot_key.startswith('config'): continue
                 if shotlist and int(shot_key) not in shotlist: continue
+                shot_group = root['shots'][shot_key]
                 r_avg[i_key] = shot_group.attrs['r_avg']
                 z_avg[i_key] = shot_group.attrs['z_avg']
         r_avg = r_avg[np.isfinite(r_avg)]
@@ -724,42 +714,18 @@ class HDF5_Data:
                 else:
                     shot_group.attrs[attr_name] = attr
         return shot
+
+    def print_hdf5_contents(
+            self, 
+            print_attributes: bool = True,
+            print_datasets: bool = True,
+    ):
+        print_hdf5_contents(
+            self.hdf5_file, 
+            print_attributes=print_attributes,
+            print_datasets=print_datasets,
+        )
     
-    @staticmethod
-    def _print_attributes(obj: h5py.Group|h5py.Dataset):
-        for key in obj.attrs:
-            item = obj.attrs[key]
-            if isinstance(item, np.ndarray):
-                print(f'  Attribute {key}: shape {item.shape} dtype {item.dtype}')
-            elif isinstance(item, Iterable):
-                print(f'  Attribute {key}: len {len(item)}')
-            else:
-                print(f'  Attribute {key}: value {item} type {type(item)}')
-
-    def _recursively_print_content(self, group: h5py.Group):
-        print(f'Group {group.name}')
-        n_subgroups = 0
-        n_datasets = 0
-        for key in group:
-            item = group[key]
-            if isinstance(item, h5py.Group):
-                n_subgroups += 1
-            elif isinstance(item, h5py.Dataset):
-                n_datasets += 1
-            else:
-                raise ValueError
-        print(f'  {n_datasets} datasets and {n_subgroups} subgroups')
-        self._print_attributes(group)
-        for key in group:
-            item = group[key]
-            if isinstance(item, h5py.Group):
-                self._recursively_print_content(item)
-            elif isinstance(item, h5py.Dataset):
-                print(f'  Dataset {key}:', item.shape, item.dtype)
-                self._print_attributes(item)
-            else:
-                raise ValueError
-
 
 if __name__=='__main__':
     # bes_data = Shot(

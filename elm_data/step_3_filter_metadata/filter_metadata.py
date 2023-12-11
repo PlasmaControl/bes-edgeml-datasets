@@ -4,7 +4,7 @@ from elm_data.data_tools import HDF5_Data
 dataset = HDF5_Data(
     hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v7.hdf5',
 )
-dataset.print_hdf5_summary()
+dataset.print_hdf5_contents(print_attributes=False, print_datasets=False)
 
 filtered_shotlist = dataset.filter_shots(
     r_avg=np.array([223.0, 228.0]),
