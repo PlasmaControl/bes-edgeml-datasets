@@ -28,6 +28,8 @@ def print_hdf5_contents(
             item = obj.attrs[key]
             if isinstance(item, np.ndarray):
                 print(more_indent + f'  Attribute {key}: shape {item.shape} dtype {item.dtype}')
+            elif isinstance(item, str):
+                print(more_indent + f'  Attribute {key}: {item}')
             elif isinstance(item, Iterable):
                 print(more_indent + f'  Attribute {key}: len {len(item)}')
             else:
@@ -51,7 +53,7 @@ def print_hdf5_contents(
             if isinstance(item, h5py.Group):
                 _recursively_print_content(item)
             elif isinstance(item, h5py.Dataset):
-                if print_datasets: print(f'  Dataset {key}:', item.shape, item.dtype)
+                if print_datasets: print(f'  Dataset {key}:', item.shape, item.dtype, item.nbytes)
                 if print_attributes: _print_attributes(item)
             else:
                 raise ValueError
