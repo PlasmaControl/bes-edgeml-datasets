@@ -210,9 +210,12 @@ class BES_ELM_Labeling_App:
             shot_data_group = data_file['shots'][shot_str]
             pinj_time = np.array(shot_data_group['pinj_time'])
             pinj_15l = np.array(shot_data_group['pinj_15l'])/1e6
-            for i_interval in list(range(len(self.elm_cycle_intervals))).reverse():
-                t_start, t_stop = self.elm_cycle_intervals[i_interval]
-                time_mask = pinj_time >= t_start & pinj_time <= t_start
+            for i_interval, interval in reversed(list(enumerate(self.elm_cycle_intervals))):
+                t_start, t_stop = interval
+                time_mask = np.logical_and(
+                    pinj_time >= t_start,
+                    pinj_time <= t_start,
+                )
                 if np.any(pinj_15l[time_mask] <= 0.5):
                     self.elm_cycle_intervals.pop(i_interval)
                     print(f"Skipping interval {t_start:.1-}")
