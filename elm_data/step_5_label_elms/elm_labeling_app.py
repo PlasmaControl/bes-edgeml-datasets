@@ -225,8 +225,8 @@ class BES_ELM_Labeling_App:
             shot_group = labels_file['shots'].create_group(name=shot_str)
             for key, value in shot_data_group.attrs.items():
                 shot_group.attrs[key] = value
-            # for key, value in shot_data_group.items():
-            #     shot_group.create_dataset(name=key, data=value)
+            for key, value in shot_data_group.items():
+                shot_group.create_dataset(name=key, data=value)
             assert 'shot_intervals' not in shot_group
             shot_intervals = []
             elms = [int(elm_str) for elm_str in labels_file['elms']]
