@@ -8,8 +8,6 @@ import scipy.signal, scipy.fft
 import h5py
 import ipywidgets as widgets
 
-# from elm_data.data_tools import print_hdf5_contents
-
 @dataclasses.dataclass(eq=False)
 class BES_ELM_Labeling_App:
     data_hdf5_file: str|Path
@@ -53,10 +51,15 @@ class BES_ELM_Labeling_App:
                 root.create_group(name='elms')
             if 'excluded_shots' not in root.attrs:
                 root.attrs['excluded_shots'] = np.array([], dtype=int)
-            labeled_shots = [int(shot) for shot in root['shots']]
-            labeled_elms = [int(elm) for elm in root['elms']]
+            assert 'shots' in root
+            assert 'elms' in root
+            assert 'excluded_shots' in root.attrs
             print(f"HDF5 labeled ELM file: {self.elm_labels_hdf5_file}")
-            print(f"  {len(labeled_elms)} ELMs from {len(labeled_shots)} shots ({len(root.attrs['excluded_shots'])} excluded shots)")
+            print(f"  {len(root['elms'])} ELMs from {len(root['shots'])} shots ({len(root.attrs['excluded_shots'])} excluded shots)")
+            for shot in root['shots']:
+                shots.remove(int(shot))
+            for shot in root.attrs['excluded_shots']:
+                shots.remove(shot)
 
         self.shot = None
         self.next_shot = (shot for shot in shots)
@@ -198,19 +201,24 @@ class BES_ELM_Labeling_App:
     def save_elm_cycles_for_shot(self):
         if not self.shot or not self.elm_cycle_intervals:
             return
+        assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)
         with (
             h5py.File(self.elm_labels_hdf5_file, 'a') as labels_file,
             h5py.File(self.data_hdf5_file, 'r') as data_file,
         ):
-            assert 'shots' in labels_file
-            assert 'elms' in labels_file
             shot_str = str(self.shot)
-            assert shot_str not in labels_file['shots']
             shot_data_group = data_file['shots'][shot_str]
-            # self.axes[0].plot(np.array(group['pinj_time']), np.array(group['pinj_15l'])/1e6, label='PINJ_15L (MW)')
-            for i_interval in range(len(self.elm_cycle_intervals)):
+            pinj_time = np.array(shot_data_group['pinj_time'])
+            pinj_15l = np.array(shot_data_group['pinj_15l'])/1e6
+            for i_interval in list(range(len(self.elm_cycle_intervals))).reverse():
                 t_start, t_stop = self.elm_cycle_intervals[i_interval]
-                #TODO test for Pnb
+                time_mask = pinj_time >= t_start & pinj_time <= t_start
+                if np.any(pinj_15l[time_mask] <= 0.5):
+                    self.elm_cycle_intervals.pop(i_interval)
+                    print(f"Skipping interval {t_start:.1-}")
+            if not self.elm_cycle_intervals:
+                return
+            assert shot_str not in labels_file['shots']
             shot_group = labels_file['shots'].create_group(name=shot_str)
             for key, value in shot_data_group.attrs.items():
                 shot_group.attrs[key] = value
@@ -235,12 +243,10 @@ class BES_ELM_Labeling_App:
                 elm_group.attrs['t_shot'] = t_stop
                 shot_intervals.append([t_start, t_stop])
                 next_i_elm += 1
-            shot_group.attrs['shot_intervals'] = shot_intervals
-
+            shot_group.attrs['shot_intervals'] = np.array(shot_intervals)
 
     def load_new_shot(self, *_):
         self.status_label.value = 'State: saving and loading new shot...'
-        shots = []
         if self.shot and self.elm_cycle_intervals:
             self.save_elm_cycles_for_shot()
         else:
@@ -250,6 +256,7 @@ class BES_ELM_Labeling_App:
         # load new shot
         with h5py.File(self.elm_labels_hdf5_file, 'a') as root:
             shots = [int(shot_str) for shot_str in root['shots']]
+            shots.extend(root.attrs['excluded_shots'].tolist())
         while True:
             self.shot = next(self.next_shot)
             if self.shot not in shots:
@@ -349,6 +356,7 @@ class BES_ELM_Labeling_App:
             self.status()
 
     def append_elm_cycle(self, t_start, t_stop):
+        assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)
         if t_stop <= t_start:
             return
         t_mid = (t_start + t_stop)/2
@@ -359,14 +367,15 @@ class BES_ELM_Labeling_App:
         self.elm_cycle_spans.append(
             [ax.axvspan(t_start, t_stop, alpha=0.1, color='m') for ax in self.axes]
         )
+        assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)
 
     def delete_elm_cycle(self, t_delete: float):
+        assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)
         self.t_start = None
         self.t_stop = None
         for line in self.start_click_tmp_line:
             line.set_xdata([np.nan, np.nan])
         n_elm_cycles = len(self.elm_cycle_intervals)
-        assert n_elm_cycles == len(self.elm_cycle_spans)
         for i_elm in range(n_elm_cycles):
             t_start, t_stop = self.elm_cycle_intervals[i_elm]
             if t_delete >= t_start and t_delete <= t_stop:
@@ -375,6 +384,7 @@ class BES_ELM_Labeling_App:
                     span.remove()
                 self.elm_cycle_spans.pop(i_elm)
                 break
+        assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)
         self.status()
 
     def on_mouse_click_callback(self, mouse_event):
