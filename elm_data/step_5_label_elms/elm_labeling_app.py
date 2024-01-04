@@ -1,5 +1,7 @@
 from pathlib import Path
 import dataclasses
+import shutil
+import time
 
 import matplotlib.pyplot as plt
 import numpy as np
@@ -13,6 +15,7 @@ class BES_ELM_Labeling_App:
     data_hdf5_file: str|Path
     elm_labels_hdf5_file: str|Path
     truncate: bool = False
+    really_truncate: bool = False
 
     def __post_init__(self):
 
@@ -42,7 +45,15 @@ class BES_ELM_Labeling_App:
         #     shots.insert(0, shot)
 
         # create if needed, and truncate or append
+        if self.truncate != self.really_truncate:
+            print('Truncate keywords are not consistent')
+            return
         if self.truncate:
+            # make backup
+            shutil.copy2(
+                self.elm_labels_hdf5_file,
+                self.elm_labels_hdf5_file.as_posix() + time.strftime(".%Y_%m_%d_%H_%M_%S.backup")
+            )
             print('Truncating labeled ELM file')
         with h5py.File(self.elm_labels_hdf5_file, 'w' if self.truncate else 'a') as root:
             if 'shots' not in root:
@@ -71,6 +82,10 @@ class BES_ELM_Labeling_App:
         self.peak_times = []
         self.elm_cycle_spans = []  # list of MPL spans for ELM cycles
         self.elm_cycle_intervals = []  # list of t_start, t_stop pairs for ELM cycles
+        self.n_labeled_shots = 0
+        self.n_skipped_shots = 0
+        self.n_elms = 0
+
 
         # prepare ipywidgets
         def_layout = {'width':'80%', 'margin':'5px'}
@@ -95,11 +110,13 @@ class BES_ELM_Labeling_App:
         autoy_button = widgets.Button(description='Autoscale y', layout=def_layout)
         autoy_button.on_click(self.autoy_callback)
         self.is_delete_active = False
-        self.delete_button = widgets.Button(
-            description='Delete', 
+        self.delete_button = widgets.Button(description='Delete',  layout=def_layout)
+        self.delete_button.on_click(self.delete_callback)
+        self.delete_all_button = widgets.Button(
+            description='Delete all', 
             layout={'width':'80%', 'margin':'5px 5px 20px 5px'},
         )
-        self.delete_button.on_click(self.delete_callback)
+        self.delete_all_button.on_click(self.delete_all_callback)
 
         self.mode_selection = widgets.RadioButtons(
             options=['Auto', 'Manual'],
@@ -122,6 +139,7 @@ class BES_ELM_Labeling_App:
                 zoom_out_button,
                 autoy_button,
                 self.delete_button,
+                self.delete_all_button,
                 self.mode_selection,
             ]
         )
@@ -135,6 +153,19 @@ class BES_ELM_Labeling_App:
             self.is_delete_active = False
         else:
             self.is_delete_active = not self.is_delete_active
+        self.status()
+
+    def delete_all_callback(self, *_):
+        assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)
+        self.t_start = None
+        self.t_stop = None
+        for line in self.start_click_tmp_line:
+            line.set_xdata([np.nan, np.nan])
+        for i_elm in range(len(self.elm_cycle_intervals)):
+            for span in self.elm_cycle_spans[i_elm]:
+                span.remove()
+        self.elm_cycle_intervals = []
+        self.elm_cycle_spans = []
         self.status()
 
     def pan_callback(self, *_):
@@ -183,20 +214,23 @@ class BES_ELM_Labeling_App:
         for line in self.mouse_guide_lines:
             line.set_xdata([mouse_event.xdata, mouse_event.xdata])
 
-    def status(self):
+    def status(self, msg=''):
         self.zoom_button.button_style = 'info' if self.toolbar.mode.startswith('zoom') else ''
         self.pan_button.button_style = 'info' if self.toolbar.mode.startswith('pan') else ''
         self.delete_button.button_style = 'warning' if self.is_delete_active else ''
-        if self.toolbar.mode.startswith('pan'):
-            self.status_label.value = 'State: pan mode'
+        status = f'{len(self.elm_cycle_intervals)} ELMs for this shot | {self.n_elms} ELMs from {self.n_labeled_shots} shots ({self.n_skipped_shots} skipped shots)'
+        if msg:
+            self.status_label.value = status + msg
+        elif self.toolbar.mode.startswith('pan'):
+            self.status_label.value = status + ' | State: pan mode'
         elif self.toolbar.mode.startswith('zoom'):
-            self.status_label.value = 'State: zoom mode'
+            self.status_label.value = status + ' | State: zoom mode'
         elif self.is_delete_active:
-            self.status_label.value = 'State: delete mode'
+            self.status_label.value = status + ' | State: delete mode'
         elif self.t_start is None:
-            self.status_label.value = 'State: click ELM cycle start'
+            self.status_label.value = status + ' | State: click ELM cycle start'
         else:
-            self.status_label.value = 'State: click ELM cycle end'
+            self.status_label.value = status + ' | State: click ELM cycle end'
 
     def save_elm_cycles_for_shot(self):
         if not self.shot or not self.elm_cycle_intervals:
@@ -249,7 +283,8 @@ class BES_ELM_Labeling_App:
             shot_group.attrs['shot_intervals'] = np.array(shot_intervals)
 
     def load_new_shot(self, *_):
-        self.status_label.value = 'State: saving and loading new shot...'
+        # self.status_label.value = 'State: saving and loading new shot...'
+        self.status(msg='Loading new shot')
         if self.shot and self.elm_cycle_intervals:
             self.save_elm_cycles_for_shot()
         else:
@@ -259,7 +294,11 @@ class BES_ELM_Labeling_App:
         # load new shot
         with h5py.File(self.elm_labels_hdf5_file, 'a') as root:
             shots = [int(shot_str) for shot_str in root['shots']]
-            shots.extend(root.attrs['excluded_shots'].tolist())
+            self.n_labeled_shots = len(shots)
+            excluded_shots = root.attrs['excluded_shots'].tolist()
+            self.n_skipped_shots = len(excluded_shots)
+            shots.extend(excluded_shots)
+            self.n_elms = len(root['elms']) if 'elms' in root else 0
         while True:
             self.shot = next(self.next_shot)
             if self.shot not in shots:
@@ -356,7 +395,7 @@ class BES_ELM_Labeling_App:
             for ax in self.axes[:-1]:
                 ax.legend(fontsize='small', loc='upper right', labelspacing=0.2)
                 ax.relim()
-            self.status()
+        self.status()
 
     def append_elm_cycle(self, t_start, t_stop):
         assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)
@@ -371,6 +410,7 @@ class BES_ELM_Labeling_App:
             [ax.axvspan(t_start, t_stop, alpha=0.1, color='m') for ax in self.axes]
         )
         assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)
+        self.status()
 
     def delete_elm_cycle(self, t_delete: float):
         assert len(self.elm_cycle_intervals) == len(self.elm_cycle_spans)

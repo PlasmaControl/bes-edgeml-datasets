@@ -20,6 +20,7 @@ def print_hdf5_contents(
         hdf5_file: Path|str,
         print_attributes: bool = True,
         print_datasets: bool = True,
+        max_groups: int = 4,
 ):
 
     def _print_attributes(obj: h5py.Group|h5py.Dataset):
@@ -48,16 +49,23 @@ def print_hdf5_contents(
                 raise ValueError
         print(f'Group {group.name}: {n_datasets} datasets, {n_subgroups} subgroups, and {len(group.attrs)} attributes')
         if print_attributes: _print_attributes(group)
+        n_groups = 0
         for key in group:
             item = group[key]
             if isinstance(item, h5py.Group):
-                _recursively_print_content(item)
+                n_groups += 1
+                if max_groups and n_groups <= max_groups:
+                    _recursively_print_content(item)
             elif isinstance(item, h5py.Dataset):
                 if print_datasets: print(f'  Dataset {key}:', item.shape, item.dtype, item.nbytes)
                 if print_attributes: _print_attributes(item)
             else:
                 raise ValueError
 
+    hdf5_file = Path(hdf5_file)
+    if not hdf5_file.exists():
+        print(f'Data file does not exist: {hdf5_file}')
+        return
     print(f'Contents of {hdf5_file}')
     with h5py.File(hdf5_file, 'r') as root:
         _recursively_print_content(root)
@@ -442,13 +450,13 @@ class HDF5_Data:
                     n_non_8x8_shots += 1
                 if shot_group.attrs['is_standard_8x8']:
                     n_standard_8x8_shots += 1
-                if shot_group.attrs['ip_pos_phi'] is True:
-                    if shot_group.attrs['bt_pos_phi'] is True:
+                if shot_group.attrs['ip_pos_phi']:
+                    if shot_group.attrs['bt_pos_phi']:
                         n_pos_ip_pos_bt += 1
                     else:
                         n_pos_ip_neg_bt += 1
                 else:
-                    if shot_group.attrs['bt_pos_phi'] is True:
+                    if shot_group.attrs['bt_pos_phi']:
                         n_neg_ip_pos_bt += 1
                     else:
                         n_neg_ip_neg_bt += 1
