@@ -87,44 +87,46 @@ def make_mdsplus_connection() -> MDSplus.Connection:
 
 
 @dataclasses.dataclass
-class Shot:
+class Shot_Data:
     shot: int = 162303
-    channels: Iterable[int] = None
-    with_other_signals: bool = False
+    bes_channels: Iterable[int]|str = None
+    bes_max_sample_rate: float = None
+    with_limited_signals: bool = False
     only_8x8: bool = False
     only_standard_8x8: bool = False
     only_pos_ip: bool = False
     only_neg_bt: bool = False
     min_pinj_15l: float = None
     min_sustained_15l: float = None
-    connection: MDSplus.Connection = None
+    mdsplus_connection: MDSplus.Connection = None
     quiet: bool = False
 
     def __post_init__(self):
         t1 = time.time()
-        if self.connection is None:
-            self.connection = make_mdsplus_connection()
-        if self.channels is None:
-            self.channels = []
-        self.channels = np.array(self.channels, dtype=int)
+        if self.mdsplus_connection is None:
+            self.mdsplus_connection = make_mdsplus_connection()
+        if self.bes_channels is None:
+            self.bes_channels = []
+        if self.bes_channels is str and self.bes_channels == 'all':
+            self.bes_channels = np.arange(1, 65, dtype=int)
+        self.bes_channels = np.array(self.bes_channels, dtype=int)
         self.bes_signals = None
-        # self.metadata = None
         self.is_8x8 = self.is_standard_8x8 = False
         self.only_8x8 = self.only_8x8 or self.only_standard_8x8
         # get BES time array
         self.bes_time = np.array(
-            self.connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'),
+            self.mdsplus_connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'),
             dtype=np.float32,
         )
         assert self.bes_time.size > 0, f'Shot {self.shot} has bad BES time data'
         self.start_time = self.bes_time[0]
         self.stop_time = self.bes_time[-1]
         # get BES configuration metadata
-        self.connection.openTree('bes', self.shot)
-        self.r_position = np.array(self.connection.get(r'\bes_r'), dtype=np.float32)
-        self.z_position = -np.array(self.connection.get(r'\bes_z'), dtype=np.float32)
+        self.mdsplus_connection.openTree('bes', self.shot)
+        self.r_position = np.array(self.mdsplus_connection.get(r'\bes_r'), dtype=np.float32)
+        self.z_position = -np.array(self.mdsplus_connection.get(r'\bes_z'), dtype=np.float32)
         assert self.r_position.size == 64 and self.z_position.size == 64, f'Shot {self.shot} has bad BES position data'
-        self.connection.closeTree('bes', self.shot)
+        self.mdsplus_connection.closeTree('bes', self.shot)
         for i in np.arange(8):
             # del-r of column i
             rdiff = np.diff(self.r_position[i + np.arange(8) * 8])
@@ -164,8 +166,8 @@ class Shot:
         if self.only_neg_bt:
             assert self.bt_pos_phi is False, f'Shot {self.shot} has positive Bt (neg is normal)'
         # get BES signals
-        if self.channels.size > 0:
-            self.get_bes_signals()
+        if self.bes_channels.size > 0:
+            self.get_bes_signals(max_sample_rate=self.bes_max_sample_rate)
         # mask for early Ip termination
         ip_mask = np.flatnonzero(self.ip >= 400e3)
         ip_stop_time = self.ip_time[ip_mask[-1]]
@@ -190,10 +192,10 @@ class Shot:
             setattr(self, f'{node_name}_max', result['data'].max())
             if node_name == 'pinj':
                 setattr(self, f'{node_name}_time', result['time'])
-                self.connection.openTree('nb', self.shot)
-                date = self.connection.get(f'getnci(\\pinj, "time_inserted")')
+                self.mdsplus_connection.openTree('nb', self.shot)
+                date = self.mdsplus_connection.get(f'getnci(\\pinj, "time_inserted")')
                 self.date = str(date.date)
-                self.connection.closeTree('nb', self.shot)
+                self.mdsplus_connection.closeTree('nb', self.shot)
         # check for minimum PINJ_15L power
         if self.min_pinj_15l:
             assert self.pinj_15l_max > self.min_pinj_15l, f'Shot {self.shot} has low PINJ_15l'
@@ -213,8 +215,8 @@ class Shot:
                 assert valid, f'Shot {self.shot} does not have sustained PINJ_15l'
         if not self.quiet: print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
         # get other signals
-        if self.with_other_signals:
-            self.get_other_siganls()
+        if self.with_limited_signals:
+            self.get_limited_siganls()
         if self.bes_signals is None:
             self.bes_time = None
 
@@ -234,7 +236,7 @@ class Shot:
                 line += f'  value {attr}'
             print(line)
 
-    def get_other_siganls(self):
+    def get_limited_siganls(self):
         t1 = time.time()
         node_names = ['FS03', 'FS04', 'FS05']
         for i_node, node_name in enumerate(node_names):
@@ -260,25 +262,28 @@ class Shot:
 
     def get_bes_signals(
             self, 
-            channels: Iterable = None, 
-            max_sample_rate: float = 200,
+            channels: Iterable[int]|str = None, 
+            max_sample_rate: float = None,
     ):
-        self.channels = np.array(channels, dtype=int) if channels else self.channels
-        assert np.all(self.channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
-        self.bes_signals = np.empty([self.channels.size, self.bes_time.size], dtype=np.float32)
+        if channels is str and channels == 'all':
+            channels = np.arange(1, 65, dtype=int)
+        self.bes_channels = np.array(channels, dtype=int) if channels else self.bes_channels
+        assert np.all(self.bes_channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
+        assert self.bes_channels.size > 0
+        self.bes_signals = np.empty([self.bes_channels.size, self.bes_time.size], dtype=np.float32)
         t1 = time.time()
         tdi_vars = []
         tdi_assignments = []
-        for channel in self.channels:
+        for channel in self.bes_channels:
             var = f'_n{channel:02d}_{self.shot}'
             tdi_vars.append(var)
             tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
             tdi_assignments.append(tmp)
-        self.connection.get(', '.join(tdi_assignments))
+        self.mdsplus_connection.get(', '.join(tdi_assignments))
         for i, tdi_var in enumerate(tdi_vars):
-            self.bes_signals[i, :] = np.array(self.connection.get(tdi_var), dtype=np.float32)
+            self.bes_signals[i, :] = np.array(self.mdsplus_connection.get(tdi_var), dtype=np.float32)
         if max_sample_rate:
-            sample_rate = 1 / np.mean(np.diff(self.bes_time[:1000]))  # kHz
+            sample_rate = 1 / np.mean(np.diff(self.bes_time[:1000]/1e3))  # Hz
             downsample_factor = int(np.rint(sample_rate / max_sample_rate))
             if downsample_factor >= 2:
                 self.bes_signals = self.bes_signals[:, ::downsample_factor]
@@ -293,14 +298,14 @@ class Shot:
     ) -> dict:
         try:
             if tree:
-                self.connection.openTree(tree, self.shot)
-                data = np.array(self.connection.get(f'\\{node_name}'), dtype=np.float32)
-                time = np.array(self.connection.get(f'dim_of(\\{node_name})'), dtype=np.float32)
-                self.connection.closeTree(tree, self.shot)
+                self.mdsplus_connection.openTree(tree, self.shot)
+                data = np.array(self.mdsplus_connection.get(f'\\{node_name}'), dtype=np.float32)
+                time = np.array(self.mdsplus_connection.get(f'dim_of(\\{node_name})'), dtype=np.float32)
+                self.mdsplus_connection.closeTree(tree, self.shot)
             else:
                 ptdata = f'_n = ptdata("{node_name}", {self.shot})'
-                data = np.array(self.connection.get(ptdata), dtype=np.float32)
-                time = np.array(self.connection.get('dim_of(_n)'), dtype=np.float32)
+                data = np.array(self.mdsplus_connection.get(ptdata), dtype=np.float32)
+                time = np.array(self.mdsplus_connection.get('dim_of(_n)'), dtype=np.float32)
         except Exception as e:
             assert False, f'Shot {self.shot} bad data for node {node_name} ({e.__class__.__name__})'
         if data.size < time.size:
@@ -327,16 +332,41 @@ class Shot:
 
 @dataclasses.dataclass
 class HDF5_Data:
-    hdf5_file: str|Path = 'test_metadata.hdf5'
+    hdf5_file: str|Path = './metadata.hdf5'
+    truncate_hdf5: bool = False
 
     def __post_init__(self) -> None:
         self.hdf5_file = Path(self.hdf5_file)
+        assert self.hdf5_file.parent.exists()
+        # configure HDF5 file
+        with h5py.File(self.hdf5_file, 'w' if self.truncate_hdf5 else 'a') as root:
+            root.require_group('shots')
+            root.require_group('configurations')
+            root['configurations'].require_group('8x8_configurations')
+            root['configurations'].require_group('non_8x8_configurations')
+        self.shotlist = []
+
+    def create_metadata_file(self): pass
+    def create_limited_signals_file(self): pass
+    def create_full_bes_data_file(self): pass
+
+    def read_shotlist(self, csv_file: str|Path):
+        csv_file = Path(csv_file).absolute()
+        print(f'Reading shotlist {csv_file}')
+        assert csv_file.exists()
+        shotlist = []
+        with csv_file.open() as csvfile:
+            reader = csv.DictReader(csvfile, skipinitialspace=True)
+            assert 'shot' in reader.fieldnames
+            for irow, row in enumerate(reader):
+                shotlist.append(int(row['shot']))
+        shotlist = list(set(shotlist))
+        shotlist = np.array(shotlist, dtype=int)
 
     def load_shotlist(
         self,
         csv_file: str|Path = '',
         shotlist: Iterable[int] = (162303,183781,193757,196560),
-        truncate_hdf5: bool = False,
         max_shots: int = None,
         use_concurrent: bool = False,
         max_workers: int = None,
@@ -365,14 +395,8 @@ class HDF5_Data:
         print(f"Shots in shotlist: {shotlist.size}")
         assert shotlist.size > 0
         only_8x8 = only_8x8 or only_standard_8x8
-        h5_mode = 'w' if truncate_hdf5 else 'a'
-        with h5py.File(self.hdf5_file, h5_mode) as root:
-            valid_shot_count = 0
-            root.require_group('shots')
-            root.require_group('configurations')
-            group_8x8 = root['configurations'].require_group('8x8_configurations')
-            group_non_8x8 = root['configurations'].require_group('non_8x8_configurations')
-            connection = make_mdsplus_connection()
+        connection = make_mdsplus_connection()
+        with h5py.File(self.hdf5_file, 'a') as root:
             if use_concurrent:
                 if not max_workers:
                     max_workers = len(os.sched_getaffinity(0))
@@ -385,8 +409,6 @@ class HDF5_Data:
                                 self._check_channel_configuration,
                                 shot=shot,
                                 h5root=root,
-                                group_8x8=group_8x8,
-                                group_non_8x8=group_non_8x8,
                                 channels=channels,
                                 with_other_signals=with_other_signals,
                                 only_8x8=only_8x8,
@@ -421,11 +443,9 @@ class HDF5_Data:
             else:
                 for i, shot in enumerate(shotlist):
                     print(f'Shot {shot} ({i + 1} of {shotlist.size})')
-                    result = self._check_channel_configuration(
+                    self._check_channel_configuration(
                         shot=shot,
                         h5root=root,
-                        group_8x8=group_8x8,
-                        group_non_8x8=group_non_8x8,
                         channels=channels,
                         with_other_signals=with_other_signals,
                         only_8x8=only_8x8,
@@ -436,8 +456,6 @@ class HDF5_Data:
                         min_pinj_15l=min_pinj_15l,
                         min_sustained_15l=min_sustained_15l,
                     )
-                    if result:
-                        valid_shot_count += 1
             # count shots
             n_shots = n_8x8_shots = n_standard_8x8_shots = n_non_8x8_shots = 0
             n_pos_ip_pos_bt = n_pos_ip_neg_bt = n_neg_ip_pos_bt = n_neg_ip_neg_bt = 0
@@ -630,8 +648,6 @@ class HDF5_Data:
         self,
         shot: int,
         h5root: h5py.File,
-        group_8x8: h5py.Group,
-        group_non_8x8: h5py.Group,
         channels: Iterable = None,
         with_other_signals: bool = False,
         only_8x8: bool = False,
@@ -644,10 +660,10 @@ class HDF5_Data:
         connection = None,
     ) -> int:
         try:
-            bes_data = Shot(
-                channels=channels,
-                with_other_signals=with_other_signals,
-                connection=connection,
+            bes_data = Shot_Data(
+                bes_channels=channels,
+                with_limited_signals=with_other_signals,
+                mdsplus_connection=connection,
                 shot=shot,
                 only_8x8=only_8x8,
                 only_standard_8x8=only_standard_8x8,
@@ -660,6 +676,11 @@ class HDF5_Data:
         except Exception as e:
             print(f"Shot {shot} failed: {e}")
             return None
+        assert 'configurations' in h5root
+        assert '8x8_configurations' in h5root['configurations']
+        assert 'non_8x8_configurations' in h5root['configurations']
+        group_8x8 = h5root['configurations']['8x8_configurations']
+        group_non_8x8 = h5root['configurations']['non_8x8_configurations']
         if lock is None:
             lock = contextlib.nullcontext()
         with lock:
@@ -691,12 +712,9 @@ class HDF5_Data:
                     break
             # create new configuration group
             if config_index is None:
-                if bes_data.is_8x8:
-                    config_index = config_index_count[0] + 1
-                    new_config = group_8x8.create_group(f'{config_index:04d}')
-                else:
-                    config_index = config_index_count[1] + 1
-                    new_config = group_non_8x8.create_group(f'{config_index:04d}')
+                config_index = config_index_count[0 if bes_data.is_8x8 else 1] + 1
+                config_group = group_8x8 if bes_data.is_8x8 else group_non_8x8
+                new_config = config_group.create_group(f'{config_index:04d}')
                 new_config.attrs['shots'] = np.array([bes_data.shot], dtype=int)
                 new_config.attrs['n_shots'] = new_config.attrs['shots'].size
                 for key in ['r_position','z_position','is_8x8','is_standard_8x8']:
@@ -704,7 +722,7 @@ class HDF5_Data:
                 if bes_data.is_8x8:
                     for key in ['r_avg','z_avg','inboard_column_channel_order','delz_avg']:
                         new_config.attrs[key] = getattr(bes_data, key)
-            assert config_index
+            assert config_index is int
             # save shot metadata
             shot_group = h5root['shots'].require_group(str(shot))
             shot_group.attrs['configuration_index'] = config_index
@@ -745,8 +763,8 @@ if __name__=='__main__':
     # )
     # bes_data.print_contents()
 
-    dataset = HDF5_Data()
-    dataset.load_shotlist(truncate_hdf5=True, channels=[23], with_other_signals=True)
+    dataset = HDF5_Data(truncate_hdf5=True)
+    dataset.load_shotlist(channels=[23], with_other_signals=True)
     dataset.print_hdf5_contents()
 
     # dataset = HDF5_Data(
