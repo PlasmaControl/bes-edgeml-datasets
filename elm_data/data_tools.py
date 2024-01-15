@@ -92,6 +92,7 @@ class Shot_Data:
     bes_channels: Iterable[int]|str = None
     bes_max_sample_rate: float = None  # Hz
     with_limited_signals: bool = False
+    skip_metadata: bool = False
     only_8x8: bool = False
     only_standard_8x8: bool = False
     only_pos_ip: bool = False
@@ -102,7 +103,6 @@ class Shot_Data:
     quiet: bool = False
 
     def __post_init__(self):
-        t1 = time.time()
         if self.mdsplus_connection is None:
             self.mdsplus_connection = make_mdsplus_connection()
         if self.bes_channels is None:
@@ -110,12 +110,46 @@ class Shot_Data:
         elif self.bes_channels is str and self.bes_channels == 'all':
             self.bes_channels = np.arange(1, 65, dtype=int)
         self.bes_channels = np.array(self.bes_channels, dtype=int)
+        self.get_bes_data()
+        if self.skip_metadata is False:
+            self.get_metadata()
+        if self.with_limited_signals:
+            self.get_limited_siganls()
+        # if self.bes_signals is None:
+        #     self.bes_time = None
+
+    def print_contents(self):
+        for attr_name in dir(self):
+            if attr_name.startswith('_'): continue
+            attr = getattr(self, attr_name)
+            if attr.__class__.__name__ == 'method': continue
+            line = f'  {attr_name}: class {attr.__class__.__name__}'
+            if isinstance(attr, Iterable):
+                line += f'  size {len(attr)}'
+            if isinstance(attr, np.ndarray) and attr.size > 1:
+                line += f'  shape {attr.shape}  dtype {attr.dtype}  memsize {sys.getsizeof(attr)/1024/1024:.1f} MB'
+            if attr.__class__.__name__.startswith(('int','float')):
+                line += f'  value {attr:.3f}'
+            elif attr.__class__.__name__.startswith('bool'):
+                line += f'  value {attr}'
+            print(line)
+
+    def get_bes_data(self):
+        t1 = time.time()
         # get BES time array
         self.bes_time = np.array(
             self.mdsplus_connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'),
             dtype=np.float32,
         )
         assert self.bes_time.size > 0, f'Shot {self.shot} has bad BES time data'
+        # get BES signals
+        self.bes_signals = None
+        if self.bes_channels.size > 0:
+            self.get_bes_signals(max_sample_rate=self.bes_max_sample_rate)
+        if not self.quiet: print(f'{self.shot}: BES data time = {time.time() - t1:.2f} s')
+
+    def get_metadata(self):
+        t1 = time.time()
         # get BES configuration
         self.is_8x8 = self.is_standard_8x8 = False
         self.only_8x8 = self.only_8x8 or self.only_standard_8x8
@@ -125,10 +159,10 @@ class Shot_Data:
         assert self.r_position.size == 64 and self.z_position.size == 64, f'Shot {self.shot} has bad BES position data'
         self.mdsplus_connection.closeTree('bes', self.shot)
         for i in np.arange(8):
-            # del-r of column i
+            # del-r for column i
             rdiff = np.diff(self.r_position[i + np.arange(8) * 8])
             col_test = np.all(np.abs(rdiff) <= 0.12)
-            # del-z of row i
+            # del-z for row i
             zdiff = np.diff(self.z_position[i * 8 + np.arange(8)])
             row_test = np.all(np.abs(zdiff) <= 0.12)
             self.is_8x8 = col_test and row_test
@@ -162,10 +196,6 @@ class Shot_Data:
             assert self.ip_pos_phi is True, f'Shot {self.shot} has negative Ip (pos is normal)'
         if self.only_neg_bt:
             assert self.bt_pos_phi is False, f'Shot {self.shot} has positive Bt (neg is normal)'
-        # get BES signals
-        self.bes_signals = None
-        if self.bes_channels.size > 0:
-            self.get_bes_signals(max_sample_rate=self.bes_max_sample_rate)
         # mask for early Ip termination
         ip_mask = np.flatnonzero(self.ip >= 400e3)
         ip_stop_time = self.ip_time[ip_mask[-1]]
@@ -213,27 +243,7 @@ class Shot_Data:
                         break
                 assert valid, f'Shot {self.shot} does not have sustained PINJ_15l'
         if not self.quiet: print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
-        # get other signals
-        if self.with_limited_signals:
-            self.get_limited_siganls()
-        if self.bes_signals is None:
-            self.bes_time = None
 
-    def print_contents(self):
-        for attr_name in dir(self):
-            if attr_name.startswith('_'): continue
-            attr = getattr(self, attr_name)
-            if attr.__class__.__name__ == 'method': continue
-            line = f'  {attr_name}: class {attr.__class__.__name__}'
-            if isinstance(attr, Iterable):
-                line += f'  size {len(attr)}'
-            if isinstance(attr, np.ndarray) and attr.size > 1:
-                line += f'  shape {attr.shape}  dtype {attr.dtype}  memsize {sys.getsizeof(attr)/1024/1024:.1f} MB'
-            if attr.__class__.__name__.startswith(('int','float')):
-                line += f'  value {attr:.3f}'
-            elif attr.__class__.__name__.startswith('bool'):
-                line += f'  value {attr}'
-            print(line)
 
     def get_limited_siganls(self):
         t1 = time.time()
@@ -270,7 +280,6 @@ class Shot_Data:
         assert self.bes_channels.size > 0, f'No BES channels are specified'
         assert np.all(self.bes_channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
         self.bes_signals = np.empty([self.bes_channels.size, self.bes_time.size], dtype=np.float32)
-        t1 = time.time()
         tdi_vars = []
         tdi_assignments = []
         for channel in self.bes_channels:
@@ -287,7 +296,6 @@ class Shot_Data:
             if downsample_factor >= 2:
                 self.bes_signals = self.bes_signals[:, ::downsample_factor]
                 self.bes_time = self.bes_time[::downsample_factor]
-        if not self.quiet: print(f'{self.shot}: BES signal time = {time.time() - t1:.2f} s')
 
     def get_signal(
             self,
@@ -315,13 +323,13 @@ class Shot_Data:
             if downsample_factor >= 2:
                 data = data[::downsample_factor]
                 time = time[::downsample_factor]
-        if self.bes_time is not None:
-            time_mask = np.logical_and(
-                time >= self.bes_time[0],
-                time <= self.bes_time[-1],
-            )
-            data = data[time_mask]
-            time = time[time_mask]
+        assert isinstance(self.bes_time, np.ndarray) and self.bes_time.size > 0
+        time_mask = np.logical_and(
+            time >= self.bes_time[0],
+            time <= self.bes_time[-1],
+        )
+        data = data[time_mask]
+        time = time[time_mask]
         return {
             'point_name': node_name,
             'data': data,
