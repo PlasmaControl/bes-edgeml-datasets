@@ -89,8 +89,8 @@ def make_mdsplus_connection() -> MDSplus.Connection:
 @dataclasses.dataclass
 class Shot_Data:
     shot: int = 162303
-    bes_channels: Iterable[int]|str = None
-    bes_max_sample_rate: float = None  # Hz
+    bes_channels: Iterable[int]|str = None  # list with 1-64 or 'all'
+    max_bes_sample_rate: float = None  # Hz
     with_limited_signals: bool = False
     skip_metadata: bool = False
     only_8x8: bool = False
@@ -107,32 +107,16 @@ class Shot_Data:
             self.mdsplus_connection = make_mdsplus_connection()
         if self.bes_channels is None:
             self.bes_channels = []
-        elif self.bes_channels is str and self.bes_channels == 'all':
+        elif isinstance(self.bes_channels, str) and self.bes_channels == 'all':
             self.bes_channels = np.arange(1, 65, dtype=int)
         self.bes_channels = np.array(self.bes_channels, dtype=int)
+        self.bes_time = None
+        self.bes_signals = None
         self.get_bes_data()
         if self.skip_metadata is False:
             self.get_metadata()
         if self.with_limited_signals:
             self.get_limited_siganls()
-        # if self.bes_signals is None:
-        #     self.bes_time = None
-
-    def print_contents(self):
-        for attr_name in dir(self):
-            if attr_name.startswith('_'): continue
-            attr = getattr(self, attr_name)
-            if attr.__class__.__name__ == 'method': continue
-            line = f'  {attr_name}: class {attr.__class__.__name__}'
-            if isinstance(attr, Iterable):
-                line += f'  size {len(attr)}'
-            if isinstance(attr, np.ndarray) and attr.size > 1:
-                line += f'  shape {attr.shape}  dtype {attr.dtype}  memsize {sys.getsizeof(attr)/1024/1024:.1f} MB'
-            if attr.__class__.__name__.startswith(('int','float')):
-                line += f'  value {attr:.3f}'
-            elif attr.__class__.__name__.startswith('bool'):
-                line += f'  value {attr}'
-            print(line)
 
     def get_bes_data(self):
         t1 = time.time()
@@ -143,9 +127,25 @@ class Shot_Data:
         )
         assert self.bes_time.size > 0, f'Shot {self.shot} has bad BES time data'
         # get BES signals
-        self.bes_signals = None
         if self.bes_channels.size > 0:
-            self.get_bes_signals(max_sample_rate=self.bes_max_sample_rate)
+            assert np.all(self.bes_channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
+            self.bes_signals = np.empty([self.bes_channels.size, self.bes_time.size], dtype=np.float32)
+            tdi_vars = []
+            tdi_assignments = []
+            for channel in self.bes_channels:
+                var = f'_n{channel:02d}_{self.shot}'
+                tdi_vars.append(var)
+                tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
+                tdi_assignments.append(tmp)
+            self.mdsplus_connection.get(', '.join(tdi_assignments))
+            for i, tdi_var in enumerate(tdi_vars):
+                self.bes_signals[i, :] = np.array(self.mdsplus_connection.get(tdi_var), dtype=np.float32)
+            if self.max_bes_sample_rate:
+                sample_rate = 1 / np.mean(np.diff(self.bes_time[:1000]/1e3))  # Hz
+                downsample_factor = int(np.rint(sample_rate / self.max_bes_sample_rate))
+                if downsample_factor >= 2:
+                    self.bes_signals = self.bes_signals[:, ::downsample_factor]
+                    self.bes_time = self.bes_time[::downsample_factor]
         if not self.quiet: print(f'{self.shot}: BES data time = {time.time() - t1:.2f} s')
 
     def get_metadata(self):
@@ -185,7 +185,7 @@ class Shot_Data:
             assert self.is_standard_8x8, f'Shot {self.shot} is not standard 8x8'
         # get ip, beams, etc.
         for node_name in ['ip', 'bt']:
-            result = self.get_signal(node_name, max_sample_rate=5e3)
+            result = self._get_signal(node_name, max_sample_rate=5e3)
             signal:np.ndarray = result['data']
             setattr(self, node_name, signal)
             setattr(self, f'{node_name}_time', result['time'])
@@ -216,7 +216,7 @@ class Shot_Data:
                 setattr(self, f'{node_name}_time', signal_time[mask])
         # get NB
         for node_name in ['pinj', 'pinj_15l', 'pinj_15r']:
-            result = self.get_signal(node_name, tree='nb', max_sample_rate=5e3)
+            result = self._get_signal(node_name, tree='nb', max_sample_rate=5e3)
             setattr(self, node_name, result['data'])
             setattr(self, f'{node_name}_max', result['data'].max())
             if node_name == 'pinj':
@@ -244,12 +244,11 @@ class Shot_Data:
                 assert valid, f'Shot {self.shot} does not have sustained PINJ_15l'
         if not self.quiet: print(f'{self.shot}: Metadata time = {time.time() - t1:.2f} s')
 
-
     def get_limited_siganls(self):
         t1 = time.time()
         node_names = ['FS03', 'FS04', 'FS05']
         for i_node, node_name in enumerate(node_names):
-            signal_dict = self.get_signal(
+            signal_dict = self._get_signal(
                 node_name=node_name,
                 tree='spectroscopy',
                 max_sample_rate=50e3,
@@ -259,7 +258,7 @@ class Shot_Data:
                 setattr(self, 'FS_time', signal_dict['time'])
         node_names = ['denv3f']
         for i_node, node_name in enumerate(node_names):
-            signal_dict = self.get_signal(
+            signal_dict = self._get_signal(
                 node_name=node_name,
                 tree='electrons',
                 max_sample_rate=200e3,
@@ -269,35 +268,7 @@ class Shot_Data:
                 setattr(self, f'{node_name}_time', signal_dict['time'])
         if not self.quiet: print(f'{self.shot}: Non-BES signal time = {time.time() - t1:.2f} s')
 
-    def get_bes_signals(
-            self, 
-            channels: Iterable[int]|str = None, 
-            max_sample_rate: float = None,
-    ):
-        if channels is str and channels == 'all':
-            channels = np.arange(1, 65, dtype=int)
-        self.bes_channels = np.array(channels, dtype=int) if channels else self.bes_channels
-        assert self.bes_channels.size > 0, f'No BES channels are specified'
-        assert np.all(self.bes_channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
-        self.bes_signals = np.empty([self.bes_channels.size, self.bes_time.size], dtype=np.float32)
-        tdi_vars = []
-        tdi_assignments = []
-        for channel in self.bes_channels:
-            var = f'_n{channel:02d}_{self.shot}'
-            tdi_vars.append(var)
-            tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
-            tdi_assignments.append(tmp)
-        self.mdsplus_connection.get(', '.join(tdi_assignments))
-        for i, tdi_var in enumerate(tdi_vars):
-            self.bes_signals[i, :] = np.array(self.mdsplus_connection.get(tdi_var), dtype=np.float32)
-        if max_sample_rate:
-            sample_rate = 1 / np.mean(np.diff(self.bes_time[:1000]/1e3))  # Hz
-            downsample_factor = int(np.rint(sample_rate / max_sample_rate))
-            if downsample_factor >= 2:
-                self.bes_signals = self.bes_signals[:, ::downsample_factor]
-                self.bes_time = self.bes_time[::downsample_factor]
-
-    def get_signal(
+    def _get_signal(
             self,
             node_name: str,
             tree: str = None,  # MDSplus tree or None for PTDATA
@@ -336,10 +307,26 @@ class Shot_Data:
             'time': time,
         }
 
+    def print_contents(self):
+        for attr_name in dir(self):
+            if attr_name.startswith('_'): continue
+            attr = getattr(self, attr_name)
+            if attr.__class__.__name__ == 'method': continue
+            line = f'  {attr_name}: class {attr.__class__.__name__}'
+            if isinstance(attr, Iterable):
+                line += f'  size {len(attr)}'
+            if isinstance(attr, np.ndarray) and attr.size > 1:
+                line += f'  shape {attr.shape}  dtype {attr.dtype}  memsize {sys.getsizeof(attr)/1024/1024:.1f} MB'
+            if attr.__class__.__name__.startswith(('int','float')):
+                line += f'  value {attr:.3f}'
+            elif attr.__class__.__name__.startswith('bool'):
+                line += f'  value {attr}'
+            print(line)
+
 
 @dataclasses.dataclass
 class HDF5_Data:
-    hdf5_file: str|Path = './metadata.hdf5'
+    hdf5_file: str|Path = './metadata_default.hdf5'
     truncate_hdf5: bool = False
     really_truncate_hdf5: bool = False
 
@@ -362,16 +349,17 @@ class HDF5_Data:
         csv_file: str|Path = '',
         shotlist: Iterable[int]|np.ndarray = (162303,183781,193757,196560),
         max_shots: int = None,
-        use_concurrent: bool = False,
-        max_workers: int = None,
-        # bes_channels: Iterable[int] = None,
-        # with_limited_signals: bool = False,
+        bes_channels: Iterable[int] = None,
+        max_bes_sample_rate: float = None,  # freq in Hz
+        with_limited_signals: bool = False,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
         only_pos_ip: bool = False,
         only_neg_bt: bool = False,
         min_pinj_15l: float = None,  # power in W
         min_sustained_15l: float = None,  # time in ms
+        use_concurrent: bool = False,
+        max_workers: int = None,
     ) -> None:
         if csv_file:
             shotlist = self._read_shotlist(csv_file=csv_file)
@@ -381,16 +369,18 @@ class HDF5_Data:
         print(f"Shots for metadata file: {shotlist.size}")
         self._loop_over_shotlist(
             shotlist=shotlist,
-            use_concurrent=use_concurrent,
-            max_workers=max_workers,
-            # bes_channels=bes_channels,
-            # with_limited_signals=with_limited_signals,
+            bes_channels=bes_channels,
+            max_bes_sample_rate=max_bes_sample_rate,
+            with_limited_signals=with_limited_signals,
+            skip_metadata=False,
             only_8x8=only_8x8,
             only_standard_8x8=only_standard_8x8,
             only_neg_bt=only_neg_bt,
             only_pos_ip=only_pos_ip,
             min_pinj_15l=min_pinj_15l,
             min_sustained_15l=min_sustained_15l,
+            use_concurrent=use_concurrent,
+            max_workers=max_workers,
         )
         with h5py.File(self.hdf5_file, 'a') as h5root:
             n_shots = n_8x8_shots = n_standard_8x8_shots = n_non_8x8_shots = 0
@@ -452,16 +442,18 @@ class HDF5_Data:
     def _loop_over_shotlist(
         self,
         shotlist: Iterable[int],
-        use_concurrent: bool = False,
-        max_workers: int = None,
         bes_channels: Iterable[int] = None,
+        max_bes_sample_rate: float = None,  # freq in Hz
         with_limited_signals: bool = False,
+        skip_metadata: bool = False,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
         only_pos_ip: bool = False,
         only_neg_bt: bool = False,
         min_pinj_15l: float = None,  # power in W
         min_sustained_15l: float = None,  # time in ms
+        use_concurrent: bool = False,
+        max_workers: int = None,
     ) -> None:
         with h5py.File(self.hdf5_file, 'a') as h5root:
             only_8x8 = only_8x8 or only_standard_8x8
@@ -478,16 +470,18 @@ class HDF5_Data:
                                 self._load_shot_data,
                                 shot=shot,
                                 h5root=h5root,
-                                mdsplus_connection=mdsplus_connection,
-                                lock=lock,
                                 bes_channels=bes_channels,
+                                max_bes_sample_rate=max_bes_sample_rate,
                                 with_limited_signals=with_limited_signals,
+                                skip_metadata=skip_metadata,
                                 only_8x8=only_8x8,
                                 only_standard_8x8=only_standard_8x8,
                                 only_neg_bt=only_neg_bt,
                                 only_pos_ip=only_pos_ip,
                                 min_pinj_15l=min_pinj_15l,
                                 min_sustained_15l=min_sustained_15l,
+                                mdsplus_connection=mdsplus_connection,
+                                lock=lock,
                             )
                         )
                     while True:
@@ -515,44 +509,50 @@ class HDF5_Data:
                     self._load_shot_data(
                         shot=shot,
                         h5root=h5root,
-                        mdsplus_connection=mdsplus_connection,
                         bes_channels=bes_channels,
+                        max_bes_sample_rate=max_bes_sample_rate,
                         with_limited_signals=with_limited_signals,
+                        skip_metadata=skip_metadata,
                         only_8x8=only_8x8,
                         only_standard_8x8=only_standard_8x8,
                         only_neg_bt=only_neg_bt,
                         only_pos_ip=only_pos_ip,
                         min_pinj_15l=min_pinj_15l,
                         min_sustained_15l=min_sustained_15l,
+                        mdsplus_connection=mdsplus_connection,
                     )
 
     def _load_shot_data(
         self,
         shot: int,
         h5root: h5py.File,
-        lock: threading.Lock = None,
-        mdsplus_connection = None,
         bes_channels: Iterable = None,
+        max_bes_sample_rate: float = None,  # freq in Hz
         with_limited_signals: bool = False,
+        skip_metadata: bool = False,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
         only_pos_ip: bool = False,
         only_neg_bt: bool = False,
         min_pinj_15l: float = None,  # power in W
         min_sustained_15l: float = None,  # time in ms
+        mdsplus_connection = None,
+        lock: threading.Lock = None,
     ) -> int:
         try:
             bes_data = Shot_Data(
-                bes_channels=bes_channels,
-                with_limited_signals=with_limited_signals,
-                mdsplus_connection=mdsplus_connection,
                 shot=shot,
+                bes_channels=bes_channels,
+                max_bes_sample_rate=max_bes_sample_rate,
+                with_limited_signals=with_limited_signals,
+                skip_metadata=skip_metadata,
                 only_8x8=only_8x8,
                 only_standard_8x8=only_standard_8x8,
                 only_pos_ip=only_pos_ip,
                 only_neg_bt=only_neg_bt,
                 min_pinj_15l=min_pinj_15l,
                 min_sustained_15l=min_sustained_15l,
+                mdsplus_connection=mdsplus_connection,
                 quiet=True,
             )
         except Exception as e:
@@ -604,7 +604,7 @@ class HDF5_Data:
                 if bes_data.is_8x8:
                     for key in ['r_avg','z_avg','inboard_column_channel_order','delz_avg']:
                         new_config.attrs[key] = getattr(bes_data, key)
-            assert config_index is int
+            assert config_index
             # save shot metadata
             shot_group = h5root['shots'].require_group(str(shot))
             shot_group.attrs['configuration_index'] = config_index
@@ -625,9 +625,7 @@ class HDF5_Data:
                     shot_group.attrs[attr_name] = attr
         return shot
 
-    def create_limited_signals_file(self): pass
-
-    def create_full_bes_data_file(self): pass
+    def append_elm_event_data(self): pass
 
     def filter_shots(
             self,
@@ -786,14 +784,14 @@ class HDF5_Data:
     
 
 if __name__=='__main__':
-    bes_data = Shot_Data(
-        bes_channels=range(1,3),
-        with_limited_signals=True,
-    )
+    # bes_data = Shot_Data(
+    #     bes_channels=range(1,3),
+    #     with_limited_signals=True,
+    # )
     # bes_data.print_contents()
 
-    # dataset = HDF5_Data(truncate_hdf5=True)
-    # dataset.load_shotlist(channels=[23], with_other_signals=True)
+    dataset = HDF5_Data(truncate_hdf5=True, really_truncate_hdf5=True)
+    dataset.create_metadata_file(bes_channels=[23], with_limited_signals=True, max_bes_sample_rate=200e3)
     # dataset.print_hdf5_contents()
 
     # dataset = HDF5_Data(
