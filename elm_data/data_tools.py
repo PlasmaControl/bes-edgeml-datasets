@@ -20,7 +20,7 @@ def print_hdf5_contents(
         hdf5_file: Path|str,
         print_attributes: bool = True,
         print_datasets: bool = True,
-        max_groups: int = 4,
+        max_groups: int = None,
 ):
 
     def _print_attributes(obj: h5py.Group|h5py.Dataset):
@@ -54,7 +54,7 @@ def print_hdf5_contents(
             item = group[key]
             if isinstance(item, h5py.Group):
                 n_groups += 1
-                if max_groups and n_groups <= max_groups:
+                if (max_groups and n_groups <= max_groups) or not max_groups:
                     _recursively_print_content(item)
             elif isinstance(item, h5py.Dataset):
                 if print_datasets: print(f'  Dataset {key}:', item.shape, item.dtype, item.nbytes)
@@ -117,6 +117,8 @@ class Shot_Data:
             self.get_metadata()
         if self.with_limited_signals:
             self.get_limited_siganls()
+        if self.bes_signals is None:
+            self.bes_time = None
 
     def get_bes_data(self):
         t1 = time.time()
@@ -775,11 +777,13 @@ class HDF5_Data:
             self, 
             print_attributes: bool = True,
             print_datasets: bool = True,
+            max_groups: int = None,
     ):
         print_hdf5_contents(
             self.hdf5_file, 
             print_attributes=print_attributes,
             print_datasets=print_datasets,
+            max_groups=max_groups,
         )
     
 

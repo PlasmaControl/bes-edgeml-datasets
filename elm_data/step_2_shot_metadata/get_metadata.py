@@ -19,6 +19,6 @@ dataset.create_metadata_file(
 )
 
 dataset.print_hdf5_contents()
-dataset.plot_8x8_rz_avg()
-dataset.plot_ip_bt_histograms()
-dataset.plot_configurations()
+# dataset.plot_8x8_rz_avg()
+# dataset.plot_ip_bt_histograms()
+# dataset.plot_configurations()
