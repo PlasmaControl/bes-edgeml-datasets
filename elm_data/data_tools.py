@@ -90,14 +90,14 @@ def make_mdsplus_connection() -> MDSplus.Connection:
 class Shot_Data:
     shot: int = 162303
     bes_channels: Iterable[int]|str = None
-    bes_max_sample_rate: float = None
+    bes_max_sample_rate: float = None  # Hz
     with_limited_signals: bool = False
     only_8x8: bool = False
     only_standard_8x8: bool = False
     only_pos_ip: bool = False
     only_neg_bt: bool = False
-    min_pinj_15l: float = None
-    min_sustained_15l: float = None
+    min_pinj_15l: float = 500e3  # W
+    min_sustained_15l: float = 200  # ms
     mdsplus_connection: MDSplus.Connection = None
     quiet: bool = False
 
@@ -107,21 +107,18 @@ class Shot_Data:
             self.mdsplus_connection = make_mdsplus_connection()
         if self.bes_channels is None:
             self.bes_channels = []
-        if self.bes_channels is str and self.bes_channels == 'all':
+        elif self.bes_channels is str and self.bes_channels == 'all':
             self.bes_channels = np.arange(1, 65, dtype=int)
         self.bes_channels = np.array(self.bes_channels, dtype=int)
-        self.bes_signals = None
-        self.is_8x8 = self.is_standard_8x8 = False
-        self.only_8x8 = self.only_8x8 or self.only_standard_8x8
         # get BES time array
         self.bes_time = np.array(
             self.mdsplus_connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'),
             dtype=np.float32,
         )
         assert self.bes_time.size > 0, f'Shot {self.shot} has bad BES time data'
-        self.start_time = self.bes_time[0]
-        self.stop_time = self.bes_time[-1]
-        # get BES configuration metadata
+        # get BES configuration
+        self.is_8x8 = self.is_standard_8x8 = False
+        self.only_8x8 = self.only_8x8 or self.only_standard_8x8
         self.mdsplus_connection.openTree('bes', self.shot)
         self.r_position = np.array(self.mdsplus_connection.get(r'\bes_r'), dtype=np.float32)
         self.z_position = -np.array(self.mdsplus_connection.get(r'\bes_z'), dtype=np.float32)
@@ -166,23 +163,25 @@ class Shot_Data:
         if self.only_neg_bt:
             assert self.bt_pos_phi is False, f'Shot {self.shot} has positive Bt (neg is normal)'
         # get BES signals
+        self.bes_signals = None
         if self.bes_channels.size > 0:
             self.get_bes_signals(max_sample_rate=self.bes_max_sample_rate)
         # mask for early Ip termination
         ip_mask = np.flatnonzero(self.ip >= 400e3)
         ip_stop_time = self.ip_time[ip_mask[-1]]
-        if ip_stop_time - 100 < self.stop_time:
+        self.bes_start_time = self.bes_time[0]
+        self.bes_stop_time = self.bes_time[-1]
+        if ip_stop_time - 100 < self.bes_stop_time:
             bes_mask = self.bes_time <= ip_stop_time-100
             self.bes_time = self.bes_time[bes_mask]
             if self.bes_signals is not None:
-                # new_signals = self.bes_signals[:, bes_mask]
                 self.bes_signals = self.bes_signals[:, bes_mask]
-            self.start_time = self.bes_time[0]
-            self.stop_time = self.bes_time[-1]
+            self.bes_start_time = self.bes_time[0]
+            self.bes_stop_time = self.bes_time[-1]
             for node_name in ['ip', 'bt']:
                 signal = getattr(self, node_name)
                 signal_time = getattr(self, f'{node_name}_time')
-                mask = signal_time <= self.stop_time
+                mask = signal_time <= self.bes_stop_time
                 setattr(self, node_name, signal[mask])
                 setattr(self, f'{node_name}_time', signal_time[mask])
         # get NB
@@ -268,8 +267,8 @@ class Shot_Data:
         if channels is str and channels == 'all':
             channels = np.arange(1, 65, dtype=int)
         self.bes_channels = np.array(channels, dtype=int) if channels else self.bes_channels
+        assert self.bes_channels.size > 0, f'No BES channels are specified'
         assert np.all(self.bes_channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
-        assert self.bes_channels.size > 0
         self.bes_signals = np.empty([self.bes_channels.size, self.bes_time.size], dtype=np.float32)
         t1 = time.time()
         tdi_vars = []
@@ -294,7 +293,7 @@ class Shot_Data:
             self,
             node_name: str,
             tree: str = None,  # MDSplus tree or None for PTDATA
-            max_sample_rate: int = None,  # max sample rate in Hz (approx)
+            max_sample_rate: int = None,  # Hz
     ) -> dict:
         try:
             if tree:
@@ -334,44 +333,31 @@ class Shot_Data:
 class HDF5_Data:
     hdf5_file: str|Path = './metadata.hdf5'
     truncate_hdf5: bool = False
+    really_truncate_hdf5: bool = False
 
     def __post_init__(self) -> None:
-        self.hdf5_file = Path(self.hdf5_file)
+        self.hdf5_file = Path(self.hdf5_file).absolute()
+        self.truncate_hdf5 = self.truncate_hdf5 and self.really_truncate_hdf5
+        print(f'HDF5 data file: {self.hdf5_file}')
+        print('Truncating data file' if self.truncate_hdf5 else 'Appending data file')
         assert self.hdf5_file.parent.exists()
-        # configure HDF5 file
         with h5py.File(self.hdf5_file, 'w' if self.truncate_hdf5 else 'a') as root:
             root.require_group('shots')
+            root.require_group('elms')
             root.require_group('configurations')
             root['configurations'].require_group('8x8_configurations')
             root['configurations'].require_group('non_8x8_configurations')
         self.shotlist = []
 
-    def create_metadata_file(self): pass
-    def create_limited_signals_file(self): pass
-    def create_full_bes_data_file(self): pass
-
-    def read_shotlist(self, csv_file: str|Path):
-        csv_file = Path(csv_file).absolute()
-        print(f'Reading shotlist {csv_file}')
-        assert csv_file.exists()
-        shotlist = []
-        with csv_file.open() as csvfile:
-            reader = csv.DictReader(csvfile, skipinitialspace=True)
-            assert 'shot' in reader.fieldnames
-            for irow, row in enumerate(reader):
-                shotlist.append(int(row['shot']))
-        shotlist = list(set(shotlist))
-        shotlist = np.array(shotlist, dtype=int)
-
-    def load_shotlist(
+    def create_metadata_file(
         self,
         csv_file: str|Path = '',
-        shotlist: Iterable[int] = (162303,183781,193757,196560),
+        shotlist: Iterable[int]|np.ndarray = (162303,183781,193757,196560),
         max_shots: int = None,
         use_concurrent: bool = False,
         max_workers: int = None,
-        channels: Iterable[int] = None,
-        with_other_signals: bool = False,
+        # bes_channels: Iterable[int] = None,
+        # with_limited_signals: bool = False,
         only_8x8: bool = False,
         only_standard_8x8: bool = False,
         only_pos_ip: bool = False,
@@ -380,23 +366,98 @@ class HDF5_Data:
         min_sustained_15l: float = None,  # time in ms
     ) -> None:
         if csv_file:
-            # read shotlist from CSV file; column `shot` must exist
-            csv_file = Path(csv_file)
-            assert csv_file.exists()
-            print(f'Using shotlist {csv_file.as_posix()}')
-            shotlist = []
-            with csv_file.open() as csvfile:
-                reader = csv.DictReader(csvfile, skipinitialspace=True)
-                assert 'shot' in reader.fieldnames
-                for irow, row in enumerate(reader):
-                    if max_shots and irow+1 > max_shots: break
-                    shotlist.append(int(row['shot']))
+            shotlist = self._read_shotlist(csv_file=csv_file)
+        shotlist = np.array(shotlist, dtype=int)
+        if max_shots and shotlist.size > max_shots:
+            shotlist = shotlist[:max_shots]
+        print(f"Shots for metadata file: {shotlist.size}")
+        self._loop_over_shotlist(
+            shotlist=shotlist,
+            use_concurrent=use_concurrent,
+            max_workers=max_workers,
+            # bes_channels=bes_channels,
+            # with_limited_signals=with_limited_signals,
+            only_8x8=only_8x8,
+            only_standard_8x8=only_standard_8x8,
+            only_neg_bt=only_neg_bt,
+            only_pos_ip=only_pos_ip,
+            min_pinj_15l=min_pinj_15l,
+            min_sustained_15l=min_sustained_15l,
+        )
+        with h5py.File(self.hdf5_file, 'a') as h5root:
+            n_shots = n_8x8_shots = n_standard_8x8_shots = n_non_8x8_shots = 0
+            n_pos_ip_pos_bt = n_pos_ip_neg_bt = n_neg_ip_pos_bt = n_neg_ip_neg_bt = 0
+            for shot_str in h5root['shots']:
+                shot_group = h5root['shots'][shot_str]
+                n_shots += 1
+                if shot_group.attrs['is_8x8']:
+                    n_8x8_shots += 1
+                else:
+                    n_non_8x8_shots += 1
+                if shot_group.attrs['is_standard_8x8']:
+                    n_standard_8x8_shots += 1
+                if shot_group.attrs['ip_pos_phi']:
+                    if shot_group.attrs['bt_pos_phi']:
+                        n_pos_ip_pos_bt += 1
+                    else:
+                        n_pos_ip_neg_bt += 1
+                else:
+                    if shot_group.attrs['bt_pos_phi']:
+                        n_neg_ip_pos_bt += 1
+                    else:
+                        n_neg_ip_neg_bt += 1
+            assert n_shots == n_8x8_shots + n_non_8x8_shots
+            assert n_shots == n_pos_ip_pos_bt + n_pos_ip_neg_bt + n_neg_ip_pos_bt + n_neg_ip_neg_bt
+            h5root.attrs['n_shots'] = n_shots
+            h5root.attrs['n_8x8_shots'] = n_8x8_shots
+            h5root.attrs['n_non_8x8_shots'] = n_non_8x8_shots
+            h5root.attrs['n_standard_8x8_shots'] = n_standard_8x8_shots
+            h5root.attrs['n_pos_ip_pos_bt'] = n_pos_ip_pos_bt
+            h5root.attrs['n_pos_ip_neg_bt'] = n_pos_ip_neg_bt
+            h5root.attrs['n_neg_ip_pos_bt'] = n_neg_ip_pos_bt
+            h5root.attrs['n_neg_ip_neg_bt'] = n_neg_ip_neg_bt
+            group_8x8 = h5root['configurations']['8x8_configurations']
+            group_non_8x8 = h5root['configurations']['non_8x8_configurations']
+            for config_group in [group_8x8, group_non_8x8]:
+                n_shots = 0
+                for config in config_group.values():
+                    n_shots += config.attrs['n_shots']
+                if 'non' in config_group.name:
+                    assert n_shots == h5root.attrs['n_non_8x8_shots']
+                else:
+                    assert n_shots == h5root.attrs['n_8x8_shots']
+                config_group.attrs['n_shots'] = n_shots
+
+    def _read_shotlist(self, csv_file: str|Path) -> np.ndarray:
+        csv_file = Path(csv_file).absolute()
+        print(f'Reading shotlist from {csv_file}')
+        assert csv_file.exists()
+        with csv_file.open() as csvfile:
+            reader = csv.DictReader(csvfile, skipinitialspace=True)
+            assert 'shot' in reader.fieldnames
+            shotlist = [int(row['shot']) for row in reader]
         shotlist = np.array(shotlist, dtype=int)
         print(f"Shots in shotlist: {shotlist.size}")
         assert shotlist.size > 0
-        only_8x8 = only_8x8 or only_standard_8x8
-        connection = make_mdsplus_connection()
-        with h5py.File(self.hdf5_file, 'a') as root:
+        return shotlist
+
+    def _loop_over_shotlist(
+        self,
+        shotlist: Iterable[int],
+        use_concurrent: bool = False,
+        max_workers: int = None,
+        bes_channels: Iterable[int] = None,
+        with_limited_signals: bool = False,
+        only_8x8: bool = False,
+        only_standard_8x8: bool = False,
+        only_pos_ip: bool = False,
+        only_neg_bt: bool = False,
+        min_pinj_15l: float = None,  # power in W
+        min_sustained_15l: float = None,  # time in ms
+    ) -> None:
+        with h5py.File(self.hdf5_file, 'a') as h5root:
+            only_8x8 = only_8x8 or only_standard_8x8
+            mdsplus_connection = make_mdsplus_connection()
             if use_concurrent:
                 if not max_workers:
                     max_workers = len(os.sched_getaffinity(0))
@@ -406,15 +467,15 @@ class HDF5_Data:
                     for shot in shotlist:
                         futures.append(
                             executor.submit(
-                                self._check_channel_configuration,
+                                self._load_shot_data,
                                 shot=shot,
-                                h5root=root,
-                                channels=channels,
-                                with_other_signals=with_other_signals,
+                                h5root=h5root,
+                                mdsplus_connection=mdsplus_connection,
+                                lock=lock,
+                                bes_channels=bes_channels,
+                                with_limited_signals=with_limited_signals,
                                 only_8x8=only_8x8,
                                 only_standard_8x8=only_standard_8x8,
-                                lock=lock,
-                                connection=connection,
                                 only_neg_bt=only_neg_bt,
                                 only_pos_ip=only_pos_ip,
                                 min_pinj_15l=min_pinj_15l,
@@ -443,61 +504,123 @@ class HDF5_Data:
             else:
                 for i, shot in enumerate(shotlist):
                     print(f'Shot {shot} ({i + 1} of {shotlist.size})')
-                    self._check_channel_configuration(
+                    self._load_shot_data(
                         shot=shot,
-                        h5root=root,
-                        channels=channels,
-                        with_other_signals=with_other_signals,
+                        h5root=h5root,
+                        mdsplus_connection=mdsplus_connection,
+                        bes_channels=bes_channels,
+                        with_limited_signals=with_limited_signals,
                         only_8x8=only_8x8,
                         only_standard_8x8=only_standard_8x8,
-                        connection=connection,
                         only_neg_bt=only_neg_bt,
                         only_pos_ip=only_pos_ip,
                         min_pinj_15l=min_pinj_15l,
                         min_sustained_15l=min_sustained_15l,
                     )
-            # count shots
-            n_shots = n_8x8_shots = n_standard_8x8_shots = n_non_8x8_shots = 0
-            n_pos_ip_pos_bt = n_pos_ip_neg_bt = n_neg_ip_pos_bt = n_neg_ip_neg_bt = 0
-            for shot_str in root['shots']:
-                shot_group = root['shots'][shot_str]
-                n_shots += 1
-                if shot_group.attrs['is_8x8']:
-                    n_8x8_shots += 1
+
+    def _load_shot_data(
+        self,
+        shot: int,
+        h5root: h5py.File,
+        lock: threading.Lock = None,
+        mdsplus_connection = None,
+        bes_channels: Iterable = None,
+        with_limited_signals: bool = False,
+        only_8x8: bool = False,
+        only_standard_8x8: bool = False,
+        only_pos_ip: bool = False,
+        only_neg_bt: bool = False,
+        min_pinj_15l: float = None,  # power in W
+        min_sustained_15l: float = None,  # time in ms
+    ) -> int:
+        try:
+            bes_data = Shot_Data(
+                bes_channels=bes_channels,
+                with_limited_signals=with_limited_signals,
+                mdsplus_connection=mdsplus_connection,
+                shot=shot,
+                only_8x8=only_8x8,
+                only_standard_8x8=only_standard_8x8,
+                only_pos_ip=only_pos_ip,
+                only_neg_bt=only_neg_bt,
+                min_pinj_15l=min_pinj_15l,
+                min_sustained_15l=min_sustained_15l,
+                quiet=True,
+            )
+        except Exception as e:
+            print(f"Shot {shot} failed: {e}")
+            return
+        assert 'configurations' in h5root
+        assert '8x8_configurations' in h5root['configurations']
+        assert 'non_8x8_configurations' in h5root['configurations']
+        group_8x8 = h5root['configurations']['8x8_configurations']
+        group_non_8x8 = h5root['configurations']['non_8x8_configurations']
+        if lock is None:
+            lock = contextlib.nullcontext()
+        with lock:
+            config_index = None
+            config_index_count = [0, 1000]
+            # check for match to existing configuration
+            for igroup, config_group in enumerate([group_8x8, group_non_8x8]):
+                for config_index_str, config in config_group.items():
+                    config: h5py.Group
+                    is_same = False
+                    config_index_count[igroup] = np.max(
+                        [config_index_count[igroup], int(config_index_str)]
+                    )
+                    for position in ['r_position','z_position']:
+                        is_same = np.allclose(
+                            getattr(bes_data, position),
+                            config.attrs[position],
+                            atol=0.2,
+                        )
+                        if not is_same:
+                            break
+                    if is_same:
+                        if shot not in config.attrs['shots']:
+                            config.attrs['shots'] = np.append(config.attrs['shots'], shot)
+                            config.attrs['n_shots'] = config.attrs['shots'].size
+                        config_index = int(config_index_str)
+                        break
+                if config_index:
+                    break
+            # create new configuration group
+            if config_index is None:
+                config_index = config_index_count[0 if bes_data.is_8x8 else 1] + 1
+                config_group = group_8x8 if bes_data.is_8x8 else group_non_8x8
+                new_config = config_group.create_group(f'{config_index:04d}')
+                new_config.attrs['shots'] = np.array([bes_data.shot], dtype=int)
+                new_config.attrs['n_shots'] = new_config.attrs['shots'].size
+                for key in ['r_position','z_position','is_8x8','is_standard_8x8']:
+                    new_config.attrs[key] = getattr(bes_data, key)
+                if bes_data.is_8x8:
+                    for key in ['r_avg','z_avg','inboard_column_channel_order','delz_avg']:
+                        new_config.attrs[key] = getattr(bes_data, key)
+            assert config_index is int
+            # save shot metadata
+            shot_group = h5root['shots'].require_group(str(shot))
+            shot_group.attrs['configuration_index'] = config_index
+            for attr_name in dir(bes_data):
+                if attr_name.startswith('_'): continue
+                attr = getattr(bes_data, attr_name)
+                if attr.__class__.__name__ == 'method': continue
+                if isinstance(attr, MDSplus.Connection): continue
+                if attr is None: attr = False
+                if isinstance(attr, np.ndarray) and attr.size > 100:
+                    shot_group.require_dataset(
+                        attr_name,
+                        data=attr,
+                        shape=attr.shape,
+                        dtype=attr.dtype,
+                    )
                 else:
-                    n_non_8x8_shots += 1
-                if shot_group.attrs['is_standard_8x8']:
-                    n_standard_8x8_shots += 1
-                if shot_group.attrs['ip_pos_phi']:
-                    if shot_group.attrs['bt_pos_phi']:
-                        n_pos_ip_pos_bt += 1
-                    else:
-                        n_pos_ip_neg_bt += 1
-                else:
-                    if shot_group.attrs['bt_pos_phi']:
-                        n_neg_ip_pos_bt += 1
-                    else:
-                        n_neg_ip_neg_bt += 1
-            assert n_shots == n_8x8_shots + n_non_8x8_shots
-            assert n_shots == n_pos_ip_pos_bt + n_pos_ip_neg_bt + n_neg_ip_pos_bt + n_neg_ip_neg_bt
-            root.attrs['n_shots'] = n_shots
-            root.attrs['n_8x8_shots'] = n_8x8_shots
-            root.attrs['n_non_8x8_shots'] = n_non_8x8_shots
-            root.attrs['n_standard_8x8_shots'] = n_standard_8x8_shots
-            root.attrs['n_pos_ip_pos_bt'] = n_pos_ip_pos_bt
-            root.attrs['n_pos_ip_neg_bt'] = n_pos_ip_neg_bt
-            root.attrs['n_neg_ip_pos_bt'] = n_neg_ip_pos_bt
-            root.attrs['n_neg_ip_neg_bt'] = n_neg_ip_neg_bt
-            for config_group in [group_8x8, group_non_8x8]:
-                n_shots = 0
-                for config in config_group.values():
-                    n_shots += config.attrs['n_shots']
-                if 'non' in config_group.name:
-                    assert n_shots == root.attrs['n_non_8x8_shots']
-                else:
-                    assert n_shots == root.attrs['n_8x8_shots']
-                config_group.attrs['n_shots'] = n_shots
-    
+                    shot_group.attrs[attr_name] = attr
+        return shot
+
+    def create_limited_signals_file(self): pass
+
+    def create_full_bes_data_file(self): pass
+
     def filter_shots(
             self,
             r_avg=None,
@@ -526,10 +649,8 @@ class HDF5_Data:
         with h5py.File(self.hdf5_file, 'r') as root:
             input_violation_counts = {key: 0 for key in inputs}
             for shot_key in root['shots']:
-                # if shot_key.startswith('config'):
-                #     continue
-                # if only_standard_8x8 and not shot_group.attrs['is_standard_8x8']:
-                #     continue
+                if only_standard_8x8 and not shot_group.attrs['is_standard_8x8']:
+                    continue
                 shot_group = root['shots'][shot_key]
                 candidate_shots += 1
                 in_range = True
@@ -644,105 +765,6 @@ class HDF5_Data:
                     plt.tight_layout()
                     plt.savefig(f'configs_{i_page:02d}.pdf', format='pdf')
 
-    def _check_channel_configuration(
-        self,
-        shot: int,
-        h5root: h5py.File,
-        channels: Iterable = None,
-        with_other_signals: bool = False,
-        only_8x8: bool = False,
-        only_standard_8x8: bool = False,
-        only_pos_ip=True,
-        only_neg_bt=True,
-        min_pinj_15l=700e3,
-        min_sustained_15l=300,
-        lock: threading.Lock = None,
-        connection = None,
-    ) -> int:
-        try:
-            bes_data = Shot_Data(
-                bes_channels=channels,
-                with_limited_signals=with_other_signals,
-                mdsplus_connection=connection,
-                shot=shot,
-                only_8x8=only_8x8,
-                only_standard_8x8=only_standard_8x8,
-                only_pos_ip=only_pos_ip,
-                only_neg_bt=only_neg_bt,
-                min_pinj_15l=min_pinj_15l,
-                min_sustained_15l=min_sustained_15l,
-                quiet=True,
-            )
-        except Exception as e:
-            print(f"Shot {shot} failed: {e}")
-            return None
-        assert 'configurations' in h5root
-        assert '8x8_configurations' in h5root['configurations']
-        assert 'non_8x8_configurations' in h5root['configurations']
-        group_8x8 = h5root['configurations']['8x8_configurations']
-        group_non_8x8 = h5root['configurations']['non_8x8_configurations']
-        if lock is None:
-            lock = contextlib.nullcontext()
-        with lock:
-            config_index = None
-            config_index_count = [0, 1000]
-            # check for match to existing configuration
-            for igroup, config_group in enumerate([group_8x8, group_non_8x8]):
-                for config_index_str, config in config_group.items():
-                    config: h5py.Group
-                    is_same = False
-                    config_index_count[igroup] = np.max(
-                        [config_index_count[igroup], int(config_index_str)]
-                    )
-                    for position in ['r_position','z_position']:
-                        is_same = np.allclose(
-                            getattr(bes_data, position),
-                            config.attrs[position],
-                            atol=0.2,
-                        )
-                        if not is_same:
-                            break
-                    if is_same:
-                        if shot not in config.attrs['shots']:
-                            config.attrs['shots'] = np.append(config.attrs['shots'], shot)
-                            config.attrs['n_shots'] = config.attrs['shots'].size
-                        config_index = int(config_index_str)
-                        break
-                if config_index:
-                    break
-            # create new configuration group
-            if config_index is None:
-                config_index = config_index_count[0 if bes_data.is_8x8 else 1] + 1
-                config_group = group_8x8 if bes_data.is_8x8 else group_non_8x8
-                new_config = config_group.create_group(f'{config_index:04d}')
-                new_config.attrs['shots'] = np.array([bes_data.shot], dtype=int)
-                new_config.attrs['n_shots'] = new_config.attrs['shots'].size
-                for key in ['r_position','z_position','is_8x8','is_standard_8x8']:
-                    new_config.attrs[key] = getattr(bes_data, key)
-                if bes_data.is_8x8:
-                    for key in ['r_avg','z_avg','inboard_column_channel_order','delz_avg']:
-                        new_config.attrs[key] = getattr(bes_data, key)
-            assert config_index is int
-            # save shot metadata
-            shot_group = h5root['shots'].require_group(str(shot))
-            shot_group.attrs['configuration_index'] = config_index
-            for attr_name in dir(bes_data):
-                if attr_name.startswith('_'): continue
-                attr = getattr(bes_data, attr_name)
-                if attr.__class__.__name__ == 'method': continue
-                if isinstance(attr, MDSplus.Connection): continue
-                if attr is None: attr = False
-                if isinstance(attr, np.ndarray) and attr.size > 100:
-                    shot_group.require_dataset(
-                        attr_name,
-                        data=attr,
-                        shape=attr.shape,
-                        dtype=attr.dtype,
-                    )
-                else:
-                    shot_group.attrs[attr_name] = attr
-        return shot
-
     def print_hdf5_contents(
             self, 
             print_attributes: bool = True,
@@ -756,19 +778,158 @@ class HDF5_Data:
     
 
 if __name__=='__main__':
-    # bes_data = Shot(
-    #     channels=np.arange(2)+1,
-    #     with_other_signals=True,
-    #     min_sustained_15l=300,
-    # )
+    bes_data = Shot_Data(
+        bes_channels=range(1,3),
+        with_limited_signals=True,
+    )
     # bes_data.print_contents()
 
-    dataset = HDF5_Data(truncate_hdf5=True)
-    dataset.load_shotlist(channels=[23], with_other_signals=True)
-    dataset.print_hdf5_contents()
+    # dataset = HDF5_Data(truncate_hdf5=True)
+    # dataset.load_shotlist(channels=[23], with_other_signals=True)
+    # dataset.print_hdf5_contents()
 
     # dataset = HDF5_Data(
     #     # hdf5_file='/home/smithdr/ml/elm_data/step_4_shot_partial_data/data_v1.hdf5',
     #     hdf5_file='/home/smithdr/ml/elm_data/step_4_shot_partial_data/data_v2.hdf5',
     # )
     # dataset.print_hdf5_contents()
+
+
+
+
+    # def load_shotlist(
+    #     self,
+    #     csv_file: str|Path = '',
+    #     shotlist: Iterable[int] = (162303,183781,193757,196560),
+    #     max_shots: int = None,
+    #     use_concurrent: bool = False,
+    #     max_workers: int = None,
+    #     bes_channels: Iterable[int] = None,
+    #     with_other_signals: bool = False,
+    #     only_8x8: bool = False,
+    #     only_standard_8x8: bool = False,
+    #     only_pos_ip: bool = False,
+    #     only_neg_bt: bool = False,
+    #     min_pinj_15l: float = None,  # power in W
+    #     min_sustained_15l: float = None,  # time in ms
+    # ) -> None:
+        # if csv_file:
+        #     # read shotlist from CSV file; column `shot` must exist
+        #     csv_file = Path(csv_file).absolute()
+        #     print(f'Reading shotlist from {csv_file}')
+        #     assert csv_file.exists()
+        #     shotlist = []
+        #     with csv_file.open() as csvfile:
+        #         reader = csv.DictReader(csvfile, skipinitialspace=True)
+        #         assert 'shot' in reader.fieldnames
+        #         for irow, row in enumerate(reader):
+        #             if max_shots and irow+1 > max_shots: break
+        #             shotlist.append(int(row['shot']))
+        # shotlist = np.array(shotlist, dtype=int)
+        # print(f"Shots in shotlist: {shotlist.size}")
+        # assert shotlist.size > 0
+        # only_8x8 = only_8x8 or only_standard_8x8
+        # mdsplus_connection = make_mdsplus_connection()
+        # with h5py.File(self.hdf5_file, 'a') as h5root:
+        #     if use_concurrent:
+        #         if not max_workers:
+        #             max_workers = len(os.sched_getaffinity(0))
+        #         lock = threading.Lock()
+        #         with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+        #             futures = []
+        #             for shot in shotlist:
+        #                 futures.append(
+        #                     executor.submit(
+        #                         self._load_shot_data,
+        #                         shot=shot,
+        #                         h5root=h5root,
+        #                         bes_channels=bes_channels,
+        #                         with_other_signals=with_other_signals,
+        #                         only_8x8=only_8x8,
+        #                         only_standard_8x8=only_standard_8x8,
+        #                         lock=lock,
+        #                         mdsplus_connection=mdsplus_connection,
+        #                         only_neg_bt=only_neg_bt,
+        #                         only_pos_ip=only_pos_ip,
+        #                         min_pinj_15l=min_pinj_15l,
+        #                         min_sustained_15l=min_sustained_15l,
+        #                     )
+        #                 )
+        #             while True:
+        #                 running = 0
+        #                 done = 0
+        #                 valid_shot_count = 0
+        #                 for future in futures:
+        #                     running += int(future.running())
+        #                     done += int(future.done())
+        #                     if future.done():
+        #                         if (future.result() is not None) and (future.exception() is None):
+        #                             valid_shot_count += 1
+        #                 with open('futures_status.txt', 'w') as txt_file:
+        #                     txt_file.write(f"{datetime.now()}\n")
+        #                     txt_file.write(f"Total futures: {len(futures)}\n")
+        #                     txt_file.write(f"Running: {running}\n")
+        #                     txt_file.write(f"Done: {done}\n")
+        #                     txt_file.write(f"Valid shots: {valid_shot_count}\n")
+        #                 if running == 0:
+        #                     break
+        #                 time.sleep(60)
+        #     else:
+        #         for i, shot in enumerate(shotlist):
+        #             print(f'Shot {shot} ({i + 1} of {shotlist.size})')
+        #             self._load_shot_data(
+        #                 shot=shot,
+        #                 h5root=h5root,
+        #                 bes_channels=bes_channels,
+        #                 with_other_signals=with_other_signals,
+        #                 only_8x8=only_8x8,
+        #                 only_standard_8x8=only_standard_8x8,
+        #                 mdsplus_connection=mdsplus_connection,
+        #                 only_neg_bt=only_neg_bt,
+        #                 only_pos_ip=only_pos_ip,
+        #                 min_pinj_15l=min_pinj_15l,
+        #                 min_sustained_15l=min_sustained_15l,
+        #             )
+            # count shots
+            # n_shots = n_8x8_shots = n_standard_8x8_shots = n_non_8x8_shots = 0
+            # n_pos_ip_pos_bt = n_pos_ip_neg_bt = n_neg_ip_pos_bt = n_neg_ip_neg_bt = 0
+            # for shot_str in h5root['shots']:
+            #     shot_group = h5root['shots'][shot_str]
+            #     n_shots += 1
+            #     if shot_group.attrs['is_8x8']:
+            #         n_8x8_shots += 1
+            #     else:
+            #         n_non_8x8_shots += 1
+            #     if shot_group.attrs['is_standard_8x8']:
+            #         n_standard_8x8_shots += 1
+            #     if shot_group.attrs['ip_pos_phi']:
+            #         if shot_group.attrs['bt_pos_phi']:
+            #             n_pos_ip_pos_bt += 1
+            #         else:
+            #             n_pos_ip_neg_bt += 1
+            #     else:
+            #         if shot_group.attrs['bt_pos_phi']:
+            #             n_neg_ip_pos_bt += 1
+            #         else:
+            #             n_neg_ip_neg_bt += 1
+            # assert n_shots == n_8x8_shots + n_non_8x8_shots
+            # assert n_shots == n_pos_ip_pos_bt + n_pos_ip_neg_bt + n_neg_ip_pos_bt + n_neg_ip_neg_bt
+            # h5root.attrs['n_shots'] = n_shots
+            # h5root.attrs['n_8x8_shots'] = n_8x8_shots
+            # h5root.attrs['n_non_8x8_shots'] = n_non_8x8_shots
+            # h5root.attrs['n_standard_8x8_shots'] = n_standard_8x8_shots
+            # h5root.attrs['n_pos_ip_pos_bt'] = n_pos_ip_pos_bt
+            # h5root.attrs['n_pos_ip_neg_bt'] = n_pos_ip_neg_bt
+            # h5root.attrs['n_neg_ip_pos_bt'] = n_neg_ip_pos_bt
+            # h5root.attrs['n_neg_ip_neg_bt'] = n_neg_ip_neg_bt
+            # group_8x8 = h5root['configurations']['8x8_configurations']
+            # group_non_8x8 = h5root['configurations']['non_8x8_configurations']
+            # for config_group in [group_8x8, group_non_8x8]:
+            #     n_shots = 0
+            #     for config in config_group.values():
+            #         n_shots += config.attrs['n_shots']
+            #     if 'non' in config_group.name:
+            #         assert n_shots == h5root.attrs['n_non_8x8_shots']
+            #     else:
+            #         assert n_shots == h5root.attrs['n_8x8_shots']
+            #     config_group.attrs['n_shots'] = n_shots
