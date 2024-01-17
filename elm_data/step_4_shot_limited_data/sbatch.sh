@@ -13,7 +13,7 @@ conda info -e
 module list
 echo $PYTHONPATH
 
-PYTHON_SCRIPT=./get_metadata.py
+PYTHON_SCRIPT=./get_limited_data.py
 echo -e "\n********** Begin $PYTHON_SCRIPT **********\n"
 cat ${PYTHON_SCRIPT}
 echo -e "\n********** End $PYTHON_SCRIPT **********\n"

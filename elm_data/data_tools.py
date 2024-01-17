@@ -28,13 +28,13 @@ def print_hdf5_contents(
         for key in obj.attrs:
             item = obj.attrs[key]
             if isinstance(item, np.ndarray):
-                print(more_indent + f'  Attribute {key}: shape {item.shape} dtype {item.dtype}')
+                print(more_indent + f'    Attribute {key}: shape {item.shape} dtype {item.dtype}')
             elif isinstance(item, str):
-                print(more_indent + f'  Attribute {key}: {item}')
+                print(more_indent + f'    Attribute {key}: {item}')
             elif isinstance(item, Iterable):
-                print(more_indent + f'  Attribute {key}: len {len(item)}')
+                print(more_indent + f'    Attribute {key}: len {len(item)}')
             else:
-                print(more_indent + f'  Attribute {key}: value {item} type {type(item)}')
+                print(more_indent + f'    Attribute {key}: value {item} type {type(item)}')
 
     def _recursively_print_content(group: h5py.Group):
         n_subgroups = 0
@@ -47,7 +47,7 @@ def print_hdf5_contents(
                 n_datasets += 1
             else:
                 raise ValueError
-        print(f'Group {group.name}: {n_datasets} datasets, {n_subgroups} subgroups, and {len(group.attrs)} attributes')
+        print(f'  Group {group.name}: {n_datasets} datasets, {n_subgroups} subgroups, and {len(group.attrs)} attributes')
         if print_attributes: _print_attributes(group)
         n_groups = 0
         for key in group:
@@ -57,16 +57,20 @@ def print_hdf5_contents(
                 if (max_groups and n_groups <= max_groups) or not max_groups:
                     _recursively_print_content(item)
             elif isinstance(item, h5py.Dataset):
-                if print_datasets: print(f'  Dataset {key}:', item.shape, item.dtype, item.nbytes)
+                if print_datasets: print(f'    Dataset {key}:', item.shape, item.dtype, item.nbytes)
                 if print_attributes: _print_attributes(item)
             else:
                 raise ValueError
 
     hdf5_file = Path(hdf5_file)
+    print(f'Contents of {hdf5_file}')
     if not hdf5_file.exists():
         print(f'Data file does not exist: {hdf5_file}')
         return
-    print(f'Contents of {hdf5_file}')
+    file_stat = os.stat(hdf5_file)
+    size_MB = file_stat.st_size/1024/1024
+    timestamp = datetime.fromtimestamp(file_stat.st_mtime).isoformat(' ', 'seconds')
+    print(f'File size and last modification: {size_MB:,.1f} MB  {timestamp}')
     with h5py.File(hdf5_file, 'r') as root:
         _recursively_print_content(root)
 
@@ -657,9 +661,9 @@ class HDF5_Data:
         with h5py.File(self.hdf5_file, 'r') as root:
             input_violation_counts = {key: 0 for key in inputs}
             for shot_key in root['shots']:
+                shot_group = root['shots'][shot_key]
                 if only_standard_8x8 and not shot_group.attrs['is_standard_8x8']:
                     continue
-                shot_group = root['shots'][shot_key]
                 candidate_shots += 1
                 in_range = True
                 for input_key, input_value in inputs.items():
@@ -677,7 +681,7 @@ class HDF5_Data:
             filename = f"{filename_prefix}_shotlist.csv"
             print(f"Creating CSV shotlist: {filename}")
             with open(filename, 'w') as csvfile:
-                fields = ['shot', 'start_time', 'stop_time']
+                fields = ['shot', 'bes_start_time', 'bes_stop_time']
                 writer = csv.DictWriter(csvfile, fieldnames=fields)
                 writer.writeheader()
                 with h5py.File(self.hdf5_file, 'r') as root:
