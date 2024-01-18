@@ -631,7 +631,73 @@ class HDF5_Data:
                     shot_group.attrs[attr_name] = attr
         return shot
 
-    def append_elm_event_data(self): pass
+    def add_bes_elm_event_data(
+            self,
+            use_concurrent: bool = False,
+    ):
+        with h5py.File(self.hdf5_file, 'a') as root:
+            elms_group = root['elms']
+            shots_group = root['shots']
+            shots = {int(key) for key in shots_group}
+            print(f"Labeled ELMs: {len(elms_group)}")
+            print(f"Number of shots: {len(shots)}")
+            for elm_key in elms_group:
+                assert elms_group[elm_key].attrs['shot'] in shots
+            print('Confirmed: shots for all ELMs are present')
+            for shot in shots:
+                valid = False
+                for elm_key in elms_group:
+                    if elms_group[elm_key].attrs['shot'] == shot:
+                        valid = True
+                        break
+                assert valid, f'No ELM from shot {shot}'
+            print('Confirmed: each shot has at least one ELM')
+            mdsplus_connection = make_mdsplus_connection()
+            if use_concurrent:
+                if not max_workers:
+                    max_workers = len(os.sched_getaffinity(0))
+                lock = threading.Lock()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    for shot in shots:
+                        pass
+                        futures.append(
+                            executor.submit(
+                                self._load_bes_data,
+                                shot
+                            )
+                        )
+                    while True:
+                        break
+                        running = 0
+                        done = 0
+                        valid_shot_count = 0
+                        for future in futures:
+                            running += int(future.running())
+                            done += int(future.done())
+                            if future.done():
+                                if (future.result() is not None) and (future.exception() is None):
+                                    valid_shot_count += 1
+                        with open('futures_status.txt', 'w') as txt_file:
+                            txt_file.write(f"{datetime.now()}\n")
+                            txt_file.write(f"Total futures: {len(futures)}\n")
+                            txt_file.write(f"Running: {running}\n")
+                            txt_file.write(f"Done: {done}\n")
+                            txt_file.write(f"Valid shots: {valid_shot_count}\n")
+                        if running == 0:
+                            break
+                        time.sleep(60)
+            else:
+                for shot in shots:
+                    self._load_bes_data(
+                        shot=shot,
+                    )
+
+    def _load_bes_data(
+            self,
+            shot: int,
+    ):
+        pass
 
     def filter_shots(
             self,

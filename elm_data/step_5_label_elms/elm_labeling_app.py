@@ -256,11 +256,12 @@ class BES_ELM_Labeling_App:
             if not self.elm_cycle_intervals:
                 return
             assert shot_str not in labels_file['shots']
-            shot_group = labels_file['shots'].create_group(name=shot_str)
-            for key, value in shot_data_group.attrs.items():
-                shot_group.attrs[key] = value
-            for key, value in shot_data_group.items():
-                shot_group.create_dataset(name=key, data=value)
+            shot_data_group.copy(
+                source=shot_data_group,
+                dest=labels_file['shots']
+            )
+            assert shot_str in labels_file['shots']
+            shot_group = labels_file['shots'][shot_str]
             assert 'shot_intervals' not in shot_group
             shot_intervals = []
             elms = [int(elm_str) for elm_str in labels_file['elms']]
