@@ -17,7 +17,8 @@ import h5py
 
 
 def print_hdf5_contents(
-        hdf5_file: Path|str,
+        hdf5_file: Path|str = None,
+        hdf5_group: h5py.Group = None,
         print_attributes: bool = True,
         print_datasets: bool = True,
         max_groups: int = None,
@@ -57,22 +58,24 @@ def print_hdf5_contents(
                 if (max_groups and n_groups <= max_groups) or not max_groups:
                     _recursively_print_content(item)
             elif isinstance(item, h5py.Dataset):
-                if print_datasets: print(f'    Dataset {key}:', item.shape, item.dtype, item.nbytes)
+                if print_datasets: print(f'    Dataset {key}: {item.shape} {item.dtype} {item.nbytes/1024/1024:,.2f} MB')
                 if print_attributes: _print_attributes(item)
             else:
                 raise ValueError
 
-    hdf5_file = Path(hdf5_file)
-    print(f'Contents of {hdf5_file}')
-    if not hdf5_file.exists():
-        print(f'Data file does not exist: {hdf5_file}')
-        return
-    file_stat = os.stat(hdf5_file)
-    size_MB = file_stat.st_size/1024/1024
-    timestamp = datetime.fromtimestamp(file_stat.st_mtime).isoformat(' ', 'seconds')
-    print(f'File size and last modification: {size_MB:,.1f} MB  {timestamp}')
-    with h5py.File(hdf5_file, 'r') as root:
-        _recursively_print_content(root)
+    if hdf5_file:
+        hdf5_file = Path(hdf5_file)
+        print(f'Contents of {hdf5_file}')
+        assert hdf5_file.exists(), f'HDF5 file does not exist: {hdf5_file}'
+        file_stat = os.stat(hdf5_file)
+        size_MB = file_stat.st_size/1024/1024
+        timestamp = datetime.fromtimestamp(file_stat.st_mtime).isoformat(' ', 'seconds')
+        print(f'File size and last modification: {size_MB:,.1f} MB  {timestamp}')
+        with h5py.File(hdf5_file, 'r') as root:
+            _recursively_print_content(root)
+    if hdf5_group:
+        print(f'Contents of {hdf5_group.name} from file {hdf5_group.file}')
+        _recursively_print_content(hdf5_group)
 
 
 def make_mdsplus_connection() -> MDSplus.Connection:
@@ -232,10 +235,10 @@ class Shot_Data:
                 self.date = str(date.date)
                 self.mdsplus_connection.closeTree('nb', self.shot)
         # check for minimum PINJ_15L power
-        if self.min_pinj_15l:
+        if self.min_pinj_15l and hasattr(self, 'pinj_15l_max'):
             assert self.pinj_15l_max > self.min_pinj_15l, f'Shot {self.shot} has low PINJ_15l'
         # check for minimum sustained PINJ_15L
-        if self.min_sustained_15l:
+        if self.min_sustained_15l and hasattr(self, 'pinj_15l'):
             mask = self.pinj_15l >= 500e3
             change = np.diff(np.array(mask, dtype=int))
             i_on = np.flatnonzero(change == 1)
@@ -528,8 +531,9 @@ class HDF5_Data:
                         mdsplus_connection=mdsplus_connection,
                     )
 
+    @staticmethod
     def _load_shot_data(
-        self,
+        # self,
         shot: int,
         h5root: h5py.File,
         bes_channels: Iterable = None,
@@ -634,41 +638,57 @@ class HDF5_Data:
     def add_bes_elm_event_data(
             self,
             use_concurrent: bool = False,
+            max_workers: int = None,
+            max_shots: int = None,
+            bes_channels: Iterable[int]|str = 'all',
     ):
         with h5py.File(self.hdf5_file, 'a') as root:
-            elms_group = root['elms']
             shots_group = root['shots']
             shots = {int(key) for key in shots_group}
-            print(f"Labeled ELMs: {len(elms_group)}")
             print(f"Number of shots: {len(shots)}")
+            elms_group = root['elms']
+            print(f"Labeled ELMs: {len(elms_group)}")
+            total_pre_elm_time = 0
             for elm_key in elms_group:
-                assert elms_group[elm_key].attrs['shot'] in shots
+                elm_group = elms_group[elm_key]
+                total_pre_elm_time += elm_group.attrs['t_stop'] - elm_group.attrs['t_start']
+            print(f'Total pre-ELM time: {total_pre_elm_time:.1f} ms')
+            shot_to_elm_mapping = {}
+            for elm_key in elms_group:
+                shot = elms_group[elm_key].attrs['shot']
+                assert shot in shots, f"ELM for shot {shot} is not present in shots data"
+                if shot not in shot_to_elm_mapping:
+                    shot_to_elm_mapping[shot] = []
+                shot_to_elm_mapping[shot].append(elm_key)
             print('Confirmed: shots for all ELMs are present')
             for shot in shots:
-                valid = False
-                for elm_key in elms_group:
-                    if elms_group[elm_key].attrs['shot'] == shot:
-                        valid = True
-                        break
-                assert valid, f'No ELM from shot {shot}'
+                assert shot in shot_to_elm_mapping, f'Shot data for {shot} does not correspond to any ELMs'
             print('Confirmed: each shot has at least one ELM')
             mdsplus_connection = make_mdsplus_connection()
             if use_concurrent:
                 if not max_workers:
-                    max_workers = len(os.sched_getaffinity(0))
+                    max_workers = 4  # len(os.sched_getaffinity(0))
                 lock = threading.Lock()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = []
-                    for shot in shots:
-                        pass
+                    i_shot = 0
+                    for shot in shot_to_elm_mapping:
+                        elm_keys = shot_to_elm_mapping[shot]
                         futures.append(
                             executor.submit(
                                 self._load_bes_data,
-                                shot
+                                root=root,
+                                shot=shot,
+                                elm_keys=elm_keys,
+                                mdsplus_connection=mdsplus_connection,
+                                lock=lock,
+                                bes_channels=bes_channels,
                             )
                         )
+                        i_shot += 1
+                        if max_shots and i_shot>=max_shots:
+                            break
                     while True:
-                        break
                         running = 0
                         done = 0
                         valid_shot_count = 0
@@ -688,16 +708,74 @@ class HDF5_Data:
                             break
                         time.sleep(60)
             else:
-                for shot in shots:
+                i_shot = 0
+                for shot in shot_to_elm_mapping:
+                    elm_keys = shot_to_elm_mapping[shot]
                     self._load_bes_data(
+                        root=root,
                         shot=shot,
+                        elm_keys=elm_keys,
+                        mdsplus_connection=mdsplus_connection,
+                        bes_channels=bes_channels,
                     )
+                    i_shot += 1
+                    if max_shots and i_shot>=max_shots:
+                        break
+            if max_shots is None:
+                for elm_key in root['elms']:
+                    assert 'bes_time' in root['elms'][elm_key]
+                    assert 'bes_signals' in root['elms'][elm_key]
 
+    @staticmethod
     def _load_bes_data(
-            self,
+            root: h5py.File,
             shot: int,
+            elm_keys: Iterable = None,
+            bes_channels: Iterable[int]|str = 'all',
+            mdsplus_connection = None,
+            lock: threading.Lock = None,
     ):
-        pass
+        try:
+            bes_data = Shot_Data(
+                shot=shot,
+                bes_channels=bes_channels,
+                with_limited_signals=False,
+                skip_metadata=True,
+                mdsplus_connection=mdsplus_connection,
+                quiet=False,
+            )
+        except Exception as e:
+            print(f"Shot {shot} failed: {e}")
+            return
+        if lock is None:
+            lock = contextlib.nullcontext()
+        with lock:
+            print(f"Shot {shot} with {len(elm_keys)} ELMs")
+            # bes_data.print_contents()
+            assert str(shot) in root['shots']
+            shot_group = root['shots'][str(shot)]
+            for elm_key in elm_keys:
+                assert elm_key in root['elms']
+                elm_group = root['elms'][elm_key]
+                assert elm_group.attrs['shot'] == shot
+                t_start = elm_group.attrs['t_start']
+                t_stop = elm_group.attrs['t_stop']
+                assert t_start < t_stop
+                assert t_start >= shot_group.attrs['bes_start_time']
+                assert t_stop <= shot_group.attrs['bes_stop_time']
+                t_mask = np.logical_and(
+                    bes_data.bes_time >= t_start - 5,  # extend time mask beyond t_start-t_stop
+                    bes_data.bes_time <= t_stop + 5,
+                )
+                for tag in ['bes_time', 'bes_signals']:
+                    if tag in elm_group:
+                        del elm_group[tag]
+                        root.flush()
+                elm_group.create_dataset('bes_time', data=bes_data.bes_time[t_mask])
+                elm_group.create_dataset('bes_signals', data=bes_data.bes_signals[..., t_mask])
+                print_hdf5_contents(hdf5_group=elm_group)
+        return shot
+            
 
     def filter_shots(
             self,
