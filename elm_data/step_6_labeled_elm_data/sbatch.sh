@@ -4,13 +4,13 @@
 start_time=`date`
 echo Start time: $start_time
 
-. /home/smithdr/sysenv/omega/bashrc.sh
-
 # prepare module environment
 export PYTHONPATH=${SLURM_SUBMIT_DIR}:${PYTHONPATH}
 
+. "/home/smithdr/.miniconda3/etc/profile.d/conda.sh"
 conda activate py311
 conda info -e
+pyinfo
 module list
 echo $PYTHONPATH
 

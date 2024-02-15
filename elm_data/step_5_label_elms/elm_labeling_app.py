@@ -24,7 +24,7 @@ class BES_ELM_Labeling_App:
 
         # prepare MPL figure
         with plt.ioff():
-            self.fig, self.axes = plt.subplots(nrows=5, ncols=1, sharex=True, figsize=(8.5,6.5))
+            self.fig, self.axes = plt.subplots(nrows=5, ncols=1, sharex=True, figsize=(12,7.3))
         self.axes[-1].set_xlabel('Time (ms)')
         self.axes[-1].set_ylabel('Frequency (kHz)')
         self.fig.suptitle('Shot')
@@ -193,13 +193,13 @@ class BES_ELM_Labeling_App:
     def pan_right_callback(self, *_):
         xlim = self.axes[-1].get_xlim()
         x_middle, x_range = np.mean(xlim), xlim[1]-xlim[0]
-        x_middle += x_range/2
+        x_middle += x_range*2/3
         self.axes[-1].set_xlim(np.array([-1,1])*x_range/2 + x_middle)
 
     def pan_left_callback(self, *_):
         xlim = self.axes[-1].get_xlim()
         x_middle, x_range = np.mean(xlim), xlim[1]-xlim[0]
-        x_middle -= x_range/2
+        x_middle -= x_range*2/3
         self.axes[-1].set_xlim(np.array([-1,1])*x_range/2 + x_middle)
 
     def autoy_callback(self, b):
