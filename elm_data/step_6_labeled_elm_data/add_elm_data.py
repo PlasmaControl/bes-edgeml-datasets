@@ -7,8 +7,9 @@ from elm_data.data_tools import HDF5_Data, print_hdf5_contents
 full_data_file = Path('./elm_data_v1.hdf5').absolute()
 
 if full_data_file.exists():
-    new_file = f'./elm_data_v1.{time.strftime("%Y%m%d-%H%M%S")}.hdf5'
-    shutil.move(src=full_data_file, dst=Path(new_file).absolute())
+    datetime_str = time.strftime("%Y%m%d-%H%M%S")
+    new_file = Path(f'./elm_data_v1.{datetime_str}.hdf5').absolute()
+    shutil.move(src=full_data_file, dst=new_file)
 
 assert not full_data_file.exists()
 

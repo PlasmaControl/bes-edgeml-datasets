@@ -129,32 +129,44 @@ class Shot_Data:
 
     def get_bes_data(self):
         t1 = time.time()
-        # get BES time array
-        self.bes_time = np.array(
-            self.mdsplus_connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'),
-            dtype=np.float32,
-        )
-        assert self.bes_time.size > 0, f'Shot {self.shot} has bad BES time data'
-        # get BES signals
-        if self.bes_channels.size > 0:
-            assert np.all(self.bes_channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
-            self.bes_signals = np.empty([self.bes_channels.size, self.bes_time.size], dtype=np.float32)
-            tdi_vars = []
-            tdi_assignments = []
-            for channel in self.bes_channels:
-                var = f'_n{channel:02d}_{self.shot}'
-                tdi_vars.append(var)
-                tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
-                tdi_assignments.append(tmp)
-            self.mdsplus_connection.get(', '.join(tdi_assignments))
-            for i, tdi_var in enumerate(tdi_vars):
-                self.bes_signals[i, :] = np.array(self.mdsplus_connection.get(tdi_var), dtype=np.float32)
-            if self.max_bes_sample_rate:
-                sample_rate = 1 / np.mean(np.diff(self.bes_time[:1000]/1e3))  # Hz
-                downsample_factor = int(np.rint(sample_rate / self.max_bes_sample_rate))
-                if downsample_factor >= 2:
-                    self.bes_signals = self.bes_signals[:, ::downsample_factor]
-                    self.bes_time = self.bes_time[::downsample_factor]
+        valid_signals = False
+        attempt_count = 0
+        while not valid_signals and attempt_count < 10:
+            attempt_count += 1
+            try:
+                self.bes_time = np.array(
+                    self.mdsplus_connection.get(f'dim_of(ptdata("besfu01", {self.shot}))'),
+                    dtype=np.float32,
+                )
+                assert self.bes_time.size > 0, f'Shot {self.shot} has bad BES time data'
+                # get BES signals
+                if self.bes_channels.size <= 0:
+                    return
+                assert np.all(self.bes_channels > 0), f'Shot {self.shot}: BES does not have channel `0`'
+                self.bes_signals = np.empty([self.bes_channels.size, self.bes_time.size], dtype=np.float32)
+                tdi_vars = []
+                tdi_assignments = []
+                for channel in self.bes_channels:
+                    var = f'_n{channel:02d}_{self.shot}'
+                    tdi_vars.append(var)
+                    tmp = f'{var} = ptdata("besfu{channel:02d}", {self.shot})'
+                    tdi_assignments.append(tmp)
+                self.mdsplus_connection.get(', '.join(tdi_assignments))
+                for i, tdi_var in enumerate(tdi_vars):
+                    self.bes_signals[i, :] = np.array(self.mdsplus_connection.get(tdi_var), dtype=np.float32)
+                valid_signals = True
+            except Exception as e:
+                print(f"Shot {self.shot}: attempt {attempt_count} error {e}")
+                time.sleep(15)
+        if not valid_signals:
+            print(f"Shot {self.shot}: error")
+            assert False
+        if self.max_bes_sample_rate:
+            sample_rate = 1 / np.mean(np.diff(self.bes_time[:1000]/1e3))  # Hz
+            downsample_factor = int(np.rint(sample_rate / self.max_bes_sample_rate))
+            if downsample_factor >= 2:
+                self.bes_signals = self.bes_signals[:, ::downsample_factor]
+                self.bes_time = self.bes_time[::downsample_factor]
         if not self.quiet: print(f'{self.shot}: BES data time = {time.time() - t1:.2f} s')
 
     def get_metadata(self):
@@ -473,26 +485,27 @@ class HDF5_Data:
                 lock = threading.Lock()
                 with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
                     futures = []
-                    for shot in shotlist:
-                        futures.append(
-                            executor.submit(
-                                self._load_shot_data,
-                                shot=shot,
-                                h5root=h5root,
-                                bes_channels=bes_channels,
-                                max_bes_sample_rate=max_bes_sample_rate,
-                                with_limited_signals=with_limited_signals,
-                                skip_metadata=skip_metadata,
-                                only_8x8=only_8x8,
-                                only_standard_8x8=only_standard_8x8,
-                                only_neg_bt=only_neg_bt,
-                                only_pos_ip=only_pos_ip,
-                                min_pinj_15l=min_pinj_15l,
-                                min_sustained_15l=min_sustained_15l,
-                                mdsplus_connection=mdsplus_connection,
-                                lock=lock,
-                            )
+                    for i_shot, shot in enumerate(shotlist):
+                        if i_shot <= 8:
+                            time.sleep(20)
+                        future = executor.submit(
+                            self._load_shot_data,
+                            shot=shot,
+                            h5root=h5root,
+                            bes_channels=bes_channels,
+                            max_bes_sample_rate=max_bes_sample_rate,
+                            with_limited_signals=with_limited_signals,
+                            skip_metadata=skip_metadata,
+                            only_8x8=only_8x8,
+                            only_standard_8x8=only_standard_8x8,
+                            only_neg_bt=only_neg_bt,
+                            only_pos_ip=only_pos_ip,
+                            min_pinj_15l=min_pinj_15l,
+                            min_sustained_15l=min_sustained_15l,
+                            mdsplus_connection=mdsplus_connection,
+                            lock=lock,
                         )
+                        futures.append(future)
                     while True:
                         running = 0
                         done = 0
@@ -566,7 +579,7 @@ class HDF5_Data:
                 # quiet=True,
             )
         except Exception as e:
-            print(f"Shot {shot} failed: {e}")
+            print(f"Shot {shot} failed: {e}, {e.__class__.__name__}")
             return
         assert 'configurations' in h5root
         assert '8x8_configurations' in h5root['configurations']
@@ -723,8 +736,11 @@ class HDF5_Data:
                         break
             if max_shots is None:
                 for elm_key in root['elms']:
-                    assert 'bes_time' in root['elms'][elm_key]
-                    assert 'bes_signals' in root['elms'][elm_key]
+                    try:
+                        assert 'bes_time' in root['elms'][elm_key]
+                        assert 'bes_signals' in root['elms'][elm_key]
+                    except AssertionError:
+                        print(f"Bad ELM data: {elm_key}, continuing")
 
     @staticmethod
     def _load_bes_data(
@@ -735,6 +751,8 @@ class HDF5_Data:
             mdsplus_connection = None,
             lock: threading.Lock = None,
     ):
+        if lock is None:
+            lock = contextlib.nullcontext()
         try:
             bes_data = Shot_Data(
                 shot=shot,
@@ -746,12 +764,14 @@ class HDF5_Data:
             )
         except Exception as e:
             print(f"Shot {shot} failed: {e}")
+            with lock:
+                print(f"Shot {shot}: deleting h5 objects")
+                del root['shots'][str(shot)]
+                for elm_key in elm_keys:
+                    del root['elms'][elm_key]
             return
-        if lock is None:
-            lock = contextlib.nullcontext()
         with lock:
             print(f"Shot {shot} with {len(elm_keys)} ELMs")
-            # bes_data.print_contents()
             assert str(shot) in root['shots']
             shot_group = root['shots'][str(shot)]
             for elm_key in elm_keys:

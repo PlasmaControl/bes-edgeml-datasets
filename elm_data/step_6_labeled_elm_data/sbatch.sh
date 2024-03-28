@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -t 0-8 -N1 -n16 --mem=100G
+#SBATCH -t 0-12 -N1 -n16 --mem=100G
 
 start_time=`date`
 echo Start time: $start_time
@@ -7,10 +7,10 @@ echo Start time: $start_time
 # prepare module environment
 export PYTHONPATH=${SLURM_SUBMIT_DIR}:${PYTHONPATH}
 
-. "/home/smithdr/.miniconda3/etc/profile.d/conda.sh"
-conda activate py311
+# . "/home/smithdr/.miniconda3/etc/profile.d/conda.sh"
+# conda activate py311
 conda info -e
-pyinfo
+# pyinfo
 module list
 echo $PYTHONPATH
 
