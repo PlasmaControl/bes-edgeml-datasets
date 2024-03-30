@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -t 0-6 -N1 -n6 --mem=60G
+#SBATCH -t 0-12 -N1 -n8 --mem=60G
 
 start_time=`date`
 echo Start time: $start_time
@@ -16,9 +16,16 @@ echo $PYTHONPATH
 
 PYTHON_SCRIPT=$(
 cat <<'END_HEREDOC'
-from plot_data import plot_elms
+
+from elm_data_stats import ELM_Data_Stats
+
 file = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5'
-plot_elms(file)
+h5 = ELM_Data_Stats(file)
+h5.plot_elms(
+    max_elms=None,
+    save=True,
+)
+
 END_HEREDOC
 )
 

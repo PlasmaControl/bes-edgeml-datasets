@@ -648,6 +648,36 @@ class HDF5_Data:
                     shot_group.attrs[attr_name] = attr
         return shot
 
+    def delete_elm_events(
+            self,
+            elm_list: Iterable = (),
+            shot_list: Iterable = (),
+    ):
+        with h5py.File(self.hdf5_file, 'a') as root:
+            for elm in elm_list:
+                elm_key = f"{int(elm):06d}"
+                if elm_key in root['elms']:
+                    print(f"Deleting ELM event {elm_key}")
+                else:
+                    print(f"ELM {elm_key} not found")
+                    continue
+                del root['elms'][elm_key]
+            if shot_list:
+                n_deleted_elms = 0
+                for elm_key in root['elms']:
+                    if root['elms'][elm_key].attrs['shot'] in shot_list:
+                        print(f"Deleting ELM {elm_key} with shot {root['elms'][elm_key].attrs['shot']}")
+                        del root['elms'][elm_key]
+                        n_deleted_elms += 1
+                print(f"Deleted ELMs from bad shots: {n_deleted_elms}")
+            for shot in shot_list:
+                if str(shot) in root['shots']:
+                    print(f"Deleting shot {shot}")
+                    del root['shots'][str(shot)]
+                else:
+                    print(f"Shot {shot} not found")
+                
+
     def add_bes_elm_event_data(
             self,
             use_concurrent: bool = False,
