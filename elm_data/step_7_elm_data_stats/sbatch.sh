@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -t 0-12 -N1 -n8 --mem=60G
+#SBATCH -t 1-0 -N1 -n8 --mem=60G
 
 start_time=`date`
 echo Start time: $start_time
@@ -21,10 +21,9 @@ from elm_data_stats import ELM_Data_Stats
 
 file = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5'
 h5 = ELM_Data_Stats(file)
-h5.plot_elms(
-    max_elms=None,
-    save=True,
-)
+h5.plot_elms(save=True)
+h5.plot_shot_elm_stats(save=True)
+h5.plot_channel_stats(save=True)
 
 END_HEREDOC
 )

@@ -652,7 +652,10 @@ class HDF5_Data:
             self,
             elm_list: Iterable = (),
             shot_list: Iterable = (),
+            dry_run: bool = True,
     ):
+        if dry_run:
+            print("Dry run; no data will be deleted")
         with h5py.File(self.hdf5_file, 'a') as root:
             for elm in elm_list:
                 elm_key = f"{int(elm):06d}"
@@ -661,19 +664,22 @@ class HDF5_Data:
                 else:
                     print(f"ELM {elm_key} not found")
                     continue
-                del root['elms'][elm_key]
+                if not dry_run:
+                    del root['elms'][elm_key]
             if shot_list:
                 n_deleted_elms = 0
                 for elm_key in root['elms']:
                     if root['elms'][elm_key].attrs['shot'] in shot_list:
                         print(f"Deleting ELM {elm_key} with shot {root['elms'][elm_key].attrs['shot']}")
-                        del root['elms'][elm_key]
+                        if not dry_run:
+                            del root['elms'][elm_key]
                         n_deleted_elms += 1
                 print(f"Deleted ELMs from bad shots: {n_deleted_elms}")
             for shot in shot_list:
                 if str(shot) in root['shots']:
                     print(f"Deleting shot {shot}")
-                    del root['shots'][str(shot)]
+                    if not dry_run:
+                        del root['shots'][str(shot)]
                 else:
                     print(f"Shot {shot} not found")
                 
