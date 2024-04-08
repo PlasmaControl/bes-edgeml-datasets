@@ -353,11 +353,16 @@ class HDF5_Data:
 
     def __post_init__(self) -> None:
         self.hdf5_file = Path(self.hdf5_file).absolute()
-        self.truncate_hdf5 = self.truncate_hdf5 and self.really_truncate_hdf5
         print(f'HDF5 data file: {self.hdf5_file}')
-        print('Truncating data file' if self.truncate_hdf5 else 'Appending data file')
         assert self.hdf5_file.parent.exists()
-        with h5py.File(self.hdf5_file, 'w' if self.truncate_hdf5 else 'a') as root:
+        self.truncate_hdf5 = self.truncate_hdf5 and self.really_truncate_hdf5
+        if self.truncate_hdf5:
+            print("Truncating file")
+            mode = 'w'
+        else:
+            print("Appending file")
+            mode = 'a'
+        with h5py.File(self.hdf5_file, mode) as root:
             root.require_group('shots')
             root.require_group('elms')
             root.require_group('configurations')
@@ -647,6 +652,44 @@ class HDF5_Data:
                 else:
                     shot_group.attrs[attr_name] = attr
         return shot
+    
+    def estimate_onset(
+            self,
+            dry_run: bool = True,
+    ):
+        if dry_run:
+            print("Dry run; no data will be deleted")
+        with h5py.File(self.hdf5_file, 'a') as root:
+            for elm_key in root['elms']:
+                # if not elm_key.endswith('50'):
+                #     continue
+                elm = root['elms'][elm_key]
+                t_stop = elm.attrs['t_stop']
+                if 't_stop_original' not in elm.attrs:
+                    elm.attrs['t_stop_original'] = t_stop
+                bes_time = np.array(elm['bes_time'])
+                bes_signals = np.array(elm['bes_signals'])
+                assert bes_signals.shape[0] == 64 and bes_signals.shape[1] == bes_time.shape[0]
+                onset_mask = np.abs(bes_time - t_stop) <= 3  # time mask near ELM onset
+                onset_time = bes_time[onset_mask][::10]
+                onset_signals = bes_signals[:, onset_mask][:,::10]
+                # determin ELM onset from last timestamp with signal<=0.2*channel-wise max
+                ch_i_max = np.argmax(onset_signals, axis=1)
+                i_max = int(np.median(ch_i_max))
+                ch_i_onset = np.zeros(ch_i_max.shape, dtype=int)
+                for i_ch in range(onset_signals.shape[0]):
+                    pre_onset = np.nonzero(onset_signals[i_ch, 0:i_max]<=0.2*onset_signals[i_ch,i_max])[0]
+                    if pre_onset.size:
+                        ch_i_onset[i_ch] = pre_onset[-1]
+                i_onset = int(np.median(ch_i_onset))
+                t_onset = onset_time[i_onset]
+                if not dry_run:
+                    elm.attrs['t_stop'] = t_onset
+                # if elm_key.endswith('50'):
+                #     print(elm_key, t_onset)
+                #     for k, v in elm.attrs.items():
+                #         print('  ', k, v)
+
 
     def delete_elm_events(
             self,
@@ -684,7 +727,124 @@ class HDF5_Data:
                     print(f"Shot {shot} not found")
                 
 
-    def add_bes_elm_event_data(
+    def update_bes_data_file(
+            self,
+            label_data_file: str|Path,
+            use_concurrent: bool = False,
+            max_workers: int = None,
+            bes_channels: Iterable[int]|str = 'all',
+            dry_run = True,
+    ):
+        label_data_file = Path(label_data_file).absolute()
+        assert label_data_file.exists()
+        with (
+            h5py.File(label_data_file, 'r') as lfile,
+            h5py.File(self.hdf5_file, 'a') as bfile,
+        ):
+            shots_in_bfile = set([int(shot) for shot in bfile['shots']])
+            shots_in_lfile = set([int(shot) for shot in lfile['shots']])
+            assert len(shots_in_bfile - shots_in_lfile) == 0, "BES data file contains shots missing from label data file"
+            update_shots = shots_in_lfile - shots_in_bfile
+            print(f"Shots missing from BES data file: {len(update_shots)}")
+            elms_in_bfile = set([elm_key for elm_key in bfile['elms']])
+            elms_in_lfile = set([elm_key for elm_key in lfile['elms']])
+            assert len(elms_in_bfile - elms_in_lfile) == 0, "BES data file contains ELMs missing from label data file"
+            elms_missing_in_bfile = elms_in_lfile - elms_in_bfile
+            print(f"Number of ELMs missing in BES data file: {len(elms_missing_in_bfile)}")
+            elms_in_bfile_missing_signals = set([elm_key for elm_key in bfile['elms'] if not 'bes_signals' in bfile['elms'][elm_key]])
+            print(f"Number of ELMs missing `bes_signals` in BES data file: {len(elms_in_bfile_missing_signals)}")
+            elms_for_update = elms_missing_in_bfile | elms_in_bfile_missing_signals
+            shots_for_missing_elms = set([int(lfile['elms'][elm_key].attrs['shot']) for elm_key in elms_for_update])
+            print(f"Missing shot data: {len(update_shots)}; Shots for missing ELMs: {len(shots_for_missing_elms)}")
+            shot_to_elm_mapping = {shot:[] for shot in shots_for_missing_elms}
+            for elm_key in elms_for_update:
+                shot = lfile['elms'][elm_key].attrs['shot']
+                shot_to_elm_mapping[shot].append(elm_key)
+            if not dry_run:
+                bfile.attrs.update(lfile.attrs)
+            for shot in shot_to_elm_mapping:
+                shot_key = str(shot)
+                print(f"Shot: {shot}")
+                if not dry_run and shot_key not in bfile['shots']:
+                    lfile_shot = lfile['shots'][shot_key]
+                    lfile_shot.copy(
+                        source=lfile_shot,
+                        dest=bfile['shots']
+                    )
+                elm_keys = shot_to_elm_mapping[shot]
+                print(f"  ELMs: {elm_keys}")
+                for elm_key in elm_keys:
+                    if not dry_run:
+                        if elm_key in bfile['elms']:
+                            del bfile['elms'][elm_key]
+                        lfile_elm = lfile['elms'][elm_key]
+                        lfile_elm.copy(
+                            source=lfile_elm,
+                            dest=bfile['elms'],
+                        )
+            mdsplus_connection = make_mdsplus_connection()
+            if use_concurrent and not dry_run:
+                if not max_workers:
+                    max_workers = 4  # len(os.sched_getaffinity(0))
+                lock = threading.Lock()
+                with concurrent.futures.ThreadPoolExecutor(max_workers=max_workers) as executor:
+                    futures = []
+                    i_shot = 0
+                    for shot in shot_to_elm_mapping:
+                        elm_keys = shot_to_elm_mapping[shot]
+                        futures.append(
+                            executor.submit(
+                                self._load_bes_data,
+                                root=bfile,
+                                shot=shot,
+                                elm_keys=elm_keys,
+                                mdsplus_connection=mdsplus_connection,
+                                lock=lock,
+                                bes_channels=bes_channels,
+                            )
+                        )
+                        i_shot += 1
+                    while True:
+                        running = 0
+                        done = 0
+                        valid_shot_count = 0
+                        for future in futures:
+                            running += int(future.running())
+                            done += int(future.done())
+                            if future.done():
+                                if (future.result() is not None) and (future.exception() is None):
+                                    valid_shot_count += 1
+                        with open('futures_status.txt', 'w') as txt_file:
+                            txt_file.write(f"{datetime.now()}\n")
+                            txt_file.write(f"Total futures: {len(futures)}\n")
+                            txt_file.write(f"Running: {running}\n")
+                            txt_file.write(f"Done: {done}\n")
+                            txt_file.write(f"Valid shots: {valid_shot_count}\n")
+                        if running == 0:
+                            break
+                        time.sleep(60)
+            else:
+                i_shot = 0
+                for shot in shot_to_elm_mapping:
+                    elm_keys = shot_to_elm_mapping[shot]
+                    self._load_bes_data(
+                        root=bfile,
+                        shot=shot,
+                        elm_keys=elm_keys,
+                        mdsplus_connection=mdsplus_connection,
+                        bes_channels=bes_channels,
+                    )
+                    i_shot += 1
+            for elm_key in elms_for_update:
+                try:
+                    assert elm_key in bfile['elms']
+                    if not dry_run:
+                        assert 'bes_signals' in bfile['elms'][elm_key]
+                        assert bfile['elms'][elm_key]['bes_signals'].shape[0] == 64
+                except AssertionError:
+                    print(f"Bad ELM data: {elm_key}, continuing")
+
+    def add_bes_data(
             self,
             use_concurrent: bool = False,
             max_workers: int = None,
@@ -991,6 +1151,132 @@ class HDF5_Data:
         )
     
 
+
+def update_labels_file(
+        # labels file has labels from labeling app
+        labels_file: Path|str = '/home/smithdr/ml/elm_data/step_5_label_elms/elm_label_data_v3.hdf5',
+        # full data file has all BES data with bad ELMs/shots removed
+        full_data_file: Path|str = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5',
+        dry_run: bool = True,
+):
+    with (
+        h5py.File(labels_file, 'a') as lfile,
+        h5py.File(full_data_file, 'r') as dfile,
+    ):
+        # determine shots to remove from label file
+        # label_shots = np.unique(np.array([int(shot_key) for shot_key in lfile['shots']], dtype=int))
+        # data_shots = np.unique(np.array([int(shot_key) for shot_key in dfile['shots']], dtype=int))
+        # should_be_empty = np.setdiff1d(data_shots, label_shots, assume_unique=True)
+        # assert should_be_empty.size == 0, "Warning: data shots not in label shots"
+        # shots_to_remove = np.setdiff1d(label_shots, data_shots, assume_unique=True)
+        # for shot in shots_to_remove:
+        #     shot_key = str(shot)
+        #     print(f"Shot to remove: {shot}")
+        #     assert shot_key in lfile['shots'] and shot_key not in dfile['shots']
+        #     if not dry_run:
+        #         del lfile['shots'][shot_key]
+        # determine ELMs to remove from label file
+        label_elms = np.unique(np.array([int(elm_key) for elm_key in lfile['elms']], dtype=int))
+        data_elms = np.unique(np.array([int(elm_key) for elm_key in dfile['elms']], dtype=int))
+        # exclude label ELMs that exceed max data ELM
+        max_data_elm = np.max(data_elms)
+        label_elms = label_elms[label_elms <= max_data_elm]
+        should_be_empty = np.setdiff1d(data_elms, label_elms, assume_unique=True)
+        assert should_be_empty.size == 0, "Warning: data ELMs not in label ELMs"
+        elms_to_remove = np.setdiff1d(label_elms, data_elms, assume_unique=True)
+        for elm in elms_to_remove:
+            elm_key = f"{elm:06d}"
+            print(f"ELM to remove: {elm_key}")
+            assert elm_key in lfile['elms'] and elm_key not in dfile['elms'] and elm <= max_data_elm
+            if not dry_run:
+                del lfile['elms'][elm_key]
+
+
+def check_data_files(
+        meta_file: str|Path = Path('/home/smithdr/ml/elm_data/step_4_shot_limited_data/limited_shot_data_v6.hdf5'),
+        label_file: str|Path = Path('/home/smithdr/ml/elm_data/step_5_label_elms/elm_label_data_v3.hdf5'),
+        bes_file: str|Path = Path('/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5'),
+        repair_label_data_shots: bool = False,
+):
+
+    def get_shots(file) -> np.ndarray:
+        with h5py.File(file) as f:
+            assert 'shots' in f
+            shots = np.array([int(shot_key) for shot_key in f['shots']], dtype=int)
+        return shots
+
+    def get_ELMs_and_ELM_shots(file) -> tuple[np.ndarray, np.ndarray]:
+        with h5py.File(file) as f:
+            assert 'elms' in f
+            elms = np.array([int(elm_key) for elm_key in f['elms']], dtype=int)
+            shots_from_elms = [int(f['elms'][elm_key].attrs['shot']) for elm_key in f['elms']]
+        shots_from_elms = np.unique(np.array(shots_from_elms, dtype=int))
+        return elms, shots_from_elms
+
+    mshots = get_shots(meta_file)
+    print(f"Shots in metadata file: {mshots.size}")
+    lshots = get_shots(label_file)
+    print(f"Shots in label file: {lshots.size}")
+    bshots = get_shots(bes_file)
+    print(f"Shots in BES file: {bshots.size}")
+
+    # validate all label and BES shots are in metadata
+    assert np.size(np.setdiff1d(lshots, mshots, assume_unique=True)) == 0
+    print('All label data shots are in metadata shots')
+    assert np.size(np.setdiff1d(bshots, mshots, assume_unique=True)) == 0
+    print('All BES data shots are in metadata shots')
+
+    # validate that all BES shots are in label shots
+    assert np.size(np.setdiff1d(bshots, lshots, assume_unique=True)) == 0
+    print('All BES data shots are in label shots')
+
+    missing_bes_data_shots = np.setdiff1d(lshots, bshots, assume_unique=True)
+    print(f"Shots in label data that are missing from BES data (need to update BES data):")
+    print(f"  {missing_bes_data_shots}")
+
+    l_elms, l_elm_shots = get_ELMs_and_ELM_shots(label_file)
+    print(f"Number of ELMs in label data file: {l_elms.size}")
+    if np.array_equal(lshots, l_elm_shots):
+        print('Label data shots == ELM shots')
+    else:
+        print('Label data shots != ELM shots')
+        print('  Labal data shots missing from ELM shots (safe to delete):')
+        print(f'  {np.setdiff1d(lshots, l_elm_shots, assume_unique=True)}')
+        print('  Labal data ELM shots missing from shots (need to repair from metadata):')
+        print(f'  {np.setdiff1d(l_elm_shots, lshots, assume_unique=True)}')
+
+    b_elms, b_elm_shots = get_ELMs_and_ELM_shots(bes_file)
+    print(f"Number of ELMs in BES data file: {b_elms.size}")
+    assert np.array_equal(bshots, b_elm_shots), f"BES data shots != ELM shots"
+
+    assert np.size(np.setdiff1d(b_elms, l_elms, assume_unique=True))==0, f"Some BES data ELMs are not in label data ELMs"
+
+    elms_without_full_data = np.setdiff1d(l_elms, b_elms, assume_unique=True)
+    print(f"Number of label data ELMs missing from BES data ELMs: {np.size(elms_without_full_data)}")
+
+    if repair_label_data_shots:
+        missing_label_data_shots = np.setdiff1d(l_elm_shots, lshots, assume_unique=True)
+        with (
+            h5py.File(meta_file, 'r') as mfile,
+            h5py.File(label_file, 'a') as lfile,
+        ):
+            for shot in missing_label_data_shots:
+                shot_key = str(shot)
+                assert shot_key in mfile['shots']
+                assert shot_key not in lfile['shots']
+                # copy shot data from metadata file to label data file
+                source_shot_group = mfile['shots'][shot_key]
+                source_shot_group.copy(
+                    source=source_shot_group,
+                    dest=lfile['shots'],
+                )
+                assert shot_key in lfile['shots']
+
+            for elm in lfile['elms']:
+                if 't_stop_original' not in lfile['elms'][elm].attrs:
+                    lfile['elms'][elm].attrs['t_stop_original'] = lfile['elms'][elm].attrs['t_stop']
+
+
 if __name__=='__main__':
     # bes_data = Shot_Data(
     #     bes_channels=range(1,3),
@@ -998,6 +1284,18 @@ if __name__=='__main__':
     # )
     # bes_data.print_contents()
 
-    dataset = HDF5_Data(truncate_hdf5=True, really_truncate_hdf5=True)
-    dataset.create_metadata_file(bes_channels=[23], with_limited_signals=True, max_bes_sample_rate=200e3)
-    dataset.print_hdf5_contents()
+    # dataset = HDF5_Data(truncate_hdf5=True, really_truncate_hdf5=True)
+    # dataset.create_metadata_file(bes_channels=[23], with_limited_signals=True, max_bes_sample_rate=200e3)
+    # dataset.print_hdf5_contents()
+
+    check_data_files(repair_label_data_shots=False)
+
+    # bes_data_file = Path('/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5')
+    # label_data_file = Path('/home/smithdr/ml/elm_data/step_5_label_elms/elm_label_data_v3.hdf5')
+    # df = HDF5_Data(hdf5_file=bes_data_file)
+    # df.update_bes_data_file(
+    #     label_data_file=label_data_file,
+    #     use_concurrent=False, 
+    #     bes_channels='all',
+    #     dry_run=False,
+    # )

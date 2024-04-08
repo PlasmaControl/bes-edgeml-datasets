@@ -10,6 +10,7 @@ import scipy.signal, scipy.fft
 import h5py
 import ipywidgets as widgets
 
+
 @dataclasses.dataclass(eq=False)
 class BES_ELM_Labeling_App:
     data_hdf5_file: str|Path
@@ -279,6 +280,7 @@ class BES_ELM_Labeling_App:
                 elm_group.attrs['shot'] = self.shot
                 elm_group.attrs['t_start'] = t_start
                 elm_group.attrs['t_stop'] = t_stop
+                elm_group.attrs['t_stop_original'] = t_stop
                 shot_intervals.append([t_start, t_stop])
                 next_i_elm += 1
             shot_group.attrs['shot_intervals'] = np.array(shot_intervals)
@@ -472,3 +474,4 @@ class BES_ELM_Labeling_App:
         self.t_start = None
         self.t_stop = None
         self.status()
+

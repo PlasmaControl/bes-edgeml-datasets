@@ -1,5 +1,5 @@
 #!/usr/bin/env bash
-#SBATCH -t 1-0 -N1 -n8 --mem=60G
+#SBATCH -t 1-0 -N1 -n8 --mem=80G
 
 start_time=`date`
 echo Start time: $start_time

@@ -48,6 +48,7 @@ class ELM_Data_Stats:
             shuffle: bool = False,
             save: bool = False,
             only_onset_discrepency: bool = False,
+            estimate_onset: bool = True,
     ):
         fig1, axes1 = plt.subplots(nrows=4, ncols=4, figsize=(10.5, 8))
         fig2, axes2 = plt.subplots(nrows=4, ncols=4, figsize=(10.5, 8))
@@ -71,18 +72,19 @@ class ELM_Data_Stats:
                 onset_mask = np.abs(bes_time - t_stop) <= 3  # time mask near ELM onset
                 onset_time = bes_time[onset_mask][::10]
                 onset_signals = bes_signals[:, onset_mask][:,::10]
-                # determin ELM onset from last timestamp with signal<=0.2*channel-wise max
-                ch_i_max = np.argmax(onset_signals, axis=1)
-                i_max = int(np.median(ch_i_max))
-                ch_i_onset = np.zeros(ch_i_max.shape, dtype=int)
-                for i_ch in range(onset_signals.shape[0]):
-                    pre_onset = np.nonzero(onset_signals[i_ch, 0:i_max]<=0.2*onset_signals[i_ch,i_max])[0]
-                    if pre_onset.size:
-                        ch_i_onset[i_ch] = pre_onset[-1]
-                i_onset = int(np.median(ch_i_onset))
-                t_onset = onset_time[i_onset]
-                if only_onset_discrepency and t_stop>=t_onset-0.6 and t_stop<=t_onset+0.3:
-                    continue  # skip if onsets are consistent
+                if estimate_onset:
+                    # determin ELM onset from last timestamp with signal<=0.2*channel-wise max
+                    ch_i_max = np.argmax(onset_signals, axis=1)
+                    i_max = int(np.median(ch_i_max))
+                    ch_i_onset = np.zeros(ch_i_max.shape, dtype=int)
+                    for i_ch in range(onset_signals.shape[0]):
+                        pre_onset = np.nonzero(onset_signals[i_ch, 0:i_max]<=0.2*onset_signals[i_ch,i_max])[0]
+                        if pre_onset.size:
+                            ch_i_onset[i_ch] = pre_onset[-1]
+                    i_onset = int(np.median(ch_i_onset))
+                    t_onset = onset_time[i_onset]
+                    if only_onset_discrepency and t_stop>=t_onset-0.6 and t_stop<=t_onset+0.3:
+                        continue  # skip if onsets are consistent
                 for f in [fig1, fig2]:
                     f.suptitle(f"ELM {elm_key} Shot {shot} Time {t_start:.1f}-{t_stop:.1f} ms")
                 for ax in list(axes1.flat) + list(axes2.flat):
@@ -102,7 +104,7 @@ class ELM_Data_Stats:
                     # plot near ELM onset
                     plt.sca(axes2[chan_d16, chan_mod8_d2])
                     plt.plot(
-                        onset_time-t_onset, 
+                        onset_time-t_stop, 
                         onset_signals[i_ch, :], 
                         label=f'Ch {i_ch+1}',
                         lw=0.75
@@ -111,14 +113,15 @@ class ELM_Data_Stats:
                     # plot full pre-ELM
                     plt.sca(axis1)
                     plt.ylim(-10,10)
-                    plt.axvline(elm.attrs['t_start'], c='k', lw=0.75, ls='--')
-                    plt.axvline(elm.attrs['t_stop'], c='k', lw=0.75, ls='--')
+                    plt.axvline(t_start, c='k', lw=0.75, ls='--')
+                    plt.axvline(t_stop, c='k', lw=0.75, ls='--')
                     # plot near ELM onset
                     plt.sca(axis2)
                     plt.ylim(top=10)
-                    plt.xlim(-1.5,0.5)
-                    plt.axvline(0, c='r', lw=0.75, ls='--')
-                    plt.axvline(elm.attrs['t_stop']-t_onset, c='k', lw=0.75, ls='--')
+                    plt.xlim(-1,0.5)
+                    plt.axvline(0, c='k', lw=0.75, ls='--')
+                    if estimate_onset:
+                        plt.axvline(t_onset-t_stop, c='r', lw=0.75, ls='--')
                 for ax in list(axes1.flat)+list(axes2.flat):
                     plt.sca(ax)
                     plt.legend(fontsize='x-small')
@@ -322,18 +325,18 @@ class ELM_Data_Stats:
                 if re_response.match(r):
                     break
 
-        # merge ELM pdfs
-        if save:
-            print('Merging PDFs and deleting single PDFs')
-            cmd = f"gs -q -dNOPAUSE -sDEVICE=pdfwrite -sOUTPUTFILE={self.save_dir.as_posix()}/ch_stats.pdf -dBATCH {self.save_dir.as_posix()}/ch_*_stats.pdf"
-            ex = os.system(cmd)
-            if ex==0:
-                os.system(f"rm -f {self.save_dir.as_posix()}/ch_*_stats.pdf")
+        # # merge ELM pdfs
+        # if save:
+        #     print('Merging PDFs and deleting single PDFs')
+        #     cmd = f"gs -q -dNOPAUSE -sDEVICE=pdfwrite -sOUTPUTFILE={self.save_dir.as_posix()}/ch_stats.pdf -dBATCH {self.save_dir.as_posix()}/ch_*_stats.pdf"
+        #     ex = os.system(cmd)
+        #     if ex==0:
+        #         os.system(f"rm -f {self.save_dir.as_posix()}/ch_*_stats.pdf")
 
 
 if __name__=='__main__':
     file = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5'
     stats = ELM_Data_Stats(file)
-    # stats.plot_elms(max_elms=10)
-    # stats.plot_shot_elm_stats()
+    stats.plot_elms(max_elms=10)
+    stats.plot_shot_elm_stats()
     stats.plot_channel_stats()
