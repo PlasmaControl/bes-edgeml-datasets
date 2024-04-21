@@ -15,3 +15,5 @@ futures*.txt
 
 __pycache__/
 .idea/
+
+*.code-workspace
