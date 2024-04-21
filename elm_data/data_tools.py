@@ -658,11 +658,16 @@ class HDF5_Data:
             dry_run: bool = True,
     ):
         if dry_run:
-            print("Dry run; no data will be deleted")
+            print("Dry run; data file will not be modified")
+        else:
+            print("Modifying data file")
         with h5py.File(self.hdf5_file, 'a') as root:
-            for elm_key in root['elms']:
+            n_elms = len(root['elms'])
+            for i_elm, elm_key in enumerate(root['elms']):
                 # if not elm_key.endswith('50'):
                 #     continue
+                if i_elm%100 == 0:
+                    print(f"ELM count/total: {i_elm}/{n_elms}")
                 elm = root['elms'][elm_key]
                 t_stop = elm.attrs['t_stop']
                 if 't_stop_original' not in elm.attrs:
@@ -1199,63 +1204,62 @@ def check_data_files(
         repair_label_data_shots: bool = False,
 ):
 
-    def get_shots(file) -> np.ndarray:
+    def get_shots(file) -> set:
         with h5py.File(file) as f:
             assert 'shots' in f
-            shots = np.array([int(shot_key) for shot_key in f['shots']], dtype=int)
+            shots = set([int(shot_key) for shot_key in f['shots']])
         return shots
 
-    def get_ELMs_and_ELM_shots(file) -> tuple[np.ndarray, np.ndarray]:
+    def get_ELMs_and_ELM_shots(file) -> tuple[set[int], set[int]]:
         with h5py.File(file) as f:
             assert 'elms' in f
-            elms = np.array([int(elm_key) for elm_key in f['elms']], dtype=int)
-            shots_from_elms = [int(f['elms'][elm_key].attrs['shot']) for elm_key in f['elms']]
-        shots_from_elms = np.unique(np.array(shots_from_elms, dtype=int))
+            elms = set([int(elm_key) for elm_key in f['elms']])
+            shots_from_elms = set([int(f['elms'][elm_key].attrs['shot']) for elm_key in f['elms']])
         return elms, shots_from_elms
 
     mshots = get_shots(meta_file)
-    print(f"Shots in metadata file: {mshots.size}")
+    print(f"Shots in metadata file: {len(mshots)}")
     lshots = get_shots(label_file)
-    print(f"Shots in label file: {lshots.size}")
+    print(f"Shots in label file: {len(lshots)}")
     bshots = get_shots(bes_file)
-    print(f"Shots in BES file: {bshots.size}")
+    print(f"Shots in BES file: {len(bshots)}")
 
     # validate all label and BES shots are in metadata
-    assert np.size(np.setdiff1d(lshots, mshots, assume_unique=True)) == 0
+    assert not (lshots - mshots)
     print('All label data shots are in metadata shots')
-    assert np.size(np.setdiff1d(bshots, mshots, assume_unique=True)) == 0
+    assert not (bshots - mshots)
     print('All BES data shots are in metadata shots')
 
     # validate that all BES shots are in label shots
-    assert np.size(np.setdiff1d(bshots, lshots, assume_unique=True)) == 0
+    assert not (bshots - lshots)
     print('All BES data shots are in label shots')
 
-    missing_bes_data_shots = np.setdiff1d(lshots, bshots, assume_unique=True)
+    missing_bes_data_shots = lshots - bshots
     print(f"Shots in label data that are missing from BES data (need to update BES data):")
     print(f"  {missing_bes_data_shots}")
 
     l_elms, l_elm_shots = get_ELMs_and_ELM_shots(label_file)
-    print(f"Number of ELMs in label data file: {l_elms.size}")
+    print(f"Number of ELMs in label data file: {len(l_elms)}")
     if np.array_equal(lshots, l_elm_shots):
         print('Label data shots == ELM shots')
     else:
         print('Label data shots != ELM shots')
         print('  Labal data shots missing from ELM shots (safe to delete):')
-        print(f'  {np.setdiff1d(lshots, l_elm_shots, assume_unique=True)}')
+        print(f'  {lshots - l_elm_shots}')
         print('  Labal data ELM shots missing from shots (need to repair from metadata):')
-        print(f'  {np.setdiff1d(l_elm_shots, lshots, assume_unique=True)}')
+        print(f'  {l_elm_shots - lshots}')
 
     b_elms, b_elm_shots = get_ELMs_and_ELM_shots(bes_file)
-    print(f"Number of ELMs in BES data file: {b_elms.size}")
-    assert np.array_equal(bshots, b_elm_shots), f"BES data shots != ELM shots"
+    print(f"Number of ELMs in BES data file: {len(b_elms)}")
+    assert not (bshots ^ b_elm_shots), f"BES data shots != ELM shots"
 
-    assert np.size(np.setdiff1d(b_elms, l_elms, assume_unique=True))==0, f"Some BES data ELMs are not in label data ELMs"
+    assert not (b_elms - l_elms), f"Some BES data ELMs are not in label data ELMs"
 
-    elms_without_full_data = np.setdiff1d(l_elms, b_elms, assume_unique=True)
-    print(f"Number of label data ELMs missing from BES data ELMs: {np.size(elms_without_full_data)}")
+    elms_without_full_data = l_elms - b_elms
+    print(f"Number of label data ELMs missing from BES data ELMs: {len(elms_without_full_data)}")
 
     if repair_label_data_shots:
-        missing_label_data_shots = np.setdiff1d(l_elm_shots, lshots, assume_unique=True)
+        missing_label_data_shots = l_elm_shots - lshots
         with (
             h5py.File(meta_file, 'r') as mfile,
             h5py.File(label_file, 'a') as lfile,
@@ -1276,6 +1280,48 @@ def check_data_files(
                 if 't_stop_original' not in lfile['elms'][elm].attrs:
                     lfile['elms'][elm].attrs['t_stop_original'] = lfile['elms'][elm].attrs['t_stop']
 
+def make_small_data_file(
+        new_file: str|Path,
+        existing_file: str|Path = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5',
+        n_elms: int = 20,
+):
+    new_file = Path(new_file).absolute()
+    existing_file = Path(existing_file).absolute()
+    assert existing_file.exists()
+    with (
+        h5py.File(existing_file, 'r') as src,
+        h5py.File(new_file, 'w') as dest,
+    ):
+        existing_elms = [int(elm_key) for elm_key in src['elms']]
+        print(f"Existing ELMs: {len(existing_elms)}")
+
+        dest.require_group('shots')
+        dest.require_group('elms')
+        dest_shots = []
+
+        np.random.default_rng().shuffle(existing_elms)
+
+        for elm in existing_elms:
+            elm_key = f"{elm:06d}"
+            shot = src['elms'][elm_key].attrs['shot']
+            if shot in dest_shots:
+                continue
+            t_start = src['elms'][elm_key].attrs['t_start']
+            t_stop = src['elms'][elm_key].attrs['t_stop']
+            if t_stop-t_start < 20 or t_stop-t_start > 30:
+                continue
+            dest_shots.append(shot)
+            src.copy(
+                source=src['elms'][elm_key],
+                dest=dest['elms'],
+            )
+            src.copy(
+                source=src['shots'][str(shot)],
+                dest=dest['shots'],
+            )
+            if len(dest['elms']) >= n_elms:
+                break
+            
 
 if __name__=='__main__':
     # bes_data = Shot_Data(
@@ -1288,14 +1334,17 @@ if __name__=='__main__':
     # dataset.create_metadata_file(bes_channels=[23], with_limited_signals=True, max_bes_sample_rate=200e3)
     # dataset.print_hdf5_contents()
 
-    check_data_files(repair_label_data_shots=False)
+    # check_data_files(repair_label_data_shots=False)
 
     # bes_data_file = Path('/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5')
     # label_data_file = Path('/home/smithdr/ml/elm_data/step_5_label_elms/elm_label_data_v3.hdf5')
     # df = HDF5_Data(hdf5_file=bes_data_file)
+    # df.estimate_onset(dry_run=False)
     # df.update_bes_data_file(
     #     label_data_file=label_data_file,
     #     use_concurrent=False, 
     #     bes_channels='all',
     #     dry_run=False,
     # )
+
+    make_small_data_file('small_data.hdf5')
