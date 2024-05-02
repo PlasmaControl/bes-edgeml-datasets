@@ -1308,7 +1308,7 @@ def make_small_data_file(
                 continue
             t_start = src['elms'][elm_key].attrs['t_start']
             t_stop = src['elms'][elm_key].attrs['t_stop']
-            if t_stop-t_start < 20 or t_stop-t_start > 30:
+            if t_stop-t_start < 25 or t_stop-t_start > 60:
                 continue
             dest_shots.append(shot)
             src.copy(
@@ -1347,4 +1347,8 @@ if __name__=='__main__':
     #     dry_run=False,
     # )
 
-    make_small_data_file('small_data.hdf5')
+    for n_elms in [20, 50, 100]:
+        make_small_data_file(
+            f'small_data_{n_elms:d}.hdf5',
+            n_elms=n_elms,
+        )
