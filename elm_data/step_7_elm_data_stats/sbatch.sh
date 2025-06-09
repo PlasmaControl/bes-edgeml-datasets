@@ -16,14 +16,22 @@ echo $PYTHONPATH
 
 PYTHON_SCRIPT=$(
 cat <<'END_HEREDOC'
-
 from elm_data_stats import ELM_Data_Stats
 
 file = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5'
-h5 = ELM_Data_Stats(file)
-h5.plot_elms(save=True)
+h5 = ELM_Data_Stats(file, save_dir='./figures_4_150')
+h5.plot_elms(
+    save=True,
+    shuffle=True,
+    fir_bp_low=4.,
+    fir_bp_high=150.,
+)
 h5.plot_shot_elm_stats(save=True)
-h5.plot_channel_stats(save=True)
+h5.plot_channel_stats(
+    save=True,
+    fir_bp_low=4.,
+    fir_bp_high=150.,
+)
 
 END_HEREDOC
 )

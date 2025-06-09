@@ -1,13 +1,14 @@
 .DS_Store
 
 data/
-figures/
+figures*/
 
 *.py[cod]
 *.out
 *.pdf
 *.csv
 *.hdf5
+*.png
 
 futures*.txt
 

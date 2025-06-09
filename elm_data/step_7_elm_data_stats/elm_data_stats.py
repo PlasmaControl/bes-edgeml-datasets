@@ -2,8 +2,10 @@ from pathlib import Path
 import os
 import dataclasses
 import re
+from typing import Any
 
 import numpy as np
+import scipy.signal
 import matplotlib.pyplot as plt
 import h5py
 
@@ -49,7 +51,33 @@ class ELM_Data_Stats:
             save: bool = False,
             only_onset_discrepency: bool = False,
             estimate_onset: bool = True,
+            fir_taps: int = 501,  # Number of taps in the filter
+            fir_bp_low: float|Any = None,  # bandpass filter cut-on freq in kHz
+            fir_bp_high: float|Any = None,  # bandpass filter cut-off freq in kHz
     ):
+        if fir_bp_low is None and fir_bp_high is None:
+            print("  Using raw BES signals with no FIR filter")
+            a_coeffs = b_coeffs = None
+        else:
+            print(f"  FIR filter with f_low-f_high: {fir_bp_low} - {fir_bp_high} kHz")
+            if fir_bp_low and fir_bp_high:
+                pass_zero = 'bandpass'
+                cutoff = [fir_bp_low, fir_bp_high]
+            elif fir_bp_low:
+                pass_zero = 'highpass'
+                cutoff = fir_bp_low
+            elif fir_bp_high:
+                pass_zero = 'lowpass'
+                cutoff = fir_bp_high
+            b_coeffs = scipy.signal.firwin(
+                numtaps=fir_taps,  # must be odd
+                cutoff=cutoff,  # transition width in kHz
+                pass_zero=pass_zero,
+                fs=1e3,  # f_sample in kHz
+            )
+            a_coeffs = np.zeros_like(b_coeffs)
+            a_coeffs[0] = 1
+
         fig1, axes1 = plt.subplots(nrows=4, ncols=4, figsize=(10.5, 8))
         fig2, axes2 = plt.subplots(nrows=4, ncols=4, figsize=(10.5, 8))
         re_response = re.compile(r"\S")
@@ -58,9 +86,16 @@ class ELM_Data_Stats:
             elm_keys = list(root['elms'].keys())
             if shuffle:
                 np.random.default_rng().shuffle(elm_keys)
+                for _ in range(5):
+                    for shot in self.shots:
+                        for elm_key in reversed(elm_keys):
+                            if int(root['elms'][elm_key].attrs['shot']) == shot:
+                                elm_keys.remove(elm_key)
+                                elm_keys.insert(0, elm_key)
+                                break
             if max_elms:
                 elm_keys = elm_keys[:max_elms]
-            for elm_key in elm_keys:
+            for i_elm, elm_key in enumerate(elm_keys):
                 elm = root['elms'][elm_key]
                 shot = elm.attrs['shot']
                 t_start = elm.attrs['t_start']
@@ -69,6 +104,11 @@ class ELM_Data_Stats:
                 bes_signals = np.array(elm['bes_signals'])
                 assert bes_signals.shape[0] == 64
                 assert bes_signals.shape[1] == bes_time.shape[0]
+                if b_coeffs is not None:
+                    bes_signals = np.array(
+                        scipy.signal.lfilter(x=bes_signals, a=a_coeffs, b=b_coeffs),
+                        dtype=np.float32,
+                    )
                 onset_mask = np.abs(bes_time - t_stop) <= 3  # time mask near ELM onset
                 onset_time = bes_time[onset_mask][::10]
                 onset_signals = bes_signals[:, onset_mask][:,::10]
@@ -130,9 +170,10 @@ class ELM_Data_Stats:
                 for f in [fig1, fig2]:
                     f.tight_layout()
                 if save:
+                    i_save = f"{i_elm:05d}" if shuffle else elm_key
                     for f, suffix in zip([fig1, fig2], ['full', 'onset']):
-                        f.savefig(self.save_dir/f'elm_{elm_key}_{suffix}.pdf', format='pdf', transparent=True)
-                        f.savefig(self.save_dir/'pngs'/f'elm_{elm_key}_{suffix}.png', format='png', dpi=100)
+                        f.savefig(self.save_dir/f'elm_{i_save}_{suffix}.pdf', format='pdf', transparent=True)
+                        f.savefig(self.save_dir/'pngs'/f'elm_{i_save}_{suffix}.png', format='png', dpi=100)
                 if plt.isinteractive():
                     for f in [fig1, fig2]:
                         display(f)
@@ -241,7 +282,38 @@ class ELM_Data_Stats:
             fig.savefig(self.save_dir/'shot_elm_stats.pdf', format='pdf', transparent=True)
             fig.savefig(self.save_dir/'pngs'/'shot_elm_stats.png', format='png', dpi=100)
 
-    def plot_channel_stats(self, max_elms: int = None, save: bool = False):
+    def plot_channel_stats(
+            self, 
+            max_elms: int = None, 
+            save: bool = False,
+            fir_taps: int = 501,  # Number of taps in the filter
+            fir_bp_low: float|Any = None,  # bandpass filter cut-on freq in kHz
+            fir_bp_high: float|Any = None,  # bandpass filter cut-off freq in kHz
+    ):
+        if fir_bp_low is None and fir_bp_high is None:
+            print("  Using raw BES signals with no FIR filter")
+            a_coeffs = b_coeffs = None
+        else:
+            print(f"  FIR filter with f_low-f_high: {fir_bp_low} - {fir_bp_high} kHz")
+            if fir_bp_low and fir_bp_high:
+                pass_zero = 'bandpass'
+                cutoff = [fir_bp_low, fir_bp_high]
+            elif fir_bp_low:
+                pass_zero = 'highpass'
+                cutoff = fir_bp_low
+            elif fir_bp_high:
+                pass_zero = 'lowpass'
+                cutoff = fir_bp_high
+            b_coeffs = scipy.signal.firwin(
+                numtaps=fir_taps,  # must be odd
+                cutoff=cutoff,  # transition width in kHz
+                pass_zero=pass_zero,
+                fs=1e3,  # f_sample in kHz
+            )
+            a_coeffs = np.zeros_like(b_coeffs)
+            a_coeffs[0] = 1
+
+
         re_response = re.compile(r"\S")
         with h5py.File(self.labeled_elm_data_file, 'r') as root:
             elms = root['elms']
@@ -265,7 +337,13 @@ class ELM_Data_Stats:
                 assert i_stop-i_start > 2000
                 i_mid = (i_start+i_stop) // 2
                 # small window around middle of pre-ELM period
-                mid_pre_elm_window = elm['bes_signals'][:, i_mid-1000:i_mid+1000]
+                bes_signals = np.array(elm['bes_signals'])
+                if b_coeffs is not None:
+                    bes_signals = np.array(
+                        scipy.signal.lfilter(x=bes_signals, a=a_coeffs, b=b_coeffs),
+                        dtype=np.float32,
+                    )
+                mid_pre_elm_window = bes_signals[:, i_mid-1000:i_mid+1000]
                 elm_avg[:, i_elm] = np.mean(mid_pre_elm_window, axis=1)
                 elm_std[:, i_elm] = np.std(mid_pre_elm_window, axis=1)
                 quants = np.quantile(mid_pre_elm_window, [0.005,0.995], axis=1)
@@ -336,7 +414,18 @@ class ELM_Data_Stats:
 
 if __name__=='__main__':
     file = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5'
-    stats = ELM_Data_Stats(file)
-    stats.plot_elms(max_elms=10)
-    stats.plot_shot_elm_stats()
-    stats.plot_channel_stats()
+    stats = ELM_Data_Stats(file, save_dir='./figures_test')
+    stats.plot_elms(
+        save=True,
+        max_elms=20,
+        shuffle=True,
+        fir_bp_low=4.,
+        fir_bp_high=150.,
+    )
+    # stats.plot_shot_elm_stats()
+    stats.plot_channel_stats(
+        save=True,
+        max_elms=20,
+        fir_bp_low=4.,
+        fir_bp_high=150.,
+    )
