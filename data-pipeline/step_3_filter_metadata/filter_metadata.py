@@ -1,5 +1,5 @@
 import numpy as np
-from elm_data.data_tools import HDF5_Data
+from elm_data_tools.elm_data_tools import HDF5_Data
 
 dataset = HDF5_Data(
     hdf5_file='/home/smithdr/ml/elm_data/step_2_shot_metadata/metadata_v8.hdf5',

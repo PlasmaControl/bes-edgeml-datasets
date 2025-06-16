@@ -1,4 +1,4 @@
-from elm_data.data_tools import HDF5_Data
+from elm_data_tools.elm_data_tools import HDF5_Data
 
 dataset = HDF5_Data(
     hdf5_file='metadata_v8.hdf5',

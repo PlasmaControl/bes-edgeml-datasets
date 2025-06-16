@@ -8,7 +8,7 @@ echo Start time: $start_time
 export PYTHONPATH=${SLURM_SUBMIT_DIR}:${PYTHONPATH}
 
 . "/home/smithdr/.miniconda3/etc/profile.d/conda.sh"
-conda activate py311
+conda activate py313
 conda info -e
 pyinfo
 module list
@@ -18,14 +18,14 @@ PYTHON_SCRIPT=$(
 cat <<'END_HEREDOC'
 from elm_data_stats import ELM_Data_Stats
 
-file = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5'
-h5 = ELM_Data_Stats(file, save_dir='./figures_4_150')
-h5.plot_elms(
-    save=True,
-    shuffle=True,
-    fir_bp_low=4.,
-    fir_bp_high=150.,
-)
+file = '/home/smithdr/ml/data-pipeline/step_6_labeled_elm_data/elm_data_v1.hdf5'
+h5 = ELM_Data_Stats(file, save_dir='./figures_4_150_v2')
+# h5.plot_elms(
+#     save=True,
+#     shuffle=True,
+#     fir_bp_low=4.,
+#     fir_bp_high=150.,
+# )
 h5.plot_shot_elm_stats(save=True)
 h5.plot_channel_stats(
     save=True,
