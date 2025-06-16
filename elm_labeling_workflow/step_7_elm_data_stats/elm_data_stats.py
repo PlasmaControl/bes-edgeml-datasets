@@ -403,13 +403,13 @@ class ELM_Data_Stats:
                 if re_response.match(r):
                     break
 
-        # # merge ELM pdfs
-        # if save:
-        #     print('Merging PDFs and deleting single PDFs')
-        #     cmd = f"gs -q -dNOPAUSE -sDEVICE=pdfwrite -sOUTPUTFILE={self.save_dir.as_posix()}/ch_stats.pdf -dBATCH {self.save_dir.as_posix()}/ch_*_stats.pdf"
-        #     ex = os.system(cmd)
-        #     if ex==0:
-        #         os.system(f"rm -f {self.save_dir.as_posix()}/ch_*_stats.pdf")
+        # merge ELM pdfs
+        if save:
+            print('Merging PDFs and deleting single PDFs')
+            cmd = f"gs -q -dNOPAUSE -sDEVICE=pdfwrite -sOUTPUTFILE={self.save_dir.as_posix()}/ch_stats.pdf -dBATCH {self.save_dir.as_posix()}/ch_*_stats.pdf"
+            ex = os.system(cmd)
+            if ex==0:
+                os.system(f"rm -f {self.save_dir.as_posix()}/ch_*_stats.pdf")
 
 
 if __name__=='__main__':
