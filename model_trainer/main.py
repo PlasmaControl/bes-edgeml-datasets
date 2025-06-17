@@ -63,7 +63,7 @@ class Model(LightningModule, _Base_Class):
     leaky_relu_slope: float = 2e-2
     monitor_metric: str|Any = None #'sum_loss/val' f"{task}/{metric_name}/{stage}"
     use_optimizer: str = 'SGD'
-    all_bias_false: bool = False
+    no_bias: bool = False
     batch_norm: bool = True
 
     def __post_init__(self):
@@ -80,6 +80,8 @@ class Model(LightningModule, _Base_Class):
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
+        self.feature_model = None
+        self.feature_space_size = None
         self.make_feature_model()
 
         # task sub-models and metrics
@@ -103,9 +105,9 @@ class Model(LightningModule, _Base_Class):
         if self.monitor_metric is None:
             self.monitor_metric = "elm_class/f1_score/val"
 
+        # initialize model parameters
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         if self.is_global_zero: print(f"Total model parameters: {self.total_parameters:,}")
-
         if self.is_global_zero: print("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
             if 'bn' in name: continue
@@ -149,7 +151,7 @@ class Model(LightningModule, _Base_Class):
         out_channels: int|Any = None
         for i_layer, layer in enumerate(conv_layers):
             conv_layer_name = f"L{i_layer:02d}_Conv"
-            bias = layer['bias'] and not self.all_bias_false
+            bias = layer['bias'] and not self.no_bias
             conv = torch.nn.Conv3d(
                 in_channels=1 if out_channels is None else out_channels,
                 out_channels=layer['out_channels'],
@@ -187,7 +189,7 @@ class Model(LightningModule, _Base_Class):
 
         for i_layer in range(n_layers-1):
             mlp_layer_name = f"L{i_layer:02d}_FC"
-            bias = (True and not self.all_bias_false) if i_layer+1<n_layers-1 else False
+            bias = (True and not self.no_bias) if i_layer+1<n_layers-1 else False
             mlp_layer = torch.nn.Linear(
                 in_features=mlp_layer_sizes[i_layer],
                 out_features=mlp_layer_sizes[i_layer+1],
@@ -818,7 +820,7 @@ def main(
         lr_warmup_epochs: int = 5,
         monitor_metric = None,
         use_optimizer = 'SGD',
-        all_bias_false = False,
+        no_bias = False,
         batch_norm = True,
         # loggers
         log_freq = 100,
@@ -871,7 +873,7 @@ def main(
         use_optimizer=use_optimizer,
         is_global_zero=is_global_zero,
         # lr_layerwise_decrement=layerwise_lr_decrement,
-        all_bias_false=all_bias_false,
+        no_bias=no_bias,
         batch_norm=batch_norm
     )
     monitor_metric = lit_model.monitor_metric
@@ -998,18 +1000,19 @@ if __name__=='__main__':
     main(
         # data_file='labeled_elm_events.hdf5',
         data_file='small_data_50.hdf5',
+        signal_window_size=1024,
         max_elms=50,
-        batch_size=256,
+        batch_size=512,
         lr=1e-3,
         max_epochs=20,
         num_workers=4,
         log_freq=100,
-        # time_to_elm_quantile_min=0.4,
-        # time_to_elm_quantile_max=0.6,
-        # contrastive_learning=True,
+        time_to_elm_quantile_min=0.4,
+        time_to_elm_quantile_max=0.6,
+        contrastive_learning=True,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
-        all_bias_false=True,
+        no_bias=True,
         batch_norm=False,
         # fir_bp_low=5.,
         fir_bp_high=250.,
