@@ -63,6 +63,8 @@ class Model(LightningModule, _Base_Class):
     leaky_relu_slope: float = 2e-2
     monitor_metric: str|Any = None #'sum_loss/val' f"{task}/{metric_name}/{stage}"
     use_optimizer: str = 'SGD'
+    all_bias_false: bool = False
+    batch_norm: bool = True
 
     def __post_init__(self):
 
@@ -135,11 +137,11 @@ class Model(LightningModule, _Base_Class):
         feature_layer_dict = OrderedDict()
 
         conv_layers = (
-            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 4, 'kernel': (1, 4, 4), 'stride': 1},
+            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
+            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
+            {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
+            {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
+            {'out_channels': 8, 'kernel': (1, 4, 4), 'stride': 1, 'bias':True},
         )
 
         data_shape = self.input_data_shape
@@ -147,20 +149,23 @@ class Model(LightningModule, _Base_Class):
         out_channels: int|Any = None
         for i_layer, layer in enumerate(conv_layers):
             conv_layer_name = f"L{i_layer:02d}_Conv"
+            bias = layer['bias'] and not self.all_bias_false
             conv = torch.nn.Conv3d(
                 in_channels=1 if out_channels is None else out_channels,
                 out_channels=layer['out_channels'],
                 kernel_size=layer['kernel'],
                 stride=layer['stride'],
+                bias=bias,
             )
             n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
             if self.is_global_zero: 
-                print(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
+                print(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
             feature_layer_dict[conv_layer_name] = conv
             feature_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
-            feature_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm3d(out_channels)
+            if self.batch_norm:
+                feature_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm3d(out_channels)
 
         feature_layer_dict['Flatten'] = torch.nn.Flatten()
         self.feature_model = torch.nn.Sequential(feature_layer_dict)
@@ -182,14 +187,15 @@ class Model(LightningModule, _Base_Class):
 
         for i_layer in range(n_layers-1):
             mlp_layer_name = f"L{i_layer:02d}_FC"
+            bias = (True and not self.all_bias_false) if i_layer+1<n_layers-1 else False
             mlp_layer = torch.nn.Linear(
                 in_features=mlp_layer_sizes[i_layer],
                 out_features=mlp_layer_sizes[i_layer+1],
-                bias=True if i_layer+1<n_layers-1 else False,
+                bias=bias,
             )
             n_params = sum(p.numel() for p in mlp_layer.parameters() if p.requires_grad)
             if self.is_global_zero: 
-                print(f"  {mlp_layer_name}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
+                print(f"  {mlp_layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
             mlp_layer_dict[mlp_layer_name] = mlp_layer
             if i_layer+1 < n_layers-1:
                 mlp_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
@@ -746,6 +752,7 @@ class Data(_Base_Class, LightningDataModule):
             prefetch_factor=2 if self.num_workers else None,
             pin_memory=True,
             drop_last=True,
+            persistent_workers=True,
         )
 
     def get_state_dict(self) -> dict:
@@ -811,6 +818,8 @@ def main(
         lr_warmup_epochs: int = 5,
         monitor_metric = None,
         use_optimizer = 'SGD',
+        all_bias_false = False,
+        batch_norm = True,
         # loggers
         log_freq = 100,
         use_wandb = False,
@@ -822,10 +831,11 @@ def main(
         gradient_clip_val = None,
         gradient_clip_algorithm = None,
         skip_train: bool = False,
+        skip_data: bool = False,
         precision = None,
         # data
         batch_size = 64,
-        fraction_validation = 0.12,
+        fraction_validation = 0.1,
         fraction_test = 0.0,
         num_workers = 0,
         time_to_elm_quantile_min: float|Any = None,
@@ -861,6 +871,8 @@ def main(
         use_optimizer=use_optimizer,
         is_global_zero=is_global_zero,
         # lr_layerwise_decrement=layerwise_lr_decrement,
+        all_bias_false=all_bias_false,
+        batch_norm=batch_norm
     )
     monitor_metric = lit_model.monitor_metric
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
@@ -940,7 +952,7 @@ def main(
         num_nodes = num_nodes,
         use_distributed_sampler=False,
         num_sanity_val_steps=0,
-        reload_dataloaders_every_n_epochs=10,
+        # reload_dataloaders_every_n_epochs=10,
     )
     lit_model.save_hyperparameters({
         'gradient_clip_val': gradient_clip_val, 
@@ -955,25 +967,26 @@ def main(
     assert trainer.is_global_zero == is_global_zero
 
     ### data
-    lit_datamodule = Data(
-        signal_window_size=signal_window_size,
-        elm_data_file=data_file,
-        max_elms=max_elms,
-        batch_size=batch_size,
-        fraction_test=fraction_test,
-        fraction_validation=fraction_validation,
-        num_workers=num_workers,
-        time_to_elm_quantile_min=time_to_elm_quantile_min,
-        time_to_elm_quantile_max=time_to_elm_quantile_max,
-        contrastive_learning=contrastive_learning,
-        is_global_zero=is_global_zero,
-        min_pre_elm_time=min_pre_elm_time,
-        fir_bp_low=fir_bp_low,
-        fir_bp_high=fir_bp_high,
-        epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
-    )
+    if not skip_data:
+        lit_datamodule = Data(
+            signal_window_size=signal_window_size,
+            elm_data_file=data_file,
+            max_elms=max_elms,
+            batch_size=batch_size,
+            fraction_test=fraction_test,
+            fraction_validation=fraction_validation,
+            num_workers=num_workers,
+            time_to_elm_quantile_min=time_to_elm_quantile_min,
+            time_to_elm_quantile_max=time_to_elm_quantile_max,
+            contrastive_learning=contrastive_learning,
+            is_global_zero=is_global_zero,
+            min_pre_elm_time=min_pre_elm_time,
+            fir_bp_low=fir_bp_low,
+            fir_bp_high=fir_bp_high,
+            epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
+        )
 
-    if skip_train is False:
+    if not skip_train and not skip_data:
         trainer.fit(lit_model, datamodule=lit_datamodule)
         if fraction_test:
             trainer.test(lit_model, lit_datamodule)
@@ -983,21 +996,25 @@ def main(
 
 if __name__=='__main__':
     main(
-        # data_file='/global/homes/d/drsmith/scratch-ml/data/labeled_elm_events.hdf5',
-        data_file='small_elm_data.hdf5',
+        # data_file='labeled_elm_events.hdf5',
+        data_file='small_data_50.hdf5',
         max_elms=50,
-        batch_size=128,
+        batch_size=256,
         lr=1e-3,
-        max_epochs=2,
-        num_workers=2,
+        max_epochs=20,
+        num_workers=4,
         log_freq=100,
-        time_to_elm_quantile_min=0.4,
-        time_to_elm_quantile_max=0.6,
-        contrastive_learning=True,
+        # time_to_elm_quantile_min=0.4,
+        # time_to_elm_quantile_max=0.6,
+        # contrastive_learning=True,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
+        all_bias_false=True,
+        batch_norm=False,
         # fir_bp_low=5.,
         fir_bp_high=250.,
-        use_wandb=True,
+        # use_wandb=True,
         epochs_per_batch_size_reduction=10,
+        # skip_data=True,
+        # skip_train=True,
     )

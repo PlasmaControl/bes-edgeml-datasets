@@ -2,6 +2,7 @@
 
 data/
 figures*/
+experiment*/
 
 *.py[cod]
 *.out
