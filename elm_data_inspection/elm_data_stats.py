@@ -36,7 +36,7 @@ class ELM_Data_Stats:
             print(f"Shots and shots from ELMs are identical sets")
             self.n_shots = len(root['shots'])
             self.n_elms = len(root['elms'])
-            n_skipped_shots = np.size(root.attrs['excluded_shots'])
+            n_skipped_shots = np.size(root.attrs['excluded_shots']) if 'excluded_shots' in root.attrs else 0
 
         print(f"Number of shots: {self.n_shots}")
         print(f"Number of ELMs: {self.n_elms}")
@@ -367,27 +367,25 @@ class ELM_Data_Stats:
                 [elm_min, elm_avg, elm_max, elm_std],
             )):
                 plt.sca(axes.flat[i])
-                if i != 3:
-                    plt.hist(metric[i_ch,:], bins=15)
-                    plt.xlabel(f'Ch {i_ch+1} {tag} (V)')
-                else:
-                    plt.hist(np.log10(metric[i_ch,:]), bins=15)
+                data = metric
+                if i==3:
+                    data = np.log10(metric)
                     plt.xlabel(f'Ch {i_ch+1} log10({tag}) (V)')
-
-                plt.sca(axes.flat[i+4])
-                if i != 3:
-                    plt.scatter(elm_indices, metric[i_ch,:], s=2**2, marker='.')
-                    plt.ylabel(f'Ch {i_ch+1} {tag} (V)')
-                else:
-                    plt.scatter(elm_indices, np.log10(metric[i_ch,:]), s=2**2, marker='.')
-                    plt.ylabel(f'Ch {i_ch+1} log10({tag}) (V)')
-                plt.xlabel('ELM index')
-
-            for ax in axes.flat[0:4]:
-                plt.sca(ax)
-                plt.ylim([1,None])
+                plt.hist(data[i_ch,:], bins=17, range=[data.min(), data.max()])
+                plt.xlim([data.min(), data.max()])
+                plt.ylim(0.8,n_elms//2)
                 plt.yscale('log')
                 plt.ylabel('ELM count')
+
+                plt.sca(axes.flat[i+4])
+                data = metric
+                plt.ylabel(f'Ch {i_ch+1} {tag} (V)')
+                if i==3:
+                    data = np.log10(metric)
+                    plt.ylabel(f'Ch {i_ch+1} log10({tag}) (V)')
+                plt.scatter(elm_indices, data[i_ch,:], s=2**2, marker='.')
+                plt.ylim([data.min(), data.max()])
+                plt.xlabel('ELM index')
 
             plt.tight_layout()
 
@@ -413,19 +411,19 @@ class ELM_Data_Stats:
 
 
 if __name__=='__main__':
-    file = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5'
-    stats = ELM_Data_Stats(file, save_dir='./figures_test')
-    stats.plot_elms(
-        save=True,
-        max_elms=20,
-        shuffle=True,
-        fir_bp_low=4.,
-        fir_bp_high=150.,
-    )
-    # stats.plot_shot_elm_stats()
+    file = '/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_50.hdf5'
+    stats = ELM_Data_Stats(file, save_dir='.')
+    # stats.plot_elms(
+    #     save=True,
+    #     # max_elms=20,
+    #     shuffle=True,
+    #     # fir_bp_low=4.,
+    #     # fir_bp_high=150.,
+    # )
+    stats.plot_shot_elm_stats(save=True)
     stats.plot_channel_stats(
         save=True,
-        max_elms=20,
-        fir_bp_low=4.,
-        fir_bp_high=150.,
+        # max_elms=20,
+        # fir_bp_low=4.,
+        # fir_bp_high=150.,
     )
