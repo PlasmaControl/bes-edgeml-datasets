@@ -449,19 +449,19 @@ class ELM_Data_Stats:
 
 
 if __name__=='__main__':
-    file = '/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_50.hdf5'
+    file = '../model_trainer/small_data_100.hdf5'
     stats = ELM_Data_Stats(file, save_dir='.')
-    # stats.plot_elms(
-    #     save=True,
-    #     # max_elms=20,
-    #     shuffle=True,
-    #     # fir_bp_low=4.,
-    #     # fir_bp_high=150.,
-    # )
     stats.plot_shot_elm_stats(save=True)
     stats.plot_channel_stats(
         save=True,
         # max_elms=20,
+        # fir_bp_low=4.,
+        # fir_bp_high=150.,
+    )
+    stats.plot_elms(
+        save=True,
+        # max_elms=20,
+        # shuffle=True,
         # fir_bp_low=4.,
         # fir_bp_high=150.,
     )
