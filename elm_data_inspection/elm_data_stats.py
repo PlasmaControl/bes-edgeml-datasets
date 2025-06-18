@@ -318,7 +318,7 @@ class ELM_Data_Stats:
         with h5py.File(self.labeled_elm_data_file, 'r') as root:
             elms = root['elms']
             elm_keys = list(elms.keys())
-            print(f"Number of ELMs: {len(elm_keys)}")
+            print(f"Number of ELMs in data file: {len(elm_keys)}")
             if max_elms:
                 np.random.default_rng().shuffle(elm_keys)
                 elm_keys = elm_keys[:max_elms]
@@ -350,9 +350,47 @@ class ELM_Data_Stats:
                 elm_min[:, i_elm] = quants[0, :]
                 elm_max[:, i_elm] = quants[1, :]
 
-        for ndarray in [elm_avg, elm_std, elm_min, elm_max]:
+        # channel-wise violin plots
+        for i_data, (tag, ndarray) in enumerate(zip(
+            ['Min', 'Avg', 'Max', 'Std'],
+            [elm_min, elm_avg, elm_max, elm_std],
+        )):
             assert np.all(np.isfinite(ndarray))
+            data = ndarray if i_data != 3 else np.log10(ndarray)
+            fig, axes = plt.subplots(
+                nrows=8, 
+                ncols=8, 
+                figsize=(14,8),
+                sharex=True,
+                sharey=True,
+            )
+            tag2 = tag if i_data != 3 else f'log10({tag})'
+            plt.suptitle(f'Channel-wise {tag2}', fontsize='large')
+            for i in range(64):
+                plt.sca(axes.flat[i])
+                v = plt.violinplot(
+                    data[i, :],
+                    positions=[0],
+                    showextrema=False,
+                    orientation='horizontal',
+                    side='high',
+                )
+                v['bodies'][0].set_facecolor('C0')
+                v['bodies'][0].set_alpha(1)
+                if i>=56:
+                    plt.xlabel(f'{tag2} (V)')
+            plt.tight_layout(h_pad=0.5, w_pad=0.5)
+            if save:
+                fig.savefig(self.save_dir/f'violin_{tag.lower()}.pdf', format='pdf', transparent=True)
+                fig.savefig(self.save_dir/'pngs'/f'violin_{tag.lower()}.png', format='png', dpi=100)
+        if save:
+            print('Merging PDFs and deleting single PDFs')
+            cmd = f"gs -q -dNOPAUSE -sDEVICE=pdfwrite -sOUTPUTFILE={self.save_dir.as_posix()}/violin.pdf -dBATCH {self.save_dir.as_posix()}/violin_*.pdf"
+            ex = os.system(cmd)
+            if ex==0:
+                os.system(f"rm -f {self.save_dir.as_posix()}/violin_*.pdf")
 
+        # channel-wise histograms and scatter plots
         fig, axes = plt.subplots(nrows=2, ncols=4, figsize=(12,6))
         elm_indices = [int(elm) for elm in elm_keys]
         for i_ch in range(64):
