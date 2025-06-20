@@ -816,44 +816,44 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
 
 def main(
         data_file: str|Path,
-        max_elms: int|Any = None,
+        max_elms: int = None,
         signal_window_size: int = 1024,
         experiment_name: str = 'experiment_default',
         restart_trial_name: str = None,
         wandb_id: str = None,
         # model
-        lr = 1e-3,
-        weight_decay = 1e-4,
-        lr_scheduler_patience = 20,
+        lr: float = 1e-3,
+        weight_decay: float = 1e-4,
+        lr_scheduler_patience: int = 20,
         lr_warmup_epochs: int = 5,
         monitor_metric = None,
-        use_optimizer = 'SGD',
-        no_bias = False,
-        batch_norm = True,
+        use_optimizer: str = 'SGD',
+        no_bias: bool = False,
+        batch_norm: bool = True,
         # loggers
-        log_freq = 100,
-        use_wandb = False,
+        log_freq: int = 100,
+        use_wandb: bool = False,
         # callbacks
-        early_stopping_min_delta = 1e-3,
-        early_stopping_patience = 20,
+        early_stopping_min_delta: float = 1e-3,
+        early_stopping_patience: int = 20,
         # trainer
         max_epochs = 2,
-        gradient_clip_val = None,
+        gradient_clip_val: float = None,
         gradient_clip_algorithm = None,
         skip_train: bool = False,
         skip_data: bool = False,
         precision = None,
         # data
-        batch_size = 64,
-        fraction_validation = 0.1,
-        fraction_test = 0.0,
-        num_workers = 0,
-        time_to_elm_quantile_min: float|Any = None,
-        time_to_elm_quantile_max: float|Any = None,
+        batch_size: int = 64,
+        fraction_validation: float = 0.1,
+        fraction_test: float = 0.0,
+        num_workers: int = 0,
+        time_to_elm_quantile_min: float = None,
+        time_to_elm_quantile_max: float = None,
         contrastive_learning: bool = True,
-        min_pre_elm_time: float|Any = None,
-        fir_bp_low = None,
-        fir_bp_high = None,
+        min_pre_elm_time: float = None,
+        fir_bp_low: float = None,
+        fir_bp_high: float = None,
         epochs_per_batch_size_reduction: int = 50,
 ) -> str:
 
@@ -923,7 +923,6 @@ def main(
         default_hp_metric=False,
     )
     loggers.append(tb_logger)
-    trial_dir = Path(tb_logger.log_dir).absolute()
     if is_global_zero:
         print(f"Trial name: {trial_name}")
     if use_wandb:
@@ -935,8 +934,8 @@ def main(
             save_dir=wandb_save_dir,
             project=wandb_project,
             name=wandb_name,
-            id=wandb_id,
-            resume='allow' if restart_trial_name else None,
+            id=wandb_id if wandb_id else None,
+            resume='must' if restart_trial_name else None,
         )
         wandb_logger.watch(
             model=lit_model, 
@@ -1047,8 +1046,8 @@ def main(
 
 if __name__=='__main__':
     trial_name, wandb_id = main(
-        restart_trial_name='r2025_06_20_12_41_38',
-        wandb_id='ynm8rjkt',
+        restart_trial_name='',
+        wandb_id='',
         data_file='small_data_100.hdf5',
         signal_window_size=512,
         max_elms=20,
