@@ -1282,7 +1282,7 @@ def check_data_files(
 
 def make_small_data_file(
         new_file: str|Path,
-        existing_file: str|Path = '/home/smithdr/ml/elm_data/step_6_labeled_elm_data/elm_data_v1.hdf5',
+        existing_file: str|Path = '/home/smithdr/ml/elm_labeling_workflow/step_6_labeled_elm_data/elm_data_v1.hdf5',
         n_elms: int = 20,
 ):
     new_file = Path(new_file).absolute()
@@ -1293,32 +1293,40 @@ def make_small_data_file(
         h5py.File(new_file, 'w') as dest,
     ):
         existing_elms = [int(elm_key) for elm_key in src['elms']]
+        np.random.default_rng().shuffle(existing_elms)
         print(f"Existing ELMs: {len(existing_elms)}")
 
         dest.require_group('shots')
         dest.require_group('elms')
-        dest_shots = []
-
-        np.random.default_rng().shuffle(existing_elms)
+        dest_elms_per_shot: dict[int,int] = {}
 
         for elm in existing_elms:
             elm_key = f"{elm:06d}"
             shot = src['elms'][elm_key].attrs['shot']
-            if shot in dest_shots:
+            # check for max 
+            if shot in dest_elms_per_shot and dest_elms_per_shot[shot] >= 3:
                 continue
+            # check for pre-ELM time
             t_start = src['elms'][elm_key].attrs['t_start']
             t_stop = src['elms'][elm_key].attrs['t_stop']
             if t_stop-t_start < 25 or t_stop-t_start > 60:
                 continue
-            dest_shots.append(shot)
+            # increment ELM count for this shot
+            if shot in dest_elms_per_shot:
+                dest_elms_per_shot[shot] += 1
+            else:
+                dest_elms_per_shot[shot] = 1
+            # copy ELM
             src.copy(
                 source=src['elms'][elm_key],
                 dest=dest['elms'],
             )
-            src.copy(
-                source=src['shots'][str(shot)],
-                dest=dest['shots'],
-            )
+            # copy shot
+            if str(shot) not in dest['shots']:
+                src.copy(
+                    source=src['shots'][str(shot)],
+                    dest=dest['shots'],
+                )
             if len(dest['elms']) >= n_elms:
                 break
             
@@ -1347,7 +1355,7 @@ if __name__=='__main__':
     #     dry_run=False,
     # )
 
-    for n_elms in [20, 50, 100]:
+    for n_elms in [200]:
         make_small_data_file(
             f'small_data_{n_elms:d}.hdf5',
             n_elms=n_elms,
