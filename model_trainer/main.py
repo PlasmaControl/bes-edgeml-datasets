@@ -374,6 +374,7 @@ class Model(LightningModule, _Base_Class):
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
     elm_data_file: str|Path|Any = None
+    logger_dir: str|Path = None
     max_elms: int|Any = None
     batch_size: int = 256
     stride_factor: int = 8
@@ -382,7 +383,7 @@ class Data(_Base_Class, LightningDataModule):
     fraction_validation: float = 0.12
     fraction_test: float = 0.0
     use_random_data: bool = False
-    seed: int = 0  # seed for ELM index shuffling; must be same across processes
+    seed: int = None  # seed for ELM index shuffling; must be same across processes
     time_to_elm_quantile_min: float|Any = None
     time_to_elm_quantile_max: float|Any = None
     contrastive_learning: bool = False
@@ -413,13 +414,14 @@ class Data(_Base_Class, LightningDataModule):
         if self.is_global_zero:
             print_fields(self)
 
-        self.state_items = [
+        self.state_dict_items = [
             'global_elm_split',
-            'elm_raw_signal_mean',
-            'elm_raw_signal_stdev',
-            'time_to_elm_quantiles',
+            'global_shot_split',
+            # 'elm_raw_signal_mean',
+            # 'elm_raw_signal_stdev',
+            # 'time_to_elm_quantiles',
         ]
-        for item in self.state_items:
+        for item in self.state_dict_items:
             assert hasattr(self, item)
 
     def setup(self, stage: str):
@@ -462,23 +464,30 @@ class Data(_Base_Class, LightningDataModule):
         else:
             self.zprint("Reusing saved global data split")
 
+        for stage in ['train', 'validation', 'test']:
+            self.zprint(f"Stage {stage.upper()}: Global shot count {self.global_shot_split[stage].size}")
+            if len(self.global_shot_split[stage]) >= 5:
+                self.zprint(f"Stage {stage.upper()}: Global shot order: " + ', '.join(map(str, self.global_shot_split[stage][:5])))
+            self.zprint(f"Stage {stage.upper()}: Global ELM count {len(self.global_elm_split[stage]):,d}")
+            if len(self.global_elm_split[stage]) >= 5:
+                self.zprint(f"Stage {stage.upper()}: Global ELM order: " + ', '.join(map(str, self.global_elm_split[stage][:5])))
+
         for st in stages:
             assert st in ['train', 'validation', 'test', 'predict']
             print(f"Rank {self.trainer.global_rank} Stage {st.upper()}: data setup")
             if st in self.elm_datasets and isinstance(self.elm_datasets[st], torch.utils.data.Dataset):
                 self.zprint(f"  Using saved dataset")
                 continue
-            global_elm_indices = self.global_elm_split[st]
-            self.zprint(f"  Global ELM count: {len(global_elm_indices)}")
-            assert len(global_elm_indices) > 0
+            global_stage_elm_indices = self.global_elm_split[st]
+            assert len(global_stage_elm_indices) > 0
             global_sw_metadata_list = []
             global_outliers = 0
             skipped_short_pre_elm_time = 0
             with h5py.File(self.elm_data_file, 'r') as h5_file:
                 elms: h5py.Group = h5_file['elms']
-                for i_elm, elm_index in enumerate(global_elm_indices):
+                for i_elm, elm_index in enumerate(global_stage_elm_indices):
                     if i_elm%100 == 0:
-                        self.zprint(f"  Reading ELM event {i_elm:04d}/{len(global_elm_indices):04d}")
+                        self.zprint(f"  Reading ELM event {i_elm:04d}/{len(global_stage_elm_indices):04d}")
                     elm_event: h5py.Group = elms[f"{elm_index:06d}"]
                     shot = int(elm_event.attrs['shot'])
                     assert elm_event["bes_signals"].shape[0] == 64
@@ -569,8 +578,8 @@ class Data(_Base_Class, LightningDataModule):
                             global_sw_metadata_list.pop(i)
                 if self.is_global_zero:
                     n_signal_windows = len(global_sw_metadata_list)
-                    self.rprint(f"Stage {st.upper()}: Restricted global signal windows: {n_signal_windows:,d}")
-                    self.rprint(f"Stage {st.upper()}: Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
+                    self.rprint(f"Restricted global signal windows: {n_signal_windows:,d}")
+                    self.rprint(f"Restricted global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
             # split signal windows by rank
             rankwise_sw_split = np.array_split(global_sw_metadata_list, self.trainer.world_size)
@@ -583,7 +592,7 @@ class Data(_Base_Class, LightningDataModule):
                 [item['shot'] for item in sw_for_rank],
                 dtype=int,
             ))
-            self.rprint(f"Shots/ELMs/SigWin: {len(shots_for_rank):,d}/{len(elms_for_rank):,d}/{len(sw_for_rank):,d}")
+            self.rprint(f"Local shots/ELMs/SigWin: {len(shots_for_rank):,d}/{len(elms_for_rank):,d}/{len(sw_for_rank):,d}")
 
             # get rank-wise ELM signals
             signals_for_rank = {}
@@ -607,10 +616,13 @@ class Data(_Base_Class, LightningDataModule):
                     quantile_max=self.time_to_elm_quantile_max,
                     contrastive_learning=self.contrastive_learning,
                 )
-                self.rprint(f"Dataset size: {len(self.elm_datasets[st]):,d}")
+                self.rprint(f"Local dataset size: {len(self.elm_datasets[st]):,d}")
             
             if st in ['test', 'predict']:
                 pass
+
+        state_dict = self.get_state_dict()
+        torch.save(state_dict, self.logger_dir/'state_dict.pt')
 
     def _make_elm_data_split(self):
         assert len(self.global_elm_split) == 0
@@ -630,12 +642,13 @@ class Data(_Base_Class, LightningDataModule):
                 datafile_shots = set([int(root['elms'][f"{elm_index:06d}"].attrs['shot']) for elm_index in datafile_elms])
                 datafile_shots = list(datafile_shots)
                 self.zprint(f"  ELMs/shots for analysis: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
-            # shuffle shots in dataset
-            self.rprint(f"Shuffling global shots with seed={self.seed}")
-            rng.shuffle(datafile_shots)
-            self.rprint(f"Shuffled shot order: " + ', '.join(map(str, datafile_shots[:5])))
+            if 'train' not in self.global_shot_split:
+                # shuffle shots in dataset
+                self.zprint(f"Shuffling global shots with seed = {self.seed}")
+                rng.shuffle(datafile_shots)
+            self.zprint(f"Global shot order: " + ', '.join(map(str, datafile_shots[:5])))
             # order ELMs by shuffled shots
-            self.rprint(f"Ordering ELMs by shuffled shots")
+            self.zprint(f"Ordering ELMs by shot order")
             new_datafile_elms = []
             datafile_elms = sorted(datafile_elms)
             for shot in datafile_shots:
@@ -648,19 +661,21 @@ class Data(_Base_Class, LightningDataModule):
                         if start_new_shot == False:
                             break
             datafile_elms = new_datafile_elms
-            # split shots
-            n_test_shots = int(self.fraction_test * len(datafile_shots))
-            n_validation_shots = int(self.fraction_validation * len(datafile_shots))
-            self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
-                np.split(datafile_shots, [n_test_shots, n_test_shots+n_validation_shots])
+
+            if 'train' not in self.global_shot_split:
+                self.zprint("Splitting global shots into train/validation/test sets")
+                n_test_shots = int(self.fraction_test * len(datafile_shots))
+                n_validation_shots = int(self.fraction_validation * len(datafile_shots))
+                self.global_shot_split['test'], self.global_shot_split['validation'], self.global_shot_split['train'] = \
+                    np.split(datafile_shots, [n_test_shots, n_test_shots+n_validation_shots])
             
             for stage in ['train','validation','test']:
-                self.global_elm_split[stage] = [
-                    i_elm for i_elm in datafile_elms
-                    if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
-                ]
-                self.zprint(f"Stage {stage.upper()}: Global shot count {self.global_shot_split[stage].size} ({self.global_shot_split[stage].size/len(datafile_shots)*1e2:.1f}%)")
-                self.zprint(f"Stage {stage.upper()}: Global ELM count {len(self.global_elm_split[stage]):,d} ({len(self.global_elm_split[stage])/len(datafile_elms)*1e2:.1f}%)")
+                if stage not in self.global_elm_split or len(self.global_elm_split[stage]) == 0:
+                    self.zprint(f"Stage {stage.upper()}: Splitting global ELMs by global shot order")
+                    self.global_elm_split[stage] = [
+                        i_elm for i_elm in datafile_elms
+                        if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_shot_split[stage]
+                    ]
 
     def _get_statistics2(
             self, 
@@ -749,13 +764,13 @@ class Data(_Base_Class, LightningDataModule):
         )
 
     def get_state_dict(self) -> dict:
-        state_dict = {item: getattr(self, item) for item in self.state_items}
+        state_dict = {item: getattr(self, item) for item in self.state_dict_items}
         return state_dict
 
     def load_state_dict(self, state: dict) -> None:
-        for item in self.state_items:
+        for item in self.state_dict_items:
+            self.zprint(f"Loading state item {item} = {state[item]}")
             setattr(self, item, state[item])
-            self.zprint(f"Loading state item {item} = {getattr(self, item)}")
 
     def zprint(self, text: str = ''):
         if self.is_global_zero:
@@ -802,8 +817,9 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
 def main(
         data_file: str|Path,
         max_elms: int|Any = None,
-        signal_window_size = 1024,
-        experiment_name = 'experiment_default',
+        signal_window_size: int = 1024,
+        experiment_name: str = 'experiment_default',
+        restart_trial_dir: str|Path = None,
         # model
         lr = 1e-3,
         weight_decay = 1e-4,
@@ -891,15 +907,22 @@ def main(
 
     ### loggers
     loggers = []
-    experiment_dir = Path(experiment_name).absolute()
-    experiment_dir.mkdir(parents=True, exist_ok=True)
-    datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
-    slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
-    trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
+    if restart_trial_dir is None:
+        experiment_dir = Path(experiment_name).absolute()
+        experiment_dir.mkdir(parents=True, exist_ok=True)
+        datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
+        slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
+        trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
+    else:
+        restart_trial_dir = Path(restart_trial_dir).absolute()
+        assert restart_trial_dir.exists() and restart_trial_dir.is_dir()
+        experiment_dir = restart_trial_dir.parent.parent
+        experiment_name = restart_trial_dir.parent.name
+        trial_name = restart_trial_dir.name
     tb_logger = TensorBoardLogger(
-        save_dir=experiment_dir.parent,
-        name=experiment_name,
-        version=trial_name,
+        save_dir=experiment_dir.parent, # parent directory of the experiment directory
+        name=experiment_name,  # experiment directory name
+        version=trial_name,  # trial directory name within the experiment directory
         default_hp_metric=False,
     )
     loggers.append(tb_logger)
@@ -908,16 +931,20 @@ def main(
         print(f"Trial directory: {trial_dir}")
     if use_wandb:
         wandb.login()
+        wandb_save_dir = experiment_dir
+        wandb_project = experiment_name
+        wandb_name = trial_name
         wandb_logger = WandbLogger(
-            save_dir=experiment_dir,
-            project=experiment_name,
-            name=trial_name,
+            save_dir=wandb_save_dir,
+            project=wandb_project,
+            name=wandb_name,
         )
         wandb_logger.watch(
             model=lit_model, 
             log='all', 
             log_freq=log_freq,
         )
+        print(f"WandB log dir: {wandb_logger.log_dir}")
         loggers.append(wandb_logger)
 
     if is_global_zero:
@@ -959,30 +986,42 @@ def main(
     assert trainer.global_rank == rank
     assert trainer.is_global_zero == is_global_zero
 
+    ckpt_path=restart_trial_dir/'checkpoints/last.ckpt' if restart_trial_dir else None
+
     ### data
     if not skip_data:
-        lit_datamodule = Data(
-            signal_window_size=signal_window_size,
-            elm_data_file=data_file,
-            max_elms=max_elms,
-            batch_size=batch_size,
-            fraction_test=fraction_test,
-            fraction_validation=fraction_validation,
-            num_workers=num_workers,
-            time_to_elm_quantile_min=time_to_elm_quantile_min,
-            time_to_elm_quantile_max=time_to_elm_quantile_max,
-            contrastive_learning=contrastive_learning,
-            is_global_zero=is_global_zero,
-            min_pre_elm_time=min_pre_elm_time,
-            fir_bp_low=fir_bp_low,
-            fir_bp_high=fir_bp_high,
-            epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
-        )
+        if ckpt_path:
+            print(f"Loading data from checkpoint: {ckpt_path}")
+            lit_datamodule = Data.load_from_checkpoint(checkpoint_path=ckpt_path)
+            state_dict_file = ckpt_path.parent.parent/'state_dict.pt'
+            print(f"Loading state_dict from: {state_dict_file}")
+            state_dict = torch.load(state_dict_file)
+            lit_datamodule.load_state_dict(state_dict)
+        else:
+            lit_datamodule = Data(
+                signal_window_size=signal_window_size,
+                logger_dir=trial_dir,
+                elm_data_file=data_file,
+                max_elms=max_elms,
+                batch_size=batch_size,
+                fraction_test=fraction_test,
+                fraction_validation=fraction_validation,
+                num_workers=num_workers,
+                time_to_elm_quantile_min=time_to_elm_quantile_min,
+                time_to_elm_quantile_max=time_to_elm_quantile_max,
+                contrastive_learning=contrastive_learning,
+                is_global_zero=is_global_zero,
+                min_pre_elm_time=min_pre_elm_time,
+                fir_bp_low=fir_bp_low,
+                fir_bp_high=fir_bp_high,
+                epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
+            )
 
     if not skip_train and not skip_data:
         trainer.fit(
             model=lit_model, 
             datamodule=lit_datamodule,
+            ckpt_path=ckpt_path,
         )
         if fraction_test:
             trainer.test(
@@ -990,25 +1029,30 @@ def main(
                 datamodule=lit_datamodule,
             )
 
+    if is_global_zero:
+        print(f"Trial directory: {trial_dir}")
+
     if use_wandb:
+        print(f"WandB log dir: {wandb_logger.log_dir}")
+        print(f"WandB ID: {wandb_logger._id}")
         wandb.finish()
 
 if __name__=='__main__':
     main(
-        # data_file='labeled_elm_events.hdf5',
+        restart_trial_dir='experiment_default/r2025_06_20_08_05_03',
         data_file='small_data_100.hdf5',
         signal_window_size=512,
-        max_elms=100,
-        max_epochs=50,
-        batch_size=512,
-        epochs_per_batch_size_reduction=20,
+        max_elms=20,
+        max_epochs=5,
+        batch_size=128,
+        epochs_per_batch_size_reduction=100,
         lr=1e-3,
-        lr_scheduler_patience=20,
+        lr_scheduler_patience=50,
         lr_warmup_epochs=5,
         early_stopping_min_delta=1e-3,
-        early_stopping_patience=20,
+        early_stopping_patience=100,
         num_workers=4,
-        log_freq=100,
+        log_freq=50,
         # time_to_elm_quantile_min=0.4,
         # time_to_elm_quantile_max=0.6,
         # contrastive_learning=True,
@@ -1018,7 +1062,7 @@ if __name__=='__main__':
         batch_norm=False,
         # fir_bp_low=5.,
         # fir_bp_high=250.,
-        use_wandb=True,
+        # use_wandb=True,
         # skip_data=True,
         # skip_train=True,
     )
