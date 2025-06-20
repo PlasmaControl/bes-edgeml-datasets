@@ -374,7 +374,7 @@ class Model(LightningModule, _Base_Class):
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
     elm_data_file: str|Path|Any = None
-    logger_dir: str|Path = None
+    log_dir: str|Path = None
     max_elms: int|Any = None
     batch_size: int = 256
     stride_factor: int = 8
@@ -622,7 +622,7 @@ class Data(_Base_Class, LightningDataModule):
                 pass
 
         state_dict = self.get_state_dict()
-        torch.save(state_dict, self.logger_dir/'state_dict.pt')
+        torch.save(state_dict, Path(self.log_dir)/'state_dict.pt')
 
     def _make_elm_data_split(self):
         assert len(self.global_elm_split) == 0
@@ -819,7 +819,8 @@ def main(
         max_elms: int|Any = None,
         signal_window_size: int = 1024,
         experiment_name: str = 'experiment_default',
-        restart_trial_dir: str|Path = None,
+        restart_trial_name: str = None,
+        wandb_id: str = None,
         # model
         lr = 1e-3,
         weight_decay = 1e-4,
@@ -854,7 +855,7 @@ def main(
         fir_bp_low = None,
         fir_bp_high = None,
         epochs_per_batch_size_reduction: int = 50,
-):
+) -> str:
 
     ### SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
@@ -907,18 +908,14 @@ def main(
 
     ### loggers
     loggers = []
-    if restart_trial_dir is None:
-        experiment_dir = Path(experiment_name).absolute()
-        experiment_dir.mkdir(parents=True, exist_ok=True)
+    experiment_dir = Path(experiment_name).absolute()
+    experiment_dir.mkdir(parents=True, exist_ok=True)
+    if restart_trial_name:
+        trial_name = restart_trial_name
+    else:
         datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
         trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
-    else:
-        restart_trial_dir = Path(restart_trial_dir).absolute()
-        assert restart_trial_dir.exists() and restart_trial_dir.is_dir()
-        experiment_dir = restart_trial_dir.parent.parent
-        experiment_name = restart_trial_dir.parent.name
-        trial_name = restart_trial_dir.name
     tb_logger = TensorBoardLogger(
         save_dir=experiment_dir.parent, # parent directory of the experiment directory
         name=experiment_name,  # experiment directory name
@@ -928,7 +925,7 @@ def main(
     loggers.append(tb_logger)
     trial_dir = Path(tb_logger.log_dir).absolute()
     if is_global_zero:
-        print(f"Trial directory: {trial_dir}")
+        print(f"Trial name: {trial_name}")
     if use_wandb:
         wandb.login()
         wandb_save_dir = experiment_dir
@@ -938,14 +935,17 @@ def main(
             save_dir=wandb_save_dir,
             project=wandb_project,
             name=wandb_name,
+            id=wandb_id,
+            resume='allow' if restart_trial_name else None,
         )
         wandb_logger.watch(
             model=lit_model, 
             log='all', 
             log_freq=log_freq,
         )
-        print(f"WandB log dir: {wandb_logger.log_dir}")
         loggers.append(wandb_logger)
+        if is_global_zero:
+            print(f"WandB ID: {wandb_logger.version}")
 
     if is_global_zero:
         print("Model Summary:")
@@ -972,7 +972,6 @@ def main(
         num_nodes = num_nodes,
         use_distributed_sampler=False,
         num_sanity_val_steps=0,
-        # reload_dataloaders_every_n_epochs=10,
     )
     lit_model.save_hyperparameters({
         'gradient_clip_val': gradient_clip_val, 
@@ -985,22 +984,25 @@ def main(
     assert trainer.local_rank == local_rank
     assert trainer.global_rank == rank
     assert trainer.is_global_zero == is_global_zero
+    assert trainer.log_dir == tb_logger.log_dir
 
-    ckpt_path=restart_trial_dir/'checkpoints/last.ckpt' if restart_trial_dir else None
+    ckpt_path=experiment_dir/restart_trial_name/'checkpoints/last.ckpt' if restart_trial_name else None
 
     ### data
     if not skip_data:
         if ckpt_path:
+            assert ckpt_path.exists(), f"Checkpoint does not exist: {ckpt_path}"
             print(f"Loading data from checkpoint: {ckpt_path}")
             lit_datamodule = Data.load_from_checkpoint(checkpoint_path=ckpt_path)
-            state_dict_file = ckpt_path.parent.parent/'state_dict.pt'
+            state_dict_file = experiment_dir/restart_trial_name/'state_dict.pt'
+            assert state_dict_file.exists(), f"State dict file does not exist: {state_dict_file}"
             print(f"Loading state_dict from: {state_dict_file}")
             state_dict = torch.load(state_dict_file)
             lit_datamodule.load_state_dict(state_dict)
         else:
             lit_datamodule = Data(
                 signal_window_size=signal_window_size,
-                logger_dir=trial_dir,
+                log_dir=trainer.log_dir,
                 elm_data_file=data_file,
                 max_elms=max_elms,
                 batch_size=batch_size,
@@ -1027,23 +1029,30 @@ def main(
             trainer.test(
                 model=lit_model, 
                 datamodule=lit_datamodule,
+                ckpt_path=ckpt_path,
             )
 
-    if is_global_zero:
-        print(f"Trial directory: {trial_dir}")
-
     if use_wandb:
-        print(f"WandB log dir: {wandb_logger.log_dir}")
-        print(f"WandB ID: {wandb_logger._id}")
+        wandb_id = wandb_logger.version
         wandb.finish()
+        if is_global_zero:
+            print(f"WB ID: {wandb_id}")
+    else:
+        wandb_id = None
+
+    if is_global_zero:
+        print(f"TB trial name: {trial_name}")
+
+    return (trial_name, wandb_id)
 
 if __name__=='__main__':
-    main(
-        restart_trial_dir='experiment_default/r2025_06_20_08_05_03',
+    trial_name, wandb_id = main(
+        restart_trial_name='r2025_06_20_12_41_38',
+        wandb_id='ynm8rjkt',
         data_file='small_data_100.hdf5',
         signal_window_size=512,
         max_elms=20,
-        max_epochs=5,
+        max_epochs=8,
         batch_size=128,
         epochs_per_batch_size_reduction=100,
         lr=1e-3,
@@ -1062,7 +1071,7 @@ if __name__=='__main__':
         batch_norm=False,
         # fir_bp_low=5.,
         # fir_bp_high=250.,
-        # use_wandb=True,
+        use_wandb=True,
         # skip_data=True,
         # skip_train=True,
     )
