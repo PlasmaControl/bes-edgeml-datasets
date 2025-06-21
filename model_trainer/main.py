@@ -122,13 +122,14 @@ class Model(LightningModule, _Base_Class):
             else:
                 raise ValueError
 
-        if self.is_global_zero: 
-            print("Batch evaluation (batch_size=128) with randn() data")
-            self.example_batch_data = torch.randn(
-                size=[128]+list(self.input_data_shape[1:]),
+        if self.is_global_zero:
+            n_test_batch_size = 512
+            print(f"Batch evaluation (batch_size={n_test_batch_size}) with randn() data")
+            example_batch_data = torch.randn(
+                size=[n_test_batch_size]+list(self.input_data_shape[1:]),
                 dtype=torch.float32,
             )
-            example_batch_output = self(self.example_batch_data)
+            example_batch_output = self(example_batch_data)
             for task_name, task_output in example_batch_output.items():
                 print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
 
@@ -398,7 +399,7 @@ class Data(_Base_Class, LightningDataModule):
         super(_Base_Class, self).__init__()
         self.save_hyperparameters()
         self.elm_data_file = Path(self.elm_data_file).absolute()
-        assert self.elm_data_file.exists()
+        assert self.elm_data_file.exists(), f"ELM data file {self.elm_data_file} does not exist"
         self.trainer: Trainer|Any = None
         self.batch_size_per_rank: int = 0
         self.a_coeffs = self.b_coeffs = None
@@ -847,7 +848,7 @@ def main(
         batch_size: int = 64,
         fraction_validation: float = 0.1,
         fraction_test: float = 0.0,
-        num_workers: int = 0,
+        num_workers: int = None,
         time_to_elm_quantile_min: float = None,
         time_to_elm_quantile_max: float = None,
         contrastive_learning: bool = True,
@@ -870,6 +871,7 @@ def main(
     print(f"Rank {rank} of world size {world_size} (local rank {local_rank} on node {node_rank})")
 
     ### model
+    print("\u2B1C Creating model")
     lit_model = Model(
         signal_window_size=signal_window_size,
         lr=lr,
@@ -887,7 +889,13 @@ def main(
     monitor_metric = lit_model.monitor_metric
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
 
+    if is_global_zero:
+        print("\u2B1C Model Summary:")
+        print(ModelSummary(lit_model, max_depth=-1))
+
     ### callbacks
+    if is_global_zero:
+        print("\u2B1C Creating callbacks")
     callbacks = [
         LearningRateMonitor(),
         ModelCheckpoint(
@@ -907,6 +915,8 @@ def main(
     ]
 
     ### loggers
+    if is_global_zero:
+        print("\u2B1C Creating loggers")
     loggers = []
     experiment_dir = Path(experiment_name).absolute()
     experiment_dir.mkdir(parents=True, exist_ok=True)
@@ -924,7 +934,7 @@ def main(
     )
     loggers.append(tb_logger)
     if is_global_zero:
-        print(f"Trial name: {trial_name}")
+        print(f"Tensorboard trial name: {trial_name}")
     if use_wandb:
         wandb.login()
         wandb_save_dir = experiment_dir
@@ -944,13 +954,11 @@ def main(
         )
         loggers.append(wandb_logger)
         if is_global_zero:
-            print(f"WandB ID: {wandb_logger.version}")
-
-    if is_global_zero:
-        print("Model Summary:")
-        print(ModelSummary(lit_model, max_depth=-1))
+            print(f"WandB ID/version: {wandb_logger.version}")
 
     ### initialize trainer
+    if is_global_zero:
+        print("\u2B1C Creating Trainer")
     if precision is None:
         precision = '16-mixed' if torch.cuda.is_available() else 32
     trainer = Trainer(
@@ -972,11 +980,6 @@ def main(
         use_distributed_sampler=False,
         num_sanity_val_steps=0,
     )
-    lit_model.save_hyperparameters({
-        'gradient_clip_val': gradient_clip_val, 
-        'gradient_clip_algorithm': gradient_clip_algorithm, 
-        'precision': precision,
-    })
 
     assert trainer.node_rank == node_rank
     assert trainer.world_size == world_size
@@ -989,6 +992,8 @@ def main(
 
     ### data
     if not skip_data:
+        if is_global_zero:
+            print("\u2B1C Creating data module")
         if ckpt_path:
             assert ckpt_path.exists(), f"Checkpoint does not exist: {ckpt_path}"
             print(f"Loading data from checkpoint: {ckpt_path}")
@@ -1019,6 +1024,8 @@ def main(
             )
 
     if not skip_train and not skip_data:
+        if is_global_zero:
+            print("\u2B1C Begin training")
         trainer.fit(
             model=lit_model, 
             datamodule=lit_datamodule,
@@ -1048,10 +1055,10 @@ if __name__=='__main__':
     trial_name, wandb_id = main(
         restart_trial_name='',
         wandb_id='',
-        data_file='small_data_100.hdf5',
+        data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
         signal_window_size=512,
         max_elms=20,
-        max_epochs=8,
+        max_epochs=4,
         batch_size=128,
         epochs_per_batch_size_reduction=100,
         lr=1e-3,
@@ -1059,7 +1066,7 @@ if __name__=='__main__':
         lr_warmup_epochs=5,
         early_stopping_min_delta=1e-3,
         early_stopping_patience=100,
-        num_workers=4,
+        # num_workers=4,
         log_freq=50,
         # time_to_elm_quantile_min=0.4,
         # time_to_elm_quantile_max=0.6,
@@ -1070,7 +1077,7 @@ if __name__=='__main__':
         batch_norm=False,
         # fir_bp_low=5.,
         # fir_bp_high=250.,
-        use_wandb=True,
+        # use_wandb=True,
         # skip_data=True,
         # skip_train=True,
     )
