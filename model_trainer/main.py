@@ -44,7 +44,7 @@ def print_fields(obj):
 
 @dataclasses.dataclass(eq=False)
 class _Base_Class:
-    signal_window_size: int = 1024
+    signal_window_size: int = 512
     is_global_zero: bool = False
 
     def __post_init__(self):
@@ -55,24 +55,26 @@ class _Base_Class:
 @dataclasses.dataclass(eq=False)
 class Model(LightningModule, _Base_Class):
     lr: float = 1e-3  # maximum LR used by first layer
-    lr_scheduler_patience: int = 20
+    lr_scheduler_patience: int = 100
     lr_scheduler_threshold: float = 1e-3
     lr_warmup_epochs: int = 5
     # lr_layerwise_decrement: float = 1.
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 2e-2
-    monitor_metric: str|Any = None #'sum_loss/val' f"{task}/{metric_name}/{stage}"
+    monitor_metric: str = None
     use_optimizer: str = 'SGD'
     no_bias: bool = False
     batch_norm: bool = True
+    feature_model_layers: Sequence[dict[str, Any]] = None
+    mlp_task_models: dict[str, dict[str, Any]] = None
 
     def __post_init__(self):
 
         # init superclasses
         super().__init__()
         super(LightningModule, self).__post_init__()
-
         self.save_hyperparameters()
+
         if self.is_global_zero:
             print_fields(self)
 
@@ -81,44 +83,54 @@ class Model(LightningModule, _Base_Class):
 
         # feature space sub-model
         self.feature_model: LightningModule = None
-        self.feature_space_size = None
+        self.feature_space_size: int = None
         self.make_feature_model()
 
-        # task sub-models and metrics
-        self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
-        self.task_models_layers = {}
+        # default task sub-model and metrics
+        assert self.feature_space_size
+        if self.mlp_task_models is None:
+            self.mlp_task_models = {
+                'elm_class': {  # specifications for a single MLP task
+                    'layers': (self.feature_space_size, 32, 1),
+                    'metrics': {
+                        'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
+                        'f1_score': sklearn.metrics.f1_score,
+                        'precision_score': sklearn.metrics.precision_score,
+                        'recall_score': sklearn.metrics.recall_score,
+                        'mean_stat': torch.mean,
+                        'std_stat': torch.std,
+                    },
+                    'monitor_metric': 'f1_score/val',
+                },
+            }        
+
+        # make task sub-models
         self.task_metrics: dict[str, dict] = {}
-
-        # Sub-model: ELM median time-to-ELM binary classifier
-        task_name = 'elm_class'
-        self.task_models[task_name] = self.make_mlp_classifier()
-        self.task_metrics[task_name] = {
-            'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
-            'f1_score': sklearn.metrics.f1_score,
-            'precision_score': sklearn.metrics.precision_score,
-            'recall_score': sklearn.metrics.recall_score,
-            'mean_stat': torch.mean,
-            'std_stat': torch.std,
-        }
-
-        # default monitor metric
-        if self.monitor_metric is None:
-            self.monitor_metric = "elm_class/f1_score/val"
+        self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
+        for task_name, task_dict in self.mlp_task_models.items():
+            self.zprint(f'Task sub-model: {task_name}')
+            task_layers = task_dict['layers']
+            task_metrics = task_dict['metrics']
+            self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
+            self.task_metrics[task_name] = task_metrics.copy()
+            if self.monitor_metric is None:
+                # if not specified, use `monitor_metric` from first task
+                self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
 
         # initialize model parameters
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
-        if self.is_global_zero: print(f"Total model parameters: {self.total_parameters:,}")
-        if self.is_global_zero: print("Initializing model to uniform random weights and biases=0")
+        self.zprint(f"Total model parameters: {self.total_parameters:,}")
+        self.zprint("Initializing model to uniform random weights and biases=0")
         for name, param in self.named_parameters():
             if 'bn' in name: continue
             if name.endswith("bias"):
-                if self.is_global_zero: print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
+                self.zprint(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
             elif name.endswith("weight"):
                 n_in = np.prod(param.shape[1:])
                 sqrt_k = np.sqrt(3. / n_in)
                 param.data.uniform_(-sqrt_k, sqrt_k)
-                if self.is_global_zero: print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
+                self.zprint(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
             else:
                 raise ValueError
 
@@ -134,23 +146,21 @@ class Model(LightningModule, _Base_Class):
                 print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
 
     def make_feature_model(self) -> None:
-
-        if self.is_global_zero: print("Feature space sub-model")
+        self.zprint("Feature space sub-model")
+        if self.feature_model_layers is None:
+            self.feature_model_layers = (
+                {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
+                {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
+                {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
+                {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
+                {'out_channels': 16, 'kernel': (1, 4, 4), 'stride': 1, 'bias':True},
+            )
 
         feature_layer_dict = OrderedDict()
-
-        conv_layers = (
-            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
-            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
-            {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
-            {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
-            {'out_channels': 16, 'kernel': (1, 4, 4), 'stride': 1, 'bias':True},
-        )
-
         data_shape = self.input_data_shape
-        if self.is_global_zero: print(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
+        self.zprint(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
         out_channels: int|Any = None
-        for i_layer, layer in enumerate(conv_layers):
+        for i_layer, layer in enumerate(self.feature_model_layers):
             conv_layer_name = f"L{i_layer:02d}_Conv"
             bias = layer['bias'] and not self.no_bias
             conv = torch.nn.Conv3d(
@@ -162,8 +172,7 @@ class Model(LightningModule, _Base_Class):
             )
             n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
-            if self.is_global_zero: 
-                print(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
+            self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
             feature_layer_dict[conv_layer_name] = conv
             feature_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
@@ -175,30 +184,28 @@ class Model(LightningModule, _Base_Class):
         self.feature_space_size = self.feature_model(torch.zeros(self.input_data_shape)).numel()
 
         n_params = sum(p.numel() for p in self.feature_model.parameters() if p.requires_grad)
-        if self.is_global_zero: print(f"  Feature sub-model parameters: {n_params:,d}")
-        if self.is_global_zero: print(f"  Feature space size: {self.feature_space_size}")
+        self.zprint(f"  Feature sub-model parameters: {n_params:,d}")
+        self.zprint(f"  Feature space size: {self.feature_space_size}")
 
-    def make_mlp_classifier(self) -> torch.nn.Module:
-
-        if self.is_global_zero: print("MLP classifier sub-model")
-
+    def make_mlp_classifier(
+            self,
+            mlp_layers: Sequence[int] = None,
+    ) -> torch.nn.Module:
+        self.zprint("MLP classifier sub-model")
         mlp_layer_dict = OrderedDict()
-
-        assert self.feature_space_size
-        mlp_layer_sizes = (self.feature_space_size, 32, 1)
-        n_layers = len(mlp_layer_sizes)
+        assert mlp_layers
+        n_layers = len(mlp_layers)
 
         for i_layer in range(n_layers-1):
             mlp_layer_name = f"L{i_layer:02d}_FC"
             bias = (True and not self.no_bias) if i_layer+1<n_layers-1 else False
             mlp_layer = torch.nn.Linear(
-                in_features=mlp_layer_sizes[i_layer],
-                out_features=mlp_layer_sizes[i_layer+1],
+                in_features=mlp_layers[i_layer],
+                out_features=mlp_layers[i_layer+1],
                 bias=bias,
             )
             n_params = sum(p.numel() for p in mlp_layer.parameters() if p.requires_grad)
-            if self.is_global_zero: 
-                print(f"  {mlp_layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
+            self.zprint(f"  {mlp_layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
             mlp_layer_dict[mlp_layer_name] = mlp_layer
             if i_layer+1 < n_layers-1:
                 mlp_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
@@ -206,14 +213,14 @@ class Model(LightningModule, _Base_Class):
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
         n_params = n_params = sum(p.numel() for p in mlp_classifier.parameters() if p.requires_grad)
-        if self.is_global_zero: print(f"  MLP sub-model parameters: {n_params:,d}")
+        self.zprint(f"  MLP sub-model parameters: {n_params:,d}")
 
         return mlp_classifier
 
     def configure_optimizers(self):
         # parameter_group = []
         # lr = self.lr
-        # if self.is_global_zero: print("Initial layer-wise learning rates")
+        # self.zprint("Initial layer-wise learning rates")
         # for layer_name, layer in self.feature_model.named_children():
         #     if 'bn' in layer_name:
         #         for param_name, param in layer.named_parameters():
@@ -229,7 +236,7 @@ class Model(LightningModule, _Base_Class):
         #                 'params': param,
         #                 'lr': param_lr,
         #             })
-        #             if self.is_global_zero: print(f"  {layer_name} {param_name} {param_lr:.3e}")
+        #             self.zprint(f"  {layer_name} {param_name} {param_lr:.3e}")
         #         lr /= self.lr_layerwise_decrement
         # lr_after_feature_model = lr
         # for task_name, task_model in self.task_models.items():
@@ -249,37 +256,38 @@ class Model(LightningModule, _Base_Class):
         #                     'params': param,
         #                     'lr': param_lr,
         #                 })
-        #                 if self.is_global_zero: print(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
+        #                 self.zprint(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
         #             lr /= self.lr_layerwise_decrement
 
-        if self.is_global_zero: print(f"Using {self.use_optimizer.upper()} optimizer")
+        self.zprint(f"Using {self.use_optimizer.upper()} optimizer")
+        optimizer = None
         if self.use_optimizer.lower() == 'sgd':
-            self.optimizer = torch.optim.SGD(
+            optimizer = torch.optim.SGD(
                 self.parameters(),
                 lr=self.lr,
                 weight_decay=self.weight_decay,
                 momentum=0.2,
             )
         elif self.use_optimizer.lower() == 'adam':
-            self.optimizer = torch.optim.Adam(
+            optimizer = torch.optim.Adam(
                 self.parameters(),
                 lr=self.lr,
                 weight_decay=self.weight_decay,
             )
 
         lr_reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer=self.optimizer,
+            optimizer=optimizer,
             factor=0.5,
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
             mode='min' if 'loss' in self.monitor_metric else 'max',
         )
         lr_warm_up = torch.optim.lr_scheduler.LinearLR(
-            optimizer=self.optimizer,
+            optimizer=optimizer,
             start_factor=0.05,
             total_iters=self.lr_warmup_epochs,
         )
-        return_optim_list = [self.optimizer]
+        return_optim_list = [optimizer]
         return_lr_scheduler_list = [
             {'scheduler': lr_reduce_on_plateau, 'monitor': self.monitor_metric},
             lr_warm_up, 
@@ -337,13 +345,11 @@ class Model(LightningModule, _Base_Class):
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
-        if self.is_global_zero:
-            print(f"**** Fit start with global step {self.trainer.global_step} ****")
+        self.zprint(f"**** Fit start with global step {self.trainer.global_step} ****")
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
-        if self.is_global_zero:
-            print(f"Fit time: {delt/60:0.1f} min")
+        self.zprint(f"Fit time: {delt/60:0.1f} min")
 
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
@@ -370,6 +376,10 @@ class Model(LightningModule, _Base_Class):
         assert self.is_global_zero == self.trainer.is_global_zero
         if self.is_global_zero:
             assert self.global_rank == 0
+
+    def zprint(self, text: str = ''):
+        if self.is_global_zero:
+            print(text)
 
 
 @dataclasses.dataclass(eq=False)
@@ -530,10 +540,6 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"  Skipped global signal windows for outliers (threshold {self.outlier_value} V): {global_outliers}")
         self.zprint(f"  Valid global signal windows: {len(global_sw_metadata_list):,d}")
 
-        # n_signal_windows = len(global_sw_metadata_list)
-        # self.rprint(f"Global signal windows: {n_signal_windows:,d}  ({global_outliers:,d} outliers removed)")
-        # self.rprint(f"Global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
-
         # Raw signal stats
         mean, stdev, time_to_elm_quantiles = \
             self.get_statistics_for_global_stage(signal_windows=global_sw_metadata_list)
@@ -549,19 +555,6 @@ class Data(_Base_Class, LightningDataModule):
             })
         else:
             assert self.elm_raw_signal_mean and self.elm_raw_signal_stdev and self.time_to_elm_quantiles
-
-        # time-to-ELM quantiles
-        # if sub_stage == 'train':
-        #     self.zprint("  Calculating time-to-ELM quantiles")
-        #     quantiles = (0.05, 0.1, 0.25, 0.5, 0.75, 0.9, 0.95)
-        #     time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in global_sw_metadata_list]
-        #     quantile_values = np.quantile(time_to_elm_labels, quantiles)
-        #     self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
-        #     self.zprint(f"  Time-to-ELM quantiles for binary labels:")
-        #     for q, qval in self.time_to_elm_quantiles.items():
-        #         self.zprint(f"    Quantile {q:.2f}: {qval:.1f} ms")
-        #     self.save_hyperparameters({'time_to_elm_quantiles': self.time_to_elm_quantiles})
-        # assert self.time_to_elm_quantiles
 
         # restrict data according to quantiles
         if self.time_to_elm_quantile_min is not None and self.time_to_elm_quantile_max is not None:
@@ -581,8 +574,8 @@ class Data(_Base_Class, LightningDataModule):
                         global_sw_metadata_list.pop(i)
             if self.is_global_zero:
                 n_signal_windows = len(global_sw_metadata_list)
-                self.rprint(f"Restricted global signal windows: {n_signal_windows:,d}")
-                self.rprint(f"Restricted global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
+                self.zprint(f"Restricted global signal windows: {n_signal_windows:,d}")
+                self.zprint(f"Restricted global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
         return global_sw_metadata_list
 
@@ -769,8 +762,7 @@ class Data(_Base_Class, LightningDataModule):
         default_batch_size_per_rank = self.batch_size // self.trainer.world_size
         new_batch_size_per_rank = default_batch_size_per_rank // (2**batch_size_reduction_factor)
         if self._modified_batch_size_per_rank and self._modified_batch_size_per_rank != new_batch_size_per_rank:
-            if self.is_global_zero:
-                print(f"New global batchsize: {new_batch_size_per_rank*self.trainer.world_size}")
+            self.zprint(f"New global batchsize: {new_batch_size_per_rank*self.trainer.world_size}")
         self._modified_batch_size_per_rank = new_batch_size_per_rank
         return torch.utils.data.DataLoader(
             dataset=self.elm_datasets[stage],
@@ -843,7 +835,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
 def main(
         data_file: str|Path,
         max_elms: int = None,
-        signal_window_size: int = 1024,
+        signal_window_size: int = 512,
         experiment_name: str = 'experiment_default',
         restart_trial_name: str = None,
         wandb_id: str = None,
@@ -856,6 +848,8 @@ def main(
         use_optimizer: str = 'SGD',
         no_bias: bool = False,
         batch_norm: bool = True,
+        feature_model_layers = None,
+        mlp_task_models = None,
         # loggers
         log_freq: int = 100,
         use_wandb: bool = False,
@@ -909,7 +903,9 @@ def main(
         is_global_zero=is_global_zero,
         # lr_layerwise_decrement=layerwise_lr_decrement,
         no_bias=no_bias,
-        batch_norm=batch_norm
+        batch_norm=batch_norm,
+        feature_model_layers=feature_model_layers,
+        mlp_task_models=mlp_task_models,
     )
     monitor_metric = lit_model.monitor_metric
     metric_mode = 'min' if 'loss' in monitor_metric else 'max'
@@ -1080,11 +1076,11 @@ if __name__=='__main__':
     trial_name, wandb_id = main(
         restart_trial_name='',
         wandb_id='',
-        # data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
-        data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
+        data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
+        # data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
         signal_window_size=512,
-        # max_elms=20,
-        max_epochs=100,
+        max_elms=20,
+        max_epochs=2,
         batch_size=128,
         epochs_per_batch_size_reduction=100,
         lr=1e-3,
@@ -1103,7 +1099,7 @@ if __name__=='__main__':
         batch_norm=False,
         # fir_bp_low=5.,
         # fir_bp_high=250.,
-        use_wandb=True,
+        # use_wandb=True,
         # skip_data=True,
         # skip_train=True,
     )
