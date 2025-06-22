@@ -80,12 +80,12 @@ class Model(LightningModule, _Base_Class):
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
-        self.feature_model = None
+        self.feature_model: LightningModule = None
         self.feature_space_size = None
         self.make_feature_model()
 
         # task sub-models and metrics
-        self.task_models = torch.nn.ModuleDict()
+        self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
         self.task_models_layers = {}
         self.task_metrics: dict[str, dict] = {}
 
@@ -466,7 +466,7 @@ class Data(_Base_Class, LightningDataModule):
             signal_window_list = self.prepare_global_stage_data(sub_stage)
             self.prepare_rank_data_for_stage(sub_stage, signal_window_list)
 
-    def prepare_global_stage_data(self, sub_stage) -> list:
+    def prepare_global_stage_data(self, sub_stage):
         self.zprint("\u2B1C " + f"Preparing global data for stage: {sub_stage.upper()}")
         assert sub_stage in ['train', 'validation', 'test', 'predict']
         if sub_stage in self.elm_datasets and isinstance(self.elm_datasets[sub_stage], torch.utils.data.Dataset):
@@ -850,7 +850,7 @@ def main(
         # model
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
-        lr_scheduler_patience: int = 20,
+        lr_scheduler_patience: int = 100,
         lr_warmup_epochs: int = 5,
         monitor_metric = None,
         use_optimizer: str = 'SGD',
@@ -861,7 +861,7 @@ def main(
         use_wandb: bool = False,
         # callbacks
         early_stopping_min_delta: float = 1e-3,
-        early_stopping_patience: int = 20,
+        early_stopping_patience: int = 100,
         # trainer
         max_epochs = 2,
         gradient_clip_val: float = None,
@@ -880,8 +880,8 @@ def main(
         min_pre_elm_time: float = None,
         fir_bp_low: float = None,
         fir_bp_high: float = None,
-        epochs_per_batch_size_reduction: int = 50,
-) -> str:
+        epochs_per_batch_size_reduction: int = 100,
+) -> tuple:
 
     ### SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
@@ -1026,7 +1026,7 @@ def main(
             state_dict_file = experiment_dir/restart_trial_name/'state_dict.pt'
             assert state_dict_file.exists(), f"State dict file does not exist: {state_dict_file}"
             print(f"Loading state_dict from: {state_dict_file}")
-            state_dict = torch.load(state_dict_file)
+            state_dict = torch.load(state_dict_file, weights_only=False)
             lit_datamodule.load_state_dict(state_dict)
         else:
             lit_datamodule = Data(
@@ -1080,19 +1080,20 @@ if __name__=='__main__':
     trial_name, wandb_id = main(
         restart_trial_name='',
         wandb_id='',
-        data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
+        # data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
+        data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
         signal_window_size=512,
         # max_elms=20,
-        max_epochs=4,
-        batch_size=64,
+        max_epochs=100,
+        batch_size=128,
         epochs_per_batch_size_reduction=100,
         lr=1e-3,
-        lr_scheduler_patience=50,
+        lr_scheduler_patience=100,
         lr_warmup_epochs=5,
         early_stopping_min_delta=1e-3,
         early_stopping_patience=100,
-        # num_workers=4,
-        log_freq=50,
+        num_workers=4,
+        log_freq=100,
         # time_to_elm_quantile_min=0.4,
         # time_to_elm_quantile_max=0.6,
         # contrastive_learning=True,
@@ -1102,7 +1103,7 @@ if __name__=='__main__':
         batch_norm=False,
         # fir_bp_low=5.,
         # fir_bp_high=250.,
-        # use_wandb=True,
+        use_wandb=True,
         # skip_data=True,
         # skip_train=True,
     )
