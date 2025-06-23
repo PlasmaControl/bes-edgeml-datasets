@@ -1,16 +1,17 @@
-from main import main
-
-data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5'
-# data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5'
+from model_trainer.main import main
 
 num_workers = 4
-max_elms = None
-max_epochs = 80
 
 
 def scenario_128(
         batch_size=128,
         lr=1e-3,
+        max_epochs=5,
+        max_elms=None,
+        use_wandb=False,
+        experiment_name='experiment_default',
+        # data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
+        data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
 ):
     feature_model_layers = (
         {'out_channels': 2, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': False},
@@ -22,14 +23,14 @@ def scenario_128(
     mlp_task_models=None
     main(
         signal_window_size=128,
-        experiment_name='experiment_128_v1',
         no_bias=True,
         batch_norm=False,
-        use_wandb=True,
         # skip_data=True,
         # skip_train=True,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
+        use_wandb=use_wandb,
+        experiment_name=experiment_name,
         feature_model_layers=feature_model_layers,
         mlp_task_models=mlp_task_models,
         batch_size=batch_size,
@@ -41,8 +42,8 @@ def scenario_128(
     )
 
 if __name__=='__main__':
-    # scenario_128()
-    for _ in range(3):
-        scenario_128(batch_size=64)
-        scenario_128(batch_size=128)
-        scenario_128(batch_size=256)
+    scenario_128()
+    # for _ in range(3):
+    #     scenario_128(batch_size=64)
+    #     scenario_128(batch_size=128)
+    #     scenario_128(batch_size=256)
