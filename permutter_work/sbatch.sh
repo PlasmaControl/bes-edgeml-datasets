@@ -43,6 +43,7 @@ echo UNIQUE_IDENTIFIER: $UNIQUE_IDENTIFIER
 
 export WANDB__SERVICE_WAIT=500
 
+
 SCRIPT=${PWD}/job.py
 echo Script: $SCRIPT
 
@@ -53,9 +54,9 @@ cd $JOB_DIR || exit
 echo Current directory: $PWD
 
 START_TIME=$(date +%s)
-srun --unbuffered python -c $SCRIPT
+srun --unbuffered python $SCRIPT
 EXIT_CODE=$?
 END_TIME=$(date +%s)
 echo Slurm elapsed time $(( (END_TIME - START_TIME)/60 )) min
 
-exit $EXIT_CODE
+echo Exit code: $EXIT_CODE

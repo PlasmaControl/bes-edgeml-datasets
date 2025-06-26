@@ -46,6 +46,8 @@ def print_fields(obj):
 class _Base_Class:
     signal_window_size: int = 512
     is_global_zero: bool = False
+    world_size: int = None
+    world_rank: int = None
 
     def __post_init__(self):
         assert np.log2(self.signal_window_size).is_integer(), \
@@ -327,8 +329,12 @@ class Model(LightningModule, _Base_Class):
                     #     metric_value /= 10
                 elif 'stat' in metric_name:
                     metric_value = metric_function(task_outputs)
+                # if stage=='val':
+                # self.zprint(f"logging {task}/{metric_name}/{stage}: {metric_value:.3f}, {batch_idx}")
                 self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True)            
 
+        # if stage=='val':
+        # self.zprint(f"logging sum_loss/{stage}: {sum_loss:.3f}, {batch_idx}")
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         return sum_loss
 
@@ -345,21 +351,44 @@ class Model(LightningModule, _Base_Class):
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
-        self.zprint(f"**** Fit start with global step {self.trainer.global_step} ****")
+        self.zprint(f"**** Fit start with global step {self.trainer.global_step} and epoch {self.current_epoch} ****")
 
-    def on_fit_end(self) -> None:
-        delt = time.time() - self.t_fit_start
-        self.zprint(f"Fit time: {delt/60:0.1f} min")
+    # def on_train_start(self):
+    #     self.zprint("Train start")
 
     def on_train_epoch_start(self):
+        # self.zprint("Train epoch start")
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
 
+    def on_train_batch_start(self, batch, batch_idx):
+        if batch_idx % 25 == 0:
+            self.zprint(f"Train batch start: batch {batch_idx}")
+
+    # def on_validation_model_eval(self):
+    #     self.zprint("Validation model eval")
+
+    # def on_validation_epoch_start(self):
+    #     self.zprint("Validation epoch start")
+
+    def on_validation_batch_start(self, batch, batch_idx, dataloader_idx=0):
+        self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
+
+    # def on_validation_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0):
+    #     self.zprint(f"Validation batch end: batch {batch_idx}, dataloader {dataloader_idx}")
+
+    # def on_validation_epoch_end(self):
+    #     self.zprint("Validation epoch end")
+
+    # def on_validation_model_train(self):
+    #     self.zprint("Validation model train")
+
     def on_train_epoch_end(self):
-        epoch_time = time.time() - self.t_train_epoch_start
-        global_time = time.time() - self.t_fit_start
-        epoch_steps = self.global_step-self.s_train_epoch_start
+        # self.zprint("Train epoch end")
         if self.is_global_zero and self.global_step > 0:
+            epoch_time = time.time() - self.t_train_epoch_start
+            global_time = time.time() - self.t_fit_start
+            epoch_steps = self.global_step-self.s_train_epoch_start
             logged_metrics = self.trainer.logged_metrics
             line =  f"Ep {self.current_epoch:03d}  "
             line += f"train/val loss {logged_metrics['sum_loss/train']:.3f}/"
@@ -367,6 +396,13 @@ class Model(LightningModule, _Base_Class):
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
             line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
+
+    # def on_train_end(self):
+    #     self.zprint("Train end")
+
+    def on_fit_end(self) -> None:
+        delt = time.time() - self.t_fit_start
+        self.rprint(f"Fit time: {delt/60:0.1f} min")
 
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
@@ -381,6 +417,12 @@ class Model(LightningModule, _Base_Class):
         if self.is_global_zero:
             print(text)
 
+    def rprint(self, text: str = ''):
+        if self.world_size > 1:
+            print(f"  Rank {self.trainer.global_rank}: {text}")
+        else:
+            print(f"  {text}")
+
 
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
@@ -389,7 +431,7 @@ class Data(_Base_Class, LightningDataModule):
     max_elms: int|Any = None
     batch_size: int = 256
     stride_factor: int = 8
-    num_workers: int|Any = None
+    num_workers: int = 4
     outlier_value: float = 6
     fraction_validation: float = 0.12
     fraction_test: float = 0.0
@@ -574,8 +616,8 @@ class Data(_Base_Class, LightningDataModule):
                         global_sw_metadata_list.pop(i)
             if self.is_global_zero:
                 n_signal_windows = len(global_sw_metadata_list)
-                self.zprint(f"Restricted global signal windows: {n_signal_windows:,d}")
-                self.zprint(f"Restricted global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
+                print(f"Restricted global signal windows: {n_signal_windows:,d}")
+                print(f"Restricted global steps per epoch {n_signal_windows/self.batch_size:,.1f}")
 
         return global_sw_metadata_list
 
@@ -593,7 +635,9 @@ class Data(_Base_Class, LightningDataModule):
             [item['shot'] for item in sw_for_rank],
             dtype=int,
         ))
-        self.rprint(f"Shots/ELMs/SigWin: {len(shots_for_rank):,d}/{len(elms_for_rank):,d}/{len(sw_for_rank):,d}")
+        self.barrier()
+        self.rprint(f"Shots/ELMs/SigWin/BatchesPerEpoch: {len(shots_for_rank):,d}/{len(elms_for_rank):,d}/{len(sw_for_rank):,d}/{len(sw_for_rank)/(self.batch_size/self.world_size):,.1f}")
+        self.barrier()
 
         # get rank-wise ELM signals
         signals_for_rank = {}
@@ -735,25 +779,23 @@ class Data(_Base_Class, LightningDataModule):
         return (mean.item(), stdev.item(), time_to_elm_quantiles)
 
     def train_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._elm_train_val_test_dataloaders('train')
+        return self.elm_dataloaders('train')
 
     def val_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._elm_train_val_test_dataloaders('validation')
+        return self.elm_dataloaders('validation')
 
     def test_dataloader(self) -> torch.utils.data.DataLoader:
-        return self._elm_train_val_test_dataloaders('test')
+        return self.elm_dataloaders('test')
 
     def predict_dataloader(self) -> None:
         pass
 
-    def _elm_train_val_test_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
+    def elm_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
         sampler = (
             torch.utils.data.RandomSampler(data_source=self.elm_datasets[stage])
             if stage == 'train'
             else torch.utils.data.SequentialSampler(data_source=self.elm_datasets[stage])
         )
-        if self.num_workers is None:
-            self.num_workers = 2 if self.trainer.world_size==1 else 0
         batch_size_reduction_factor = (
             min(3, self.trainer.current_epoch//self.epochs_per_batch_size_reduction) 
             if stage=='train' 
@@ -769,10 +811,10 @@ class Data(_Base_Class, LightningDataModule):
             sampler=sampler,
             batch_size=self._modified_batch_size_per_rank,  # batch size per rank
             num_workers=self.num_workers,
-            prefetch_factor=2 if self.num_workers else None,
+            prefetch_factor=2,
             pin_memory=True,
-            drop_last=True,
-            persistent_workers=True,
+            drop_last=True if stage=='train' else False,
+            persistent_workers=False,
         )
 
     def get_state_dict(self) -> dict:
@@ -799,6 +841,11 @@ class Data(_Base_Class, LightningDataModule):
             print(f"  Rank {self.trainer.global_rank}: {text}")
         else:
             print(f"  {text}")
+
+    def barrier(self):
+        if self.world_size > 1:
+            # pass
+            torch.distributed.barrier()
 
 
 @dataclasses.dataclass(eq=False)
@@ -867,7 +914,7 @@ def main(
         batch_size: int = 64,
         fraction_validation: float = 0.1,
         fraction_test: float = 0.0,
-        num_workers: int = None,
+        num_workers: int = 4,
         time_to_elm_quantile_min: float = None,
         time_to_elm_quantile_max: float = None,
         contrastive_learning: bool = True,
@@ -880,17 +927,19 @@ def main(
     ### SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
     world_size = int(os.getenv("SLURM_NTASKS", default=1))
-    rank = int(os.getenv("SLURM_PROCID", default=0))
+    world_rank = int(os.getenv("SLURM_PROCID", default=0))
     local_rank = int(os.getenv("SLURM_LOCALID", default=0))
     node_rank = int(os.getenv("SLURM_NODEID", default=0))
 
-    is_global_zero = rank == 0
+    print(f"Rank {world_rank} of world size {world_size} (local rank {local_rank} on node {node_rank})")
+
+    is_global_zero = world_rank == 0
     if is_global_zero:
         print(f"World size {world_size} on {num_nodes} node(s)")
-    print(f"Rank {rank} of world size {world_size} (local rank {local_rank} on node {node_rank})")
 
     ### model
-    print("\u2B1C Creating model")
+    if is_global_zero:
+        print("\u2B1C Creating model")
     lit_model = Model(
         signal_window_size=signal_window_size,
         lr=lr,
@@ -901,6 +950,8 @@ def main(
         monitor_metric=monitor_metric,
         use_optimizer=use_optimizer,
         is_global_zero=is_global_zero,
+        world_size=world_size,
+        world_rank=world_rank,
         # lr_layerwise_decrement=layerwise_lr_decrement,
         no_bias=no_bias,
         batch_norm=batch_norm,
@@ -998,14 +1049,14 @@ def main(
             static_graph=True,
         ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
-        use_distributed_sampler=False,
+        # use_distributed_sampler=False,
         num_sanity_val_steps=0,
     )
 
     assert trainer.node_rank == node_rank
     assert trainer.world_size == world_size
     assert trainer.local_rank == local_rank
-    assert trainer.global_rank == rank
+    assert trainer.global_rank == world_rank
     assert trainer.is_global_zero == is_global_zero
     assert trainer.log_dir == tb_logger.log_dir
 
@@ -1038,6 +1089,8 @@ def main(
                 time_to_elm_quantile_max=time_to_elm_quantile_max,
                 contrastive_learning=contrastive_learning,
                 is_global_zero=is_global_zero,
+                world_size=world_size,
+                world_rank=world_rank,
                 min_pre_elm_time=min_pre_elm_time,
                 fir_bp_low=fir_bp_low,
                 fir_bp_high=fir_bp_high,
@@ -1076,18 +1129,18 @@ if __name__=='__main__':
     main(
         restart_trial_name='',
         wandb_id='',
-        data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
-        # data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
+        # data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
+        data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
         signal_window_size=512,
         max_elms=20,
         max_epochs=2,
         batch_size=128,
         lr=1e-3,
-        num_workers=0,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         no_bias=True,
         batch_norm=False,
+        num_workers=1,
         # time_to_elm_quantile_min=0.4,
         # time_to_elm_quantile_max=0.6,
         # contrastive_learning=True,
