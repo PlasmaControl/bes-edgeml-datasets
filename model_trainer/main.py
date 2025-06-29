@@ -363,7 +363,7 @@ class Model(LightningModule, _Base_Class):
 
     def on_train_batch_start(self, batch, batch_idx):
         if batch_idx % 25 == 0:
-            self.zprint(f"Train batch start: batch {batch_idx}")
+            self.rprint(f"Train batch start: batch {batch_idx}")
 
     # def on_validation_model_eval(self):
     #     self.zprint("Validation model eval")
@@ -791,10 +791,18 @@ class Data(_Base_Class, LightningDataModule):
         pass
 
     def elm_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
-        sampler = (
-            torch.utils.data.RandomSampler(data_source=self.elm_datasets[stage])
-            if stage == 'train'
-            else torch.utils.data.SequentialSampler(data_source=self.elm_datasets[stage])
+        # sampler = (
+        #     torch.utils.data.RandomSampler(data_source=self.elm_datasets[stage])
+        #     if stage == 'train'
+        #     else torch.utils.data.SequentialSampler(data_source=self.elm_datasets[stage])
+        # )
+        sampler = torch.utils.data.DistributedSampler(
+            dataset=self.elm_datasets[stage],
+            # num_replicas=1,
+            # rank=0,
+            shuffle=True if stage=='train' else False,
+            seed=int(np.random.default_rng().integers(0, 2**32-1)),
+            drop_last=True if stage=='train' else False,
         )
         batch_size_reduction_factor = (
             min(3, self.trainer.current_epoch//self.epochs_per_batch_size_reduction) 
@@ -814,7 +822,7 @@ class Data(_Base_Class, LightningDataModule):
             prefetch_factor=2,
             pin_memory=True,
             drop_last=True if stage=='train' else False,
-            persistent_workers=False,
+            # persistent_workers=False,
         )
 
     def get_state_dict(self) -> dict:
@@ -1049,7 +1057,7 @@ def main(
             static_graph=True,
         ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
-        # use_distributed_sampler=False,
+        use_distributed_sampler=False,
         num_sanity_val_steps=0,
     )
 
