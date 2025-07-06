@@ -1,13 +1,14 @@
 from pathlib import Path
 import dataclasses
 from datetime import datetime
-from typing import OrderedDict, Any, Sequence
+from typing import OrderedDict, Sequence
 import os
 import time
 
 import numpy as np
-import sklearn.metrics
 import scipy.signal
+import sklearn.metrics
+from sklearn.model_selection import train_test_split 
 import h5py
 import wandb
 
@@ -25,6 +26,7 @@ from lightning.pytorch.callbacks import \
     LearningRateMonitor, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 from lightning.pytorch.utilities import grad_norm
+from lightning.pytorch.utilities.combined_loader import CombinedLoader
 
 torch.set_float32_matmul_precision('medium')
 torch.set_default_dtype(torch.float32)
@@ -66,9 +68,9 @@ class Model(LightningModule, _Base_Class):
     monitor_metric: str = None
     use_optimizer: str = 'SGD'
     no_bias: bool = False
-    batch_norm: bool = True
-    feature_model_layers: Sequence[dict[str, Any]] = None
-    mlp_task_models: dict[str, dict[str, Any]] = None
+    batch_norm: bool = False
+    feature_model_layers: Sequence[dict[str, LightningModule]] = None
+    mlp_task_models: dict[str, dict[str, LightningModule]] = None
 
     def __post_init__(self):
 
@@ -107,6 +109,7 @@ class Model(LightningModule, _Base_Class):
             }        
 
         # make task sub-models
+        self.task_names = list(self.mlp_task_models.keys())
         self.task_metrics: dict[str, dict] = {}
         self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
         for task_name, task_dict in self.mlp_task_models.items():
@@ -122,30 +125,33 @@ class Model(LightningModule, _Base_Class):
         # initialize model parameters
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         self.zprint(f"Total model parameters: {self.total_parameters:,}")
-        self.zprint("Initializing model to uniform random weights and biases=0")
-        for name, param in self.named_parameters():
-            if 'bn' in name: continue
-            if name.endswith("bias"):
-                self.zprint(f"  {name}: initialized to zeros (numel {param.data.numel()})")
-                param.data.fill_(0)
-            elif name.endswith("weight"):
-                n_in = np.prod(param.shape[1:])
-                sqrt_k = np.sqrt(3. / n_in)
-                param.data.uniform_(-sqrt_k, sqrt_k)
-                self.zprint(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
-            else:
-                raise ValueError
+        if self.is_global_zero: 
+            self.zprint("Initializing model to uniform random weights and biases=0")
+            for name, param in self.named_parameters():
+                if 'bn' in name: continue
+                if name.endswith("bias"):
+                    self.zprint(f"  {name}: initialized to zeros (numel {param.data.numel()})")
+                    param.data.fill_(0)
+                elif name.endswith("weight"):
+                    n_in = np.prod(param.shape[1:])
+                    sqrt_k = np.sqrt(3. / n_in)
+                    param.data.uniform_(-sqrt_k, sqrt_k)
+                    self.zprint(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
+                else:
+                    raise ValueError
 
-        if self.is_global_zero:
-            n_test_batch_size = 512
-            print(f"Batch evaluation (batch_size={n_test_batch_size}) with randn() data")
-            example_batch_data = torch.randn(
-                size=[n_test_batch_size]+list(self.input_data_shape[1:]),
-                dtype=torch.float32,
-            )
-            example_batch_output = self(example_batch_data)
-            for task_name, task_output in example_batch_output.items():
-                print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
+                print(f"Batch evaluation (batch_size=512) with randn() data")
+                example_batch_data = torch.randn(
+                    size=[512]+list(self.input_data_shape[1:]),
+                    dtype=torch.float32,
+                )
+                example_batch_output = self(example_batch_data)
+                for task_name, task_output in example_batch_output.items():
+                    print(f"  {task_name} output shape: {task_output.shape}  mean: {torch.mean(task_output):.3e}  var: {torch.var(task_output):.3e}")
+
+    @staticmethod
+    def param_count(model: LightningModule) -> int:
+        return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     def make_feature_model(self) -> None:
         self.zprint("Feature space sub-model")
@@ -160,8 +166,8 @@ class Model(LightningModule, _Base_Class):
 
         feature_layer_dict = OrderedDict()
         data_shape = self.input_data_shape
-        self.zprint(f"  Data shape: {data_shape}  (size {np.prod(data_shape)})")
-        out_channels: int|Any = None
+        self.zprint(f"  Input data shape: {data_shape}  (size {np.prod(data_shape)})")
+        out_channels: int = None
         for i_layer, layer in enumerate(self.feature_model_layers):
             conv_layer_name = f"L{i_layer:02d}_Conv"
             bias = layer['bias'] and not self.no_bias
@@ -176,6 +182,8 @@ class Model(LightningModule, _Base_Class):
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
             self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
+            if i_layer > 0:
+                feature_layer_dict[f"L{i_layer:02d}_Dropout"] = torch.nn.Dropout3d(0.05)
             feature_layer_dict[conv_layer_name] = conv
             feature_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
             if self.batch_norm:
@@ -185,8 +193,7 @@ class Model(LightningModule, _Base_Class):
         self.feature_model = torch.nn.Sequential(feature_layer_dict)
         self.feature_space_size = self.feature_model(torch.zeros(self.input_data_shape)).numel()
 
-        n_params = sum(p.numel() for p in self.feature_model.parameters() if p.requires_grad)
-        self.zprint(f"  Feature sub-model parameters: {n_params:,d}")
+        self.zprint(f"  Feature sub-model parameters: {self.param_count(self.feature_model):,d}")
         self.zprint(f"  Feature space size: {self.feature_space_size}")
 
     def make_mlp_classifier(
@@ -214,8 +221,7 @@ class Model(LightningModule, _Base_Class):
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
-        n_params = n_params = sum(p.numel() for p in mlp_classifier.parameters() if p.requires_grad)
-        self.zprint(f"  MLP sub-model parameters: {n_params:,d}")
+        self.zprint(f"  MLP sub-model parameters: {self.param_count(mlp_classifier):,d}")
 
         return mlp_classifier
 
@@ -263,19 +269,20 @@ class Model(LightningModule, _Base_Class):
 
         self.zprint(f"Using {self.use_optimizer.upper()} optimizer")
         optimizer = None
+        optim_kwargs = {
+            'params': self.parameters(),
+            'lr': self.lr,
+            'weight_decay': self.weight_decay,
+        }
         if self.use_optimizer.lower() == 'sgd':
             optimizer = torch.optim.SGD(
-                self.parameters(),
-                lr=self.lr,
-                weight_decay=self.weight_decay,
-                momentum=0.2,
+                momentum=0.2, 
+                **optim_kwargs,
             )
         elif self.use_optimizer.lower() == 'adam':
-            optimizer = torch.optim.Adam(
-                self.parameters(),
-                lr=self.lr,
-                weight_decay=self.weight_decay,
-            )
+            optimizer = torch.optim.Adam(**optim_kwargs)
+        else:
+            raise ValueError
 
         lr_reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer=optimizer,
@@ -283,11 +290,14 @@ class Model(LightningModule, _Base_Class):
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
             mode='min' if 'loss' in self.monitor_metric else 'max',
+            min_lr=1e-4,
+            verbose=True,
         )
         lr_warm_up = torch.optim.lr_scheduler.LinearLR(
             optimizer=optimizer,
             start_factor=0.05,
             total_iters=self.lr_warmup_epochs,
+            verbose=True,
         )
         return_optim_list = [optimizer]
         return_lr_scheduler_list = [
@@ -296,16 +306,37 @@ class Model(LightningModule, _Base_Class):
         ]
         return (return_optim_list, return_lr_scheduler_list)
 
-    def training_step(self, batch, batch_idx) -> torch.Tensor:
-        return self.update_step(batch, batch_idx, stage='train')
+    def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
+        return self.update_step(
+            batch, 
+            batch_idx, 
+            stage='train',
+            dataloader_idx=dataloader_idx,
+        )
 
-    def validation_step(self, batch, batch_idx) -> None:
-        self.update_step(batch, batch_idx, stage='val')
+    def validation_step(self, batch, batch_idx, dataloader_idx=None) -> None:
+        self.update_step(
+            batch, 
+            batch_idx, 
+            stage='val',
+            dataloader_idx=dataloader_idx,
+        )
 
-    def test_step(self, batch, batch_idx) -> None:
-        self.update_step(batch, batch_idx, stage='test')
+    def test_step(self, batch, batch_idx, dataloader_idx=0) -> None:
+        self.update_step(
+            batch, 
+            batch_idx, 
+            stage='test',
+            dataloader_idx=None if isinstance(batch, dict) else dataloader_idx,
+        )
 
-    def update_step(self, batch, batch_idx, stage: str) -> torch.Tensor:
+    def update_step(
+            self, 
+            batch: dict|list, 
+            batch_idx = None, 
+            dataloader_idx = None,
+            stage: str = '', 
+    ) -> torch.Tensor:
         sum_loss = torch.Tensor([0.0])
         signal_window, time_to_elm, quantiles = batch
         model_outputs = self(signal_window)
@@ -342,22 +373,17 @@ class Model(LightningModule, _Base_Class):
             self, 
             x: torch.Tensor, 
     ) -> dict[str, torch.Tensor]:
-        features = self.feature_model(x)
         results = {}
-        for task_model_name, task_model in self.task_models.items():
-            x = features
-            results[task_model_name] = task_model(x)
+        features = self.feature_model(x)
+        for task_name, task_model in self.task_models.items():
+            results[task_name] = task_model(features)
         return results
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
         self.zprint(f"**** Fit start with global step {self.trainer.global_step} and epoch {self.current_epoch} ****")
 
-    # def on_train_start(self):
-    #     self.zprint("Train start")
-
     def on_train_epoch_start(self):
-        # self.zprint("Train epoch start")
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
 
@@ -365,26 +391,10 @@ class Model(LightningModule, _Base_Class):
         if batch_idx % 25 == 0:
             self.rprint(f"Train batch start: batch {batch_idx}")
 
-    # def on_validation_model_eval(self):
-    #     self.zprint("Validation model eval")
-
-    # def on_validation_epoch_start(self):
-    #     self.zprint("Validation epoch start")
-
     def on_validation_batch_start(self, batch, batch_idx, dataloader_idx=0):
         self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
 
-    # def on_validation_batch_end(self, outputs, batch, batch_idx, dataloader_idx=0):
-    #     self.zprint(f"Validation batch end: batch {batch_idx}, dataloader {dataloader_idx}")
-
-    # def on_validation_epoch_end(self):
-    #     self.zprint("Validation epoch end")
-
-    # def on_validation_model_train(self):
-    #     self.zprint("Validation model train")
-
     def on_train_epoch_end(self):
-        # self.zprint("Train epoch end")
         if self.is_global_zero and self.global_step > 0:
             epoch_time = time.time() - self.t_train_epoch_start
             global_time = time.time() - self.t_fit_start
@@ -396,9 +406,6 @@ class Model(LightningModule, _Base_Class):
             line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
             line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
-
-    # def on_train_end(self):
-    #     self.zprint("Train end")
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
@@ -426,33 +433,39 @@ class Model(LightningModule, _Base_Class):
 
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
-    elm_data_file: str|Path|Any = None
+    elm_data_file: str|Path = None
     log_dir: str|Path = None
-    max_elms: int|Any = None
+    max_elms: int = None
     batch_size: int = 256
     stride_factor: int = 8
     num_workers: int = 4
     outlier_value: float = 6
+    # normalized_signal_outlier_value: float = 8
     fraction_validation: float = 0.12
     fraction_test: float = 0.0
     use_random_data: bool = False
     seed: int = None  # seed for ELM index shuffling; must be same across processes
-    time_to_elm_quantile_min: float|Any = None
-    time_to_elm_quantile_max: float|Any = None
+    time_to_elm_quantile_min: float = None
+    time_to_elm_quantile_max: float = None
     contrastive_learning: bool = False
-    min_pre_elm_time: float|Any = None
+    min_pre_elm_time: float = None
     epochs_per_batch_size_reduction: int = 50
+    max_pow2_batch_size_reduction: int = 2
     fir_taps: int = 501  # Number of taps in the filter
-    fir_bp_low: float|Any = None  # bandpass filter cut-on freq in kHz
-    fir_bp_high: float|Any = None  # bandpass filter cut-off freq in kHz
+    fir_bp_low: float = None  # bandpass filter cut-on freq in kHz
+    fir_bp_high: float = None  # bandpass filter cut-off freq in kHz
 
     def __post_init__(self):
         super().__post_init__()
         super(_Base_Class, self).__init__()
         self.save_hyperparameters()
+
+        if self.is_global_zero:
+            print_fields(self)
+
         self.elm_data_file = Path(self.elm_data_file).absolute()
         assert self.elm_data_file.exists(), f"ELM data file {self.elm_data_file} does not exist"
-        self.trainer: Trainer|Any = None
+        self.trainer: Trainer = None
         # self.batch_size_per_rank: int = 0
         self.a_coeffs = self.b_coeffs = None
 
@@ -460,12 +473,9 @@ class Data(_Base_Class, LightningDataModule):
         self.global_elm_split: dict[str,Sequence] = {}
         self.global_shot_split: dict[str,np.ndarray] = {}
         self.time_to_elm_quantiles: dict[float,float] = {}
-        self.elm_raw_signal_mean: float|Any = None
-        self.elm_raw_signal_stdev: float|Any = None
-        self._modified_batch_size_per_rank: int|Any = None
-
-        if self.is_global_zero:
-            print_fields(self)
+        self.elm_raw_signal_mean: float = None
+        self.elm_raw_signal_stdev: float = None
+        self._modified_batch_size_per_rank: int = None
 
         self.state_dict_items = [
             'global_shot_split',
@@ -859,11 +869,11 @@ class Data(_Base_Class, LightningDataModule):
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     signal_window_size: int = 0
-    sw_list: list|Any = None # global signal window data mapping to dataset index
-    signal_list: dict|Any = None # rank-wise signals (map to ELM indices)
-    time_to_elm_quantiles: dict[float, float]|Any = None
-    quantile_min: float|Any = None
-    quantile_max: float|Any = None
+    sw_list: list = None # global signal window data mapping to dataset index
+    signal_list: dict = None # rank-wise signals (map to ELM indices)
+    time_to_elm_quantiles: dict[float, float] = None
+    quantile_min: float = None
+    quantile_max: float = None
     contrastive_learning: bool = False
 
     def __post_init__(self):

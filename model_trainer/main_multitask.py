@@ -1,17 +1,14 @@
 from pathlib import Path
 import dataclasses
 from datetime import datetime
-from types import NoneType
-from typing import OrderedDict, Any, Sequence
+from typing import OrderedDict, Sequence
 import os
 import time
-import gc
-import psutil
 
 import numpy as np
+import scipy.signal
 import sklearn.metrics
 from sklearn.model_selection import train_test_split 
-import scipy.signal
 import h5py
 import wandb
 
@@ -26,7 +23,7 @@ from lightning.pytorch import Trainer, LightningModule, LightningDataModule
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import \
-    LearningRateMonitor, EarlyStopping, ModelCheckpoint, BatchSizeFinder
+    LearningRateMonitor, EarlyStopping, ModelCheckpoint
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 from lightning.pytorch.utilities import grad_norm
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
@@ -49,8 +46,10 @@ def print_fields(obj):
 
 @dataclasses.dataclass(eq=False)
 class _Base_Class:
-    signal_window_size: int = 1024
+    signal_window_size: int = 512
     is_global_zero: bool = False
+    world_size: int = None
+    world_rank: int = None
 
     def __post_init__(self):
         assert np.log2(self.signal_window_size).is_integer(), \
@@ -59,12 +58,10 @@ class _Base_Class:
 
 @dataclasses.dataclass(eq=False)
 class Model(LightningModule, _Base_Class):
-    elm_classifier: bool = True
-    conf_classifier: bool = False
     lr: float = 1e-3  # maximum LR used by first layer
-    lr_scheduler_patience: int = 50
+    lr_scheduler_patience: int = 100
     lr_scheduler_threshold: float = 1e-3
-    lr_warmup_epochs: int = 8
+    lr_warmup_epochs: int = 5
     # lr_layerwise_decrement: float = 1.
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 2e-2
@@ -75,60 +72,96 @@ class Model(LightningModule, _Base_Class):
     initial_weight_factor: float = 1.0
     # feature_batchnorm: bool = True
     # task_batchnorm: bool = False
+    no_bias: bool = False
+    batch_norm: bool = False
+    feature_model_layers: Sequence[dict[str, LightningModule]] = None
+    mlp_task_models: dict[str, dict[str, LightningModule]] = None
 
     def __post_init__(self):
 
         # init superclasses
         super().__init__()
         super(LightningModule, self).__post_init__()
-
         self.save_hyperparameters()
+
         if self.is_global_zero:
             print_fields(self)
 
-        # single input data shape
+        # input data shape
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
+        self.feature_model: LightningModule = None
+        self.feature_space_size: int = None
         self.make_feature_model()
 
-        # task sub-models and metrics
-        self.task_models = torch.nn.ModuleDict()
+        # default task sub-model and metrics
+        assert self.feature_space_size
+        if self.mlp_task_models is None:
+            self.mlp_task_models = {
+                'elm_class': {  # specifications for a single MLP task
+                    'layers': (self.feature_space_size, 32, 1),
+                    'metrics': {
+                        'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
+                        'f1_score': sklearn.metrics.f1_score,
+                        'precision_score': sklearn.metrics.precision_score,
+                        'recall_score': sklearn.metrics.recall_score,
+                        'mean_stat': torch.mean,
+                        'std_stat': torch.std,
+                    },
+                    'monitor_metric': 'f1_score/val',
+                },
+            }        
+
+        # make task sub-models
+        self.task_names = list(self.mlp_task_models.keys())
         self.task_metrics: dict[str, dict] = {}
-
-        # Sub-model: ELM median time-to-ELM binary classifier
-        if self.elm_classifier:
-            task_name = 'elm_classifier'
-            self.zprint(f"Task {task_name}")
-            self.task_models[task_name] = self.make_mlp_classifier()
-            self.task_metrics[task_name] = {
-                'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
-                'f1_score': sklearn.metrics.f1_score,
-                'precision_score': sklearn.metrics.precision_score,
-                'recall_score': sklearn.metrics.recall_score,
-                'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
-                'std_stat': torch.std,
-            }
+        self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
+        for task_name, task_dict in self.mlp_task_models.items():
+            self.zprint(f'Task sub-model: {task_name}')
+            task_layers = task_dict['layers']
+            task_metrics = task_dict['metrics']
+            self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
+            self.task_metrics[task_name] = task_metrics.copy()
             if self.monitor_metric is None:
-                self.monitor_metric = f'{task_name}/f1_score/val'
+                # if not specified, use `monitor_metric` from first task
+                self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
 
-        # sub-model: Confinement mode multi-class classifier
-        if self.conf_classifier:
-            task_name = 'conf_classifier'
-            self.zprint(f"Task {task_name}")
-            self.task_models[task_name] = self.make_mlp_classifier(n_out=4)
-            self.task_metrics[task_name] = {
-                'ce_loss': torch.nn.functional.cross_entropy,
-                'f1_score': sklearn.metrics.f1_score,
-                'precision_score': sklearn.metrics.precision_score,
-                'recall_score': sklearn.metrics.recall_score,
-                'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
-                'std_stat': torch.std,
-            }
-            if self.monitor_metric is None:
-                self.monitor_metric = f'{task_name}/f1_score/val'
+        # initialize model parameters
+        self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
+        self.zprint(f"Total model parameters: {self.total_parameters:,}")
 
-        self.task_names = list(self.task_models.keys())
+        # # Sub-model: ELM median time-to-ELM binary classifier
+        # if self.elm_classifier:
+        #     task_name = 'elm_classifier'
+        #     self.zprint(f"Task {task_name}")
+        #     self.task_models[task_name] = self.make_mlp_classifier()
+        #     self.task_metrics[task_name] = {
+        #         'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
+        #         'f1_score': sklearn.metrics.f1_score,
+        #         'precision_score': sklearn.metrics.precision_score,
+        #         'recall_score': sklearn.metrics.recall_score,
+        #         'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
+        #         'std_stat': torch.std,
+        #     }
+        #     if self.monitor_metric is None:
+        #         self.monitor_metric = f'{task_name}/f1_score/val'
+
+        # # sub-model: Confinement mode multi-class classifier
+        # if self.conf_classifier:
+        #     task_name = 'conf_classifier'
+        #     self.zprint(f"Task {task_name}")
+        #     self.task_models[task_name] = self.make_mlp_classifier(n_out=4)
+        #     self.task_metrics[task_name] = {
+        #         'ce_loss': torch.nn.functional.cross_entropy,
+        #         'f1_score': sklearn.metrics.f1_score,
+        #         'precision_score': sklearn.metrics.precision_score,
+        #         'recall_score': sklearn.metrics.recall_score,
+        #         'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
+        #         'std_stat': torch.std,
+        #     }
+        #     if self.monitor_metric is None:
+        #         self.monitor_metric = f'{task_name}/f1_score/val'
 
         if self.is_global_zero: 
             good_init = False
@@ -145,26 +178,30 @@ class Model(LightningModule, _Base_Class):
                             param.data.fill_(1)
                         else:
                             n_in = np.prod(param.shape[1:])
-                            sqrt_k =  np.sqrt(3*self.initial_weight_factor / n_in)
+                            sqrt_k = np.sqrt(3*self.initial_weight_factor / n_in)
                             param.data.uniform_(-sqrt_k, sqrt_k)
                             # param.data.normal_(std=sqrt_k)
                             self.zprint(f"  {name}: initialized to normal +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
-                print("Batch evaluation (batch_size=256) with randn() data")
+                    else:
+                        raise ValueError
+
+                print("Batch evaluation (batch_size=512) with randn() data")
                 batch_input = {
                     task: [torch.randn(
-                        size=[256]+list(self.input_data_shape[1:]),
+                        size=[512]+list(self.input_data_shape[1:]),
                         dtype=torch.float32,
                     )]
                     for task in self.task_names
                 }
                 batch_output = self(batch_input)
                 for task, task_output in batch_output.items():
-                    if good_init == False: continue
                     if task_output.mean().abs() / task_output.std() > 0.25:
                         good_init = False
-                        continue
-                    self.zprint(f"  Task {task} output shape: {task_output.shape}")
-                    self.zprint(f"  Task {task} output mean {task_output.mean():.4f} stdev {task_output.std():.4f} min/max {task_output.min():.3f}/{task_output.max():.3f}")
+                        break
+                if good_init == True:
+                    for task, task_output in batch_output.items():
+                        self.zprint(f"  Task {task} output shape: {task_output.shape}")
+                        self.zprint(f"  Task {task} output mean {task_output.mean():.4f} stdev {task_output.std():.4f} min/max {task_output.min():.3f}/{task_output.max():.3f}")
 
         self.zprint(f"Total model parameters: {self.param_count(self):,d}")
         return
@@ -174,41 +211,49 @@ class Model(LightningModule, _Base_Class):
         return sum(p.numel() for p in model.parameters() if p.requires_grad)
 
     def make_feature_model(self) -> None:
-
         self.zprint("Feature space sub-model")
+        if self.feature_model_layers is None:
+            self.feature_model_layers = (
+                {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
+                {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
+                {'out_channels': 8, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
+                {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
+                {'out_channels': 16, 'kernel': (1, 4, 4), 'stride': 1, 'bias':True},
+            )
 
         feature_layer_dict = OrderedDict()
-
-        conv_layers = (
-            {'out_channels': 6, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-            {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 10, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
-            {'out_channels': 16, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 16, 'kernel': (1, 3, 3), 'stride': 1},
-            {'out_channels': 16, 'kernel': (1, 2, 2), 'stride': 1},
-            {'out_channels': 16, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
-        )
-
+        # conv_layers = (
+        #     {'out_channels': 6, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+        #     {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
+        #     {'out_channels': 10, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
+        #     {'out_channels': 16, 'kernel': (1, 3, 3), 'stride': 1},
+        #     {'out_channels': 16, 'kernel': (1, 3, 3), 'stride': 1},
+        #     {'out_channels': 16, 'kernel': (1, 2, 2), 'stride': 1},
+        #     {'out_channels': 16, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
+        # )
         data_shape = self.input_data_shape
         self.zprint(f"  Input data shape: {data_shape}  (size {np.prod(data_shape)})")
-        out_channels: int|Any = None
-        for i_layer, layer in enumerate(conv_layers):
+        out_channels: int = None
+        for i_layer, layer in enumerate(self.feature_model_layers):
             conv_layer_name = f"L{i_layer:02d}_Conv"
+            bias = layer['bias'] and not self.no_bias
             conv = torch.nn.Conv3d(
                 in_channels=1 if out_channels is None else out_channels,
                 out_channels=layer['out_channels'],
                 kernel_size=layer['kernel'],
                 stride=layer['stride'],
+                bias=bias,
             )
             n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
-            self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
+            self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
             if i_layer > 0:
                 feature_layer_dict[f"L{i_layer:02d}_Dropout"] = torch.nn.Dropout3d(0.05)
             feature_layer_dict[conv_layer_name] = conv
             feature_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
-            feature_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm3d(out_channels)
+            if self.batch_norm:
+                feature_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm3d(out_channels)
 
         feature_layer_dict['Flatten'] = torch.nn.Flatten()
         self.feature_model = torch.nn.Sequential(feature_layer_dict)
@@ -217,27 +262,25 @@ class Model(LightningModule, _Base_Class):
         self.zprint(f"  Feature sub-model parameters: {self.param_count(self.feature_model):,d}")
         self.zprint(f"  Feature space size: {self.feature_space_size}")
 
-    def make_mlp_classifier(self, n_out: int = 1) -> torch.nn.Module:
-
+    def make_mlp_classifier(
+            self,
+            mlp_layers: Sequence[int] = None,
+    ) -> torch.nn.Module:
         self.zprint("MLP classifier sub-model")
-
         mlp_layer_dict = OrderedDict()
-
-        assert self.feature_space_size
-        mlp_layer_sizes = (self.feature_space_size, 64, 32, n_out)
-        n_layers = len(mlp_layer_sizes)
+        assert mlp_layers
+        n_layers = len(mlp_layers)
 
         for i_layer in range(n_layers-1):
             mlp_layer_name = f"L{i_layer:02d}_FC"
+            bias = (True and not self.no_bias) if i_layer+1<n_layers-1 else False
             mlp_layer = torch.nn.Linear(
-                in_features=mlp_layer_sizes[i_layer],
-                out_features=mlp_layer_sizes[i_layer+1],
-                bias=True if i_layer+1<n_layers-1 else False,
+                in_features=mlp_layers[i_layer],
+                out_features=mlp_layers[i_layer+1],
+                bias=bias,
             )
             n_params = sum(p.numel() for p in mlp_layer.parameters() if p.requires_grad)
-            self.zprint(f"  {mlp_layer_name}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
-            if i_layer+1 < n_layers-1:
-                mlp_layer_dict[f"L{i_layer:02d}_Dropout"] = torch.nn.Dropout1d(0.05)
+            self.zprint(f"  {mlp_layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
             mlp_layer_dict[mlp_layer_name] = mlp_layer
             if i_layer+1 < n_layers-1:
                 mlp_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
@@ -250,20 +293,24 @@ class Model(LightningModule, _Base_Class):
 
     def configure_optimizers(self):
         self.zprint(f"Using {self.use_optimizer.upper()} optimizer")
+        optimizer = None
         optim_kwargs = {
             'params': self.parameters(),
             'lr': self.lr,
             'weight_decay': self.weight_decay,
         }
         if self.use_optimizer.lower() == 'sgd':
-            self.optimizer = torch.optim.SGD(momentum=0.2, **optim_kwargs)
+            optimizer = torch.optim.SGD(
+                momentum=0.2, 
+                **optim_kwargs,
+            )
         elif self.use_optimizer.lower() == 'adam':
-            self.optimizer = torch.optim.Adam(**optim_kwargs)
+            optimizer = torch.optim.Adam(**optim_kwargs)
         else:
             raise ValueError
 
         lr_reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
-            optimizer=self.optimizer,
+            optimizer=optimizer,
             factor=0.5,
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
@@ -272,12 +319,12 @@ class Model(LightningModule, _Base_Class):
             verbose=True,
         )
         lr_warm_up = torch.optim.lr_scheduler.LinearLR(
-            optimizer=self.optimizer,
-            start_factor=0.1,
+            optimizer=optimizer,
+            start_factor=0.05,
             total_iters=self.lr_warmup_epochs,
             verbose=True,
         )
-        return_optim_list = [self.optimizer]
+        return_optim_list = [optimizer]
         return_lr_scheduler_list = [
             {'scheduler': lr_reduce_on_plateau, 'monitor': self.monitor_metric},
             lr_warm_up, 
@@ -375,48 +422,49 @@ class Model(LightningModule, _Base_Class):
     def forward(
             self, 
             batch: dict|list, 
-    ) -> dict[str,torch.Tensor]:
+    ) -> dict[str, torch.Tensor]:
         results = {}
-        for task in self.task_models:
-            if isinstance(batch, dict):
-                # dict batches for training
-                results[task] = self.task_models[task](self.feature_model(batch[task][0]))
-            else:
-                # list batches for val/test/predict
-                results[task] = self.task_models[task](self.feature_model(batch[0]))
+        for task_name, task_model in self.task_models.items():
+            x = (
+                batch[task_name][0]
+                if isinstance(batch, dict) 
+                else batch[0]
+            )
+            features = self.feature_model(x)
+            results[task_name] = task_model(features)
         return results
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
-        self.zprint(f"**** Fit start with global step {self.trainer.global_step} ****")
-
-    def on_fit_end(self) -> None:
-        delt = time.time() - self.t_fit_start
-        self.zprint(f"Fit time: {delt/60:0.1f} min")
+        self.zprint(f"**** Fit start with global step {self.trainer.global_step} and epoch {self.current_epoch} ****")
 
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
-        # dl: torch.utils.data.DataLoader = None
-        # if isinstance(self.trainer.train_dataloader, dict):
-        #     dl = list(self.trainer.train_dataloader.values())[0]
-        # else:
-        #     dl = self.trainer.train_dataloader
-        # self.log('batch_size', dl.batch_size, on_step=False, on_epoch=True)
+
+    def on_train_batch_start(self, batch, batch_idx):
+        if batch_idx % 25 == 0:
+            self.rprint(f"Train batch start: batch {batch_idx}")
+
+    def on_validation_batch_start(self, batch, batch_idx, dataloader_idx=0):
+        self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
 
     def on_train_epoch_end(self):
-        epoch_time = time.time() - self.t_train_epoch_start
-        global_time = time.time() - self.t_fit_start
-        epoch_steps = self.global_step-self.s_train_epoch_start
         if self.is_global_zero and self.global_step > 0:
+            epoch_time = time.time() - self.t_train_epoch_start
+            global_time = time.time() - self.t_fit_start
+            epoch_steps = self.global_step-self.s_train_epoch_start
+            logged_metrics = self.trainer.logged_metrics
             line =  f"Ep {self.current_epoch:03d}  "
-            line += f"ep/gl st: {epoch_steps:,d}/{self.global_step:,d}  "
-            line += f"ep/gl min: {epoch_time/60:.2f}/{global_time/60:.2f}  " 
-            for task in self.task_models:
-                train_score = self.trainer.logged_metrics[f'{task}/f1_score/train']
-                val_score = self.trainer.logged_metrics[f'{task}/f1_score/val']
-                line += f"{task[:7]} t/v score: {train_score:.3f}/{val_score:.3f}  "
+            line += f"train/val loss {logged_metrics['sum_loss/train']:.3f}/"
+            line += f"{logged_metrics['sum_loss/val']:.3f}  "
+            line += f"ep/gl steps {epoch_steps:,d}/{self.global_step:,d}  "
+            line += f"ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}  " 
             print(line)
+
+    def on_fit_end(self) -> None:
+        delt = time.time() - self.t_fit_start
+        self.rprint(f"Fit time: {delt/60:0.1f} min")
 
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
@@ -432,36 +480,38 @@ class Model(LightningModule, _Base_Class):
             print(text)
 
     def rprint(self, text: str = ''):
-        if self.trainer.world_size > 1:
-            print(f"Rank {self.trainer.global_rank}: {text}")
+        if self.world_size > 1:
+            print(f"  Rank {self.trainer.global_rank}: {text}")
         else:
-            print(text)
+            print(f"  {text}")
+
 
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
-    elm_data_file: str|Path|Any = None
-    confinement_data_file: str|Path|Any = None
+    elm_data_file: str|Path = None
+    confinement_data_file: str|Path = None
     elm_classifier: bool = True
     conf_classifier: bool = False
-    max_elms: int|Any = None
+    log_dir: str|Path = None
+    max_elms: int = None
     batch_size: int = 256
     stride_factor: int = 8
-    num_workers: int|Any = None
+    num_workers: int = 4
     outlier_value: float = 6
-    normalized_signal_outlier_value: float = 8
+    # normalized_signal_outlier_value: float = 8
     fraction_validation: float = 0.12
     fraction_test: float = 0.0
     use_random_data: bool = False
     seed: int = None  # seed for ELM index shuffling; must be same across processes
-    time_to_elm_quantile_min: float|Any = None
-    time_to_elm_quantile_max: float|Any = None
+    time_to_elm_quantile_min: float = None
+    time_to_elm_quantile_max: float = None
     contrastive_learning: bool = False
-    min_pre_elm_time: float|Any = None
-    epochs_per_batch_size_reduction: int = None
+    min_pre_elm_time: float = None
+    epochs_per_batch_size_reduction: int = 50
     max_pow2_batch_size_reduction: int = 2
     fir_taps: int = 501  # Number of taps in the filter
-    fir_bp_low: float|Any = None  # bandpass filter cut-on freq in kHz
-    fir_bp_high: float|Any = None  # bandpass filter cut-off freq in kHz
+    fir_bp_low: float = None  # bandpass filter cut-on freq in kHz
+    fir_bp_high: float = None  # bandpass filter cut-off freq in kHz
     bad_shots: list = None
     num_classes: int = 4
     metadata_bounds = {
@@ -487,14 +537,14 @@ class Data(_Base_Class, LightningDataModule):
         if self.is_global_zero:
             print_fields(self)
 
-        self.trainer: Trainer|Any = None
+        self.trainer: Trainer = None
         self.a_coeffs = self.b_coeffs = None
 
         self.tasks = []
         self.state_items = []
 
-        self.elm_raw_signal_mean: float|Any = None
-        self.elm_raw_signal_stdev: float|Any = None
+        self.elm_raw_signal_mean: float = None
+        self.elm_raw_signal_stdev: float = None
         if self.elm_classifier:
             self.elm_data_file = Path(self.elm_data_file).absolute()
             assert self.elm_data_file.exists()
@@ -518,8 +568,8 @@ class Data(_Base_Class, LightningDataModule):
             self.tasks.append('conf_classifier')
 
             self.global_confinement_shot_split: dict[str,Sequence] = {}
-            self.confinement_raw_signal_mean: float|Any = None
-            self.confinement_raw_signal_stdev: float|Any = None
+            self.confinement_raw_signal_mean: float = None
+            self.confinement_raw_signal_stdev: float = None
             self.state_items.extend([
                 'global_confinement_shot_split',
                 'confinement_raw_signal_mean',
@@ -1347,11 +1397,11 @@ class Data(_Base_Class, LightningDataModule):
 @dataclasses.dataclass(eq=False)
 class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     signal_window_size: int = 0
-    sw_list: list|Any = None # global signal window data mapping to dataset index
-    signal_list: dict|Any = None # rank-wise signals (map to ELM indices)
-    time_to_elm_quantiles: dict[float, float]|Any = None
-    quantile_min: float|Any = None
-    quantile_max: float|Any = None
+    sw_list: list = None # global signal window data mapping to dataset index
+    signal_list: dict = None # rank-wise signals (map to ELM indices)
+    time_to_elm_quantiles: dict[float, float] = None
+    quantile_min: float = None
+    quantile_max: float = None
     contrastive_learning: bool = False
 
     def __post_init__(self):
@@ -1429,7 +1479,7 @@ def main(
         confinement_data_file: str|Path = None,
         elm_classifier=True,
         conf_classifier=False,
-        max_elms: int|Any = None,
+        max_elms: int = None,
         signal_window_size = 1024,
         experiment_name = 'experiment_default',
         # model
@@ -1460,10 +1510,10 @@ def main(
         fraction_validation = 0.15,
         fraction_test = 0.0,
         num_workers = None,
-        time_to_elm_quantile_min: float|Any = None,
-        time_to_elm_quantile_max: float|Any = None,
+        time_to_elm_quantile_min: float = None,
+        time_to_elm_quantile_max: float = None,
         contrastive_learning: bool = True,
-        min_pre_elm_time: float|Any = None,
+        min_pre_elm_time: float = None,
         fir_bp_low = None,
         fir_bp_high = None,
         epochs_per_batch_size_reduction: int = None,
