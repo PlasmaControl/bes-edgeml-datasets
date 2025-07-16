@@ -33,7 +33,7 @@ def scenario_128(
         mlp_task_models=mlp_task_models,
         batch_size=batch_size,
         lr=lr,
-        data_file=data_file,
+        elm_data_file=data_file,
         max_elms=max_elms,
         max_epochs=max_epochs,
     )
