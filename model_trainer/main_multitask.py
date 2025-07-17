@@ -66,9 +66,9 @@ class _Base_Class:
 
     def rprint(self, text: str = ''):
         if self.world_size > 1:
-            print(f"  Rank {self.world_rank}: {text}")
+            print(f"{text} (Rank {self.world_rank})")
         else:
-            print(f"  {text}")
+            print(f"{text}")
 
 
 @dataclasses.dataclass(eq=False)
@@ -343,13 +343,13 @@ class Model(_Base_Class, LightningModule):
             threshold=self.lr_scheduler_threshold,
             mode='min' if 'loss' in self.monitor_metric else 'max',
             min_lr=1e-4,
-            verbose=True,
+            # verbose=True,
         )
         lr_warm_up = torch.optim.lr_scheduler.LinearLR(
             optimizer=optimizer,
             start_factor=0.05,
             total_iters=self.lr_warmup_epochs,
-            verbose=True,
+            # verbose=True,
         )
         return_optim_list = [optimizer]
         return_lr_scheduler_list = [
@@ -394,7 +394,7 @@ class Model(_Base_Class, LightningModule):
         for task in model_outputs:
             task_outputs: torch.Tensor = model_outputs[task]
             metrics = self.task_metrics[task]
-            if task == 'elm_classifier' and dataloader_idx in [None, 0]:
+            if task == 'elm_class' and dataloader_idx in [None, 0]:
                 labels: torch.Tensor = batch[task][1][0.5] if isinstance(batch, dict) else batch[1][0.5]
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
@@ -474,11 +474,13 @@ class Model(_Base_Class, LightningModule):
         self.s_train_epoch_start = self.global_step
 
     def on_train_batch_start(self, batch, batch_idx):
-        if batch_idx % 25 == 0:
-            self.rprint(f"Train batch start: batch {batch_idx}")
+        # if batch_idx % 25 == 0:
+        #     self.rprint(f"Train batch start: batch {batch_idx}")
+        pass
 
     def on_validation_batch_start(self, batch, batch_idx, dataloader_idx=0):
-        self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
+        # self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
+        pass
 
     def on_train_epoch_end(self):
         if self.is_global_zero and self.global_step > 0:
@@ -562,7 +564,7 @@ class Data(_Base_Class, LightningDataModule):
         self.state_items = []
 
         if self.elm_classifier:
-            self.tasks.append('elm_classifier')
+            self.tasks.append('elm_class')
             self.elm_data_file = Path(self.elm_data_file).absolute()
             assert self.elm_data_file.exists(), f"ELM data file {self.elm_data_file} does not exist"
             self.global_shot_split: dict[str,np.ndarray] = {}
@@ -598,8 +600,15 @@ class Data(_Base_Class, LightningDataModule):
         for item in self.state_items:
             assert hasattr(self, item)
 
+        # FIR filter
         self.a_coeffs = self.b_coeffs = None
         self.set_fir_filter()
+
+        # seed and RNG
+        if self.seed is None:
+            self.seed = np.random.default_rng().integers(0, 2**32-1)
+            self.save_hyperparameters("seed")
+        self.rng = np.random.default_rng(self.seed)
 
     def prepare_data(self):
         self.zprint("\u2B1C Prepare data (rank 0 only)")
@@ -611,11 +620,6 @@ class Data(_Base_Class, LightningDataModule):
     def prepare_elm_data(self):
         self.zprint("\u2B1C Prepare ELM data (rank 0 only)")
         t_tmp = time.time()
-        # seed and RNG
-        if self.seed is None:
-            self.seed = np.random.default_rng().integers(0, 2**32-1)
-            self.save_hyperparameters("seed")
-        self.rng = np.random.default_rng(self.seed)
         # parse full dataset
         with h5py.File(self.elm_data_file, 'r') as root:
             # validate shots in data file
@@ -790,7 +794,7 @@ class Data(_Base_Class, LightningDataModule):
 
     def setup(self, stage: str):
         # called on all ranks after "prepare_data()"
-        self.zprint("\u2B1C " + f"Begin Data.setup(stage={stage})")
+        self.zprint("\u2B1C " + f"Setup stage {stage} (all ranks)")
 
         assert stage in ['fit', 'test', 'predict'], f"Invalid stage: {stage}"
         assert self.is_global_zero == self.trainer.is_global_zero
@@ -803,8 +807,10 @@ class Data(_Base_Class, LightningDataModule):
         sub_stages = ['train', 'validation'] if stage == 'fit' else [stage]
 
         if self.elm_classifier:
+            t_tmp = time.time()
             for sub_stage in sub_stages:
-                self.setup_global_elm_data_for_stage(sub_stage)
+                self.setup_elm_data_for_rank(sub_stage)
+            self.zprint(f"  ELM data setup time: {time.time()-t_tmp:0.1f} s")
         self.barrier()
 
         if self.conf_classifier:
@@ -815,9 +821,8 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
         self.barrier()
 
-    def setup_global_elm_data_for_stage(self, sub_stage: str):
-        self.zprint("\u2B1C " + f"Preparing global data for stage: {sub_stage.upper()}")
-        t_tmp = time.time()
+    def setup_elm_data_for_rank(self, sub_stage: str):
+        self.rprint("  \u2B1C " + f"Setup ELM data for stage {sub_stage.upper()}")
         # get rank-wise ELM signals
         sw_for_rank = list(self.rankwise_signal_window_metadata[sub_stage][self.trainer.global_rank])
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
@@ -851,7 +856,6 @@ class Data(_Base_Class, LightningDataModule):
             )
         elif sub_stage == 'predict':
             pass
-        self.zprint(f"  ELM data setup time: {time.time()-t_tmp:0.1f} s")
 
     def get_elm_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
         sampler = torch.utils.data.DistributedSampler(
@@ -859,7 +863,7 @@ class Data(_Base_Class, LightningDataModule):
             num_replicas=1,
             rank=0,
             shuffle=True if stage=='train' else False,
-            seed=int(np.random.default_rng().integers(0, 2**32-1)),
+            seed=int(self.rng.integers(0, 2**32-1)),
             drop_last=True if stage=='train' else False,
         )
         if stage == 'train' and self.epochs_per_batch_size_reduction:
@@ -879,6 +883,8 @@ class Data(_Base_Class, LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=True if stage=='train' else False,
+            prefetch_factor=2,
+            persistent_workers=True,
         )
 
     def prepare_global_confinement_data(self):
@@ -1162,7 +1168,7 @@ class Data(_Base_Class, LightningDataModule):
 
         # match valid t0 indices count across ranks
         if self.trainer.world_size > 1:
-            np.random.default_rng().shuffle(packaged_valid_t0_indices)
+            self.rng.shuffle(packaged_valid_t0_indices)
             count_valid_t0_indices = len(packaged_valid_t0_indices)
             self.rprint(f"    Valid t0 indices (unmatched): {count_valid_t0_indices:,d}")
             all_rank_count_valid_indices: list = [None for _ in range(self.trainer.world_size)]
@@ -1242,7 +1248,7 @@ class Data(_Base_Class, LightningDataModule):
             num_replicas=1,
             rank=0,
             shuffle=True if stage=='train' else False,
-            seed=int(np.random.default_rng().integers(0, 2**32-1)),
+            seed=int(self.rng.integers(0, 2**32-1)),
             drop_last=True if stage=='train' else False,
         )
         if stage == 'train' and self.epochs_per_batch_size_reduction:
@@ -1290,7 +1296,7 @@ class Data(_Base_Class, LightningDataModule):
     def train_dataloader(self) -> CombinedLoader:
         loaders = {}
         if self.elm_classifier:
-            loaders['elm_classifier'] = self.get_elm_dataloaders('train')
+            loaders['elm_class'] = self.get_elm_dataloaders('train')
         if self.conf_classifier:
             loaders['conf_classifier'] = self._conf_train_val_test_dataloaders('train')
         combined_loader = CombinedLoader(
@@ -1303,7 +1309,7 @@ class Data(_Base_Class, LightningDataModule):
     def val_dataloader(self) -> CombinedLoader:
         loaders = {}
         if self.elm_classifier:
-            loaders['elm_classifier'] = self.get_elm_dataloaders('validation')
+            loaders['elm_class'] = self.get_elm_dataloaders('validation')
         if self.conf_classifier:
             loaders['conf_classifier'] = self._conf_train_val_test_dataloaders('validation')
         combined_loader = CombinedLoader(
@@ -1316,7 +1322,7 @@ class Data(_Base_Class, LightningDataModule):
     def test_dataloader(self) -> CombinedLoader:
         loaders = {}
         if self.elm_classifier:
-            loaders['elm_classifier'] = self.get_elm_dataloaders('test')
+            loaders['elm_class'] = self.get_elm_dataloaders('test')
         if self.conf_classifier:
             loaders['conf_classifier'] = self._conf_train_val_test_dataloaders('test')
         combined_loader = CombinedLoader(
@@ -1361,7 +1367,7 @@ class Data(_Base_Class, LightningDataModule):
 
 
 @dataclasses.dataclass(eq=False)
-class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
+class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
     signal_window_size: int = 0
     sw_list: list = None # global signal window data mapping to dataset index
     signal_list: dict = None # rank-wise signals (map to ELM indices)
@@ -1371,8 +1377,7 @@ class ELM_TrainValTest_Dataset(_Base_Class, torch.utils.data.Dataset):
     contrastive_learning: bool = False
 
     def __post_init__(self):
-        super().__post_init__()
-        super(_Base_Class, self).__init__()
+        super().__init__()
         for elm_index in self.signal_list:
             self.signal_list[elm_index] = torch.from_numpy(
                 self.signal_list[elm_index]
@@ -1715,7 +1720,7 @@ if __name__=='__main__':
         max_epochs=2,
         batch_size=128,
         lr=1e-3,
-        num_workers=1,
+        num_workers=2,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         max_shots_per_class=8,

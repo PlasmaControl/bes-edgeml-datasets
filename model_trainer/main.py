@@ -133,38 +133,6 @@ class Model(LightningModule, _Base_Class):
         self.total_parameters = sum(p.numel() for p in self.parameters() if p.requires_grad)
         self.zprint(f"Total model parameters: {self.total_parameters:,}")
 
-        # # Sub-model: ELM median time-to-ELM binary classifier
-        # if self.elm_classifier:
-        #     task_name = 'elm_classifier'
-        #     self.zprint(f"Task {task_name}")
-        #     self.task_models[task_name] = self.make_mlp_classifier()
-        #     self.task_metrics[task_name] = {
-        #         'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
-        #         'f1_score': sklearn.metrics.f1_score,
-        #         'precision_score': sklearn.metrics.precision_score,
-        #         'recall_score': sklearn.metrics.recall_score,
-        #         'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
-        #         'std_stat': torch.std,
-        #     }
-        #     if self.monitor_metric is None:
-        #         self.monitor_metric = f'{task_name}/f1_score/val'
-
-        # # sub-model: Confinement mode multi-class classifier
-        # if self.conf_classifier:
-        #     task_name = 'conf_classifier'
-        #     self.zprint(f"Task {task_name}")
-        #     self.task_models[task_name] = self.make_mlp_classifier(n_out=4)
-        #     self.task_metrics[task_name] = {
-        #         'ce_loss': torch.nn.functional.cross_entropy,
-        #         'f1_score': sklearn.metrics.f1_score,
-        #         'precision_score': sklearn.metrics.precision_score,
-        #         'recall_score': sklearn.metrics.recall_score,
-        #         'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
-        #         'std_stat': torch.std,
-        #     }
-        #     if self.monitor_metric is None:
-        #         self.monitor_metric = f'{task_name}/f1_score/val'
-
         if self.is_global_zero: 
             good_init = False
             while good_init == False:
@@ -220,15 +188,6 @@ class Model(LightningModule, _Base_Class):
             )
 
         feature_layer_dict = OrderedDict()
-        # conv_layers = (
-        #     {'out_channels': 6, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
-        #     {'out_channels': 8, 'kernel': (1, 3, 3), 'stride': 1},
-        #     {'out_channels': 10, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
-        #     {'out_channels': 16, 'kernel': (1, 3, 3), 'stride': 1},
-        #     {'out_channels': 16, 'kernel': (1, 3, 3), 'stride': 1},
-        #     {'out_channels': 16, 'kernel': (1, 2, 2), 'stride': 1},
-        #     {'out_channels': 16, 'kernel': (4, 1, 1), 'stride': (4, 1, 1)},
-        # )
         data_shape = self.input_data_shape
         self.zprint(f"  Input data shape: {data_shape}  (size {np.prod(data_shape)})")
         out_channels: int = None
@@ -355,13 +314,13 @@ class Model(LightningModule, _Base_Class):
             threshold=self.lr_scheduler_threshold,
             mode='min' if 'loss' in self.monitor_metric else 'max',
             min_lr=1e-4,
-            verbose=True,
+            # verbose=True,
         )
         lr_warm_up = torch.optim.lr_scheduler.LinearLR(
             optimizer=optimizer,
             start_factor=0.05,
             total_iters=self.lr_warmup_epochs,
-            verbose=True,
+            # verbose=True,
         )
         return_optim_list = [optimizer]
         return_lr_scheduler_list = [
@@ -431,33 +390,32 @@ class Model(LightningModule, _Base_Class):
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
             elif task == 'conf_classifier' and dataloader_idx in [None, 1]:
-                # labels = batch[task][1] if isinstance(batch, dict) else batch[1]
-                # for metric_name, metric_function in metrics.items():
-                #     if 'loss' in metric_name:
-                #         metric_value = metric_function(
-                #             input=task_outputs,
-                #             target=labels.flatten(),
-                #         )
-                #         sum_loss = sum_loss + metric_value if sum_loss else metric_value
-                #         if self.conf_loss_weight:
-                #             mean_loss = self.conf_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
-                #             sum_loss = sum_loss + mean_loss
-                #     elif 'score' in metric_name:
-                #         metric_value = metric_function(
-                #             y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
-                #             y_true=torch.nn.functional.one_hot(
-                #                 labels.flatten().detach().cpu(),
-                #                 num_classes=4,
-                #             ),
-                #             zero_division=0,
-                #             average='macro',
-                #         )
-                #         if self.current_epoch<10:
-                #             metric_value /= 10
-                #     elif 'stat' in metric_name:
-                #         metric_value = metric_function(task_outputs).item()
-                #     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
-                pass
+                labels = batch[task][1] if isinstance(batch, dict) else batch[1]
+                for metric_name, metric_function in metrics.items():
+                    if 'loss' in metric_name:
+                        metric_value = metric_function(
+                            input=task_outputs,
+                            target=labels.flatten(),
+                        )
+                        sum_loss = sum_loss + metric_value if sum_loss else metric_value
+                        if self.conf_loss_weight:
+                            mean_loss = self.conf_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
+                            sum_loss = sum_loss + mean_loss
+                    elif 'score' in metric_name:
+                        metric_value = metric_function(
+                            y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
+                            y_true=torch.nn.functional.one_hot(
+                                labels.flatten().detach().cpu(),
+                                num_classes=4,
+                            ),
+                            zero_division=0,
+                            average='macro',
+                        )
+                        if self.current_epoch<10:
+                            metric_value /= 10
+                    elif 'stat' in metric_name:
+                        metric_value = metric_function(task_outputs).item()
+                    self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
             else:
                 raise ValueError
 
@@ -483,11 +441,13 @@ class Model(LightningModule, _Base_Class):
         self.s_train_epoch_start = self.global_step
 
     def on_train_batch_start(self, batch, batch_idx):
-        if batch_idx % 25 == 0:
-            self.rprint(f"Train batch start: batch {batch_idx}")
+        # if batch_idx % 25 == 0:
+        #     self.rprint(f"Train batch start: batch {batch_idx}")
+        pass
 
     def on_validation_batch_start(self, batch, batch_idx, dataloader_idx=0):
-        self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
+        # self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
+        pass
 
     def on_train_epoch_end(self):
         if self.is_global_zero and self.global_step > 0:
@@ -603,28 +563,28 @@ class Data(_Base_Class, LightningDataModule):
                 'time_to_elm_quantiles',
             ])
 
-        # if self.conf_classifier:
-        #     self.confinement_data_file = Path(self.confinement_data_file).absolute()
-        #     assert self.confinement_data_file.exists()
-        #     self.tasks.append('conf_classifier')
+        if self.conf_classifier:
+            self.confinement_data_file = Path(self.confinement_data_file).absolute()
+            assert self.confinement_data_file.exists()
+            self.tasks.append('conf_classifier')
 
-        #     self.global_confinement_shot_split: dict[str,Sequence] = {}
-        #     self.confinement_raw_signal_mean: float = None
-        #     self.confinement_raw_signal_stdev: float = None
-        #     self.state_items.extend([
-        #         'global_confinement_shot_split',
-        #         'confinement_raw_signal_mean',
-        #         'confinement_raw_signal_stdev',
-        #     ])
-        #     self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
-        #     self.global_stage_to_events: dict = {}
+            self.global_confinement_shot_split: dict[str,Sequence] = {}
+            self.confinement_raw_signal_mean: float = None
+            self.confinement_raw_signal_stdev: float = None
+            self.state_items.extend([
+                'global_confinement_shot_split',
+                'confinement_raw_signal_mean',
+                'confinement_raw_signal_stdev',
+            ])
+            self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
+            self.global_stage_to_events: dict = {}
 
         for item in self.state_items:
             assert hasattr(self, item)
 
     def prepare_data(self):
         # called for rank 0 only!
-        self.zprint(f"**** Prepare data (rank 0 only)")
+        self.zprint("\u2B1C Prepare data (rank 0 only)")
         if self.seed is None:
             self.seed = np.random.default_rng().integers(0, 2**32-1)
         self.rng = np.random.default_rng(self.seed)
