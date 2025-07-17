@@ -883,8 +883,8 @@ class Data(_Base_Class, LightningDataModule):
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=True if stage=='train' else False,
-            prefetch_factor=2,
-            persistent_workers=True,
+            prefetch_factor=2 if self.num_workers else None,
+            persistent_workers=True if self.num_workers else False,
         )
 
     def prepare_global_confinement_data(self):
@@ -1716,11 +1716,9 @@ if __name__=='__main__':
         elm_classifier=True,
         # conf_classifier=True,
         # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=200,
+        max_elms=100,
         max_epochs=2,
-        batch_size=128,
-        lr=1e-3,
-        num_workers=2,
+        num_workers=4,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         max_shots_per_class=8,

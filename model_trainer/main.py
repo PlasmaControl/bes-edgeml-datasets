@@ -870,7 +870,7 @@ class Data(_Base_Class, LightningDataModule):
             global_outliers = 0
             skipped_short_pre_elm_time = 0
             n_bins = 200
-            stat_interval = 500
+            stat_interval = 200
             cummulative_hist = np.zeros(n_bins, dtype=int)
             signal_min = np.array(np.inf)
             signal_max = np.array(-np.inf)
@@ -940,7 +940,7 @@ class Data(_Base_Class, LightningDataModule):
                                 else:
                                     fsignals = signals
                             last_stat_elm_index = elm_index
-                            fsignal_window = fsignals[..., i_window_start:i_window_stop]
+                            fsignal_window = fsignals[i_window_start:i_window_stop, ...]
                             signal_min = np.min([signal_min, fsignal_window.min()])
                             signal_max = np.max([signal_max, fsignal_window.max()])
                             hist, bin_edges = np.histogram(
@@ -962,8 +962,8 @@ class Data(_Base_Class, LightningDataModule):
 
             if sub_stage == 'train' and not self.elm_raw_signal_mean:
                 self.zprint(f"    Using {sub_stage.upper()} for standardizing mean and stdev")
-                self.elm_raw_signal_mean = mean.item()
-                self.elm_raw_signal_stdev = stdev.item()
+                self.elm_raw_signal_mean = mean
+                self.elm_raw_signal_stdev = stdev
                 self.time_to_elm_quantiles = time_to_elm_quantiles
                 self.save_hyperparameters({
                     'elm_raw_signal_mean': self.elm_raw_signal_mean,
@@ -1522,7 +1522,8 @@ if __name__=='__main__':
     main(
         restart_trial_name='',
         wandb_id='',
-        elm_data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
+        # elm_data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
+        elm_data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
         signal_window_size=512,
         max_elms=20,
         max_epochs=2,
