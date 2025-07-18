@@ -28,6 +28,8 @@ from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 from lightning.pytorch.utilities import grad_norm
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
 
+import ml_data
+
 torch.set_float32_matmul_precision('medium')
 torch.set_default_dtype(torch.float32)
 
@@ -826,7 +828,7 @@ class Data(_Base_Class, LightningDataModule):
         # get rank-wise ELM signals
         sw_for_rank = list(self.rankwise_signal_window_metadata[sub_stage][self.trainer.global_rank])
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
-        elm_to_signals = {}
+        elms_to_signals: dict[int,torch.Tensor] = {}
         with h5py.File(self.elm_data_file) as root:
             for elm_index in elms_for_rank:
                 elm_group: h5py.Group = root['elms'][f"{elm_index:06d}"]
@@ -838,9 +840,11 @@ class Data(_Base_Class, LightningDataModule):
                     )
                 signals = np.transpose(signals).reshape(1, -1, 8, 8)  # reshape to (time, pol, rad)
                 # FIR first (if used), then normalize
-                elm_to_signals[elm_index] = (signals - self.elm_raw_signal_mean) / self.elm_raw_signal_stdev
-        assert len(elm_to_signals) == len(elms_for_rank)
-        signal_memory_size = sum([array.nbytes for array in elm_to_signals.values()])
+                elms_to_signals[elm_index] = torch.from_numpy(
+                    (signals - self.elm_raw_signal_mean) / self.elm_raw_signal_stdev
+                )
+        assert len(elms_to_signals) == len(elms_for_rank)
+        signal_memory_size = sum([array.nbytes for array in elms_to_signals.values()])
         self.rprint(f"    Signal memory size: {signal_memory_size/(1024**3):.3f} GB")
 
         # rank-wise datasets
@@ -849,7 +853,7 @@ class Data(_Base_Class, LightningDataModule):
                 signal_window_size=self.signal_window_size,
                 time_to_elm_quantiles=self.time_to_elm_quantiles,
                 sw_list=sw_for_rank,
-                signal_list=elm_to_signals,
+                elms_to_signals_dict=elms_to_signals,
                 quantile_min=self.time_to_elm_quantile_min,
                 quantile_max=self.time_to_elm_quantile_max,
                 contrastive_learning=self.contrastive_learning,
@@ -1370,7 +1374,7 @@ class Data(_Base_Class, LightningDataModule):
 class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
     signal_window_size: int = 0
     sw_list: list = None # global signal window data mapping to dataset index
-    signal_list: dict = None # rank-wise signals (map to ELM indices)
+    elms_to_signals_dict: dict[int,torch.Tensor] = None # rank-wise signals (map to ELM indices)
     time_to_elm_quantiles: dict[float, float] = None
     quantile_min: float = None
     quantile_max: float = None
@@ -1378,10 +1382,10 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
 
     def __post_init__(self):
         super().__init__()
-        for elm_index in self.signal_list:
-            self.signal_list[elm_index] = torch.from_numpy(
-                self.signal_list[elm_index]
-            )
+        # for elm_index in self.elms_to_signals_dict:
+        #     self.elms_to_signals_dict[elm_index] = torch.from_numpy(
+        #         self.elms_to_signals_dict[elm_index]
+        #     )
 
     def __len__(self) -> int:
         return len(self.sw_list)
@@ -1391,7 +1395,7 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
         i_t0 = sw_metadata['i_t0']
         time_to_elm = sw_metadata['time_to_elm']
         elm_index = sw_metadata['elm_index']
-        signals = self.signal_list[elm_index]
+        signals = self.elms_to_signals_dict[elm_index]
         signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
         return signal_window, quantile_binary_label, time_to_elm
@@ -1712,7 +1716,8 @@ if __name__=='__main__':
         restart_trial_name='',
         wandb_id='',
         # elm_data_file='/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/small_data_200.hdf5',
-        elm_data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
+        # elm_data_file='/Users/drsmith/Documents/repos/bes-ml-data/model_trainer/small_data_100.hdf5',
+        elm_data_file=ml_data.small_data_100,
         elm_classifier=True,
         # conf_classifier=True,
         # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
