@@ -531,8 +531,8 @@ class Data(_Base_Class, LightningDataModule):
     time_to_elm_quantile_max: float = None
     contrastive_learning: bool = False
     min_pre_elm_time: float = None
-    epochs_per_batch_size_reduction: int = 100
-    max_pow2_batch_size_reduction: int = 2
+    # epochs_per_batch_size_reduction: int = 100
+    # max_pow2_batch_size_reduction: int = 2
     fir_bp_low: float = None  # bandpass filter cut-on freq in kHz
     fir_bp_high: float = None  # bandpass filter cut-off freq in kHz
     bad_shots: list = None
@@ -549,7 +549,7 @@ class Data(_Base_Class, LightningDataModule):
     n_rows: int = 8
     n_cols: int = 8
     mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
-    prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
+    # prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
     max_confinement_event_length: int = None
 
     def __post_init__(self):
@@ -611,6 +611,8 @@ class Data(_Base_Class, LightningDataModule):
             self.seed = np.random.default_rng().integers(0, 2**32-1)
             self.save_hyperparameters("seed")
         self.rng = np.random.default_rng(self.seed)
+
+        self.old_batch_size: int = 0
 
     def prepare_data(self):
         self.zprint("\u2B1C Prepare data (rank 0 only)")
@@ -785,7 +787,7 @@ class Data(_Base_Class, LightningDataModule):
                     global_signal_window_metadata = global_signal_window_metadata[:-remainder]
                 assert len(global_signal_window_metadata) % self.trainer.world_size == 0
                 self.zprint(f"  Global signal window count (final): {len(global_signal_window_metadata):,d}")
-                self.zprint(f"  Batches per epoch: {len(global_signal_window_metadata)/self.batch_size:,.1f}")
+                # self.zprint(f"  Batches per epoch: {len(global_signal_window_metadata)/self.batch_size:,.1f}")
                 # split signal windows across ranks
                 self.rankwise_signal_window_metadata[sub_stage] = np.array_split(
                     global_signal_window_metadata, 
@@ -799,11 +801,6 @@ class Data(_Base_Class, LightningDataModule):
 
         assert stage in ['fit', 'test', 'predict'], f"Invalid stage: {stage}"
         assert self.is_global_zero == self.trainer.is_global_zero
-
-        assert self.batch_size % self.trainer.world_size == 0, \
-            f"Batch size {self.batch_size} must be divisible by world size {self.trainer.world_size}"
-        self.zprint(f"  Global batch size (initial): {self.batch_size}")
-        self.zprint(f"  Rank batch size: {self.batch_size // self.trainer.world_size}")
 
         sub_stages = ['train', 'validation'] if stage == 'fit' else [stage]
 
@@ -874,25 +871,32 @@ class Data(_Base_Class, LightningDataModule):
             seed=int(self.rng.integers(0, 2**32-1)),
             drop_last=True if stage=='train' else False,
         )
-        if stage == 'train' and self.epochs_per_batch_size_reduction:
-            batch_size_reduction_pow2_factor = min(
-                self.max_pow2_batch_size_reduction, 
-                self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
-            ) 
-            batch_size = self.batch_size // (2**batch_size_reduction_pow2_factor)
-            if batch_size != self.batch_size:
-                self.zprint(f"Reduced global batch size: {batch_size}")
-        else:
+        batch_size: int = None
+        if isinstance(self.batch_size, int):
             batch_size = self.batch_size
+            pin_memory = True
+            persistent_workers = True if self.num_workers else False
+            self.zprint(f'*** Batch size {batch_size:d} for epoch {self.trainer.current_epoch:d}')
+        elif isinstance(self.batch_size, dict):
+            pin_memory = False
+            persistent_workers = False
+            for key, value in reversed(self.batch_size.items()):
+                if self.trainer.current_epoch >= key:
+                    batch_size = value
+                    break
+            if batch_size != self.old_batch_size:
+                self.zprint(f'*** Batch size {batch_size:d} for epoch {self.trainer.current_epoch:d}')
+                self.old_batch_size = batch_size
+        assert batch_size > 0
         return torch.utils.data.DataLoader(
             dataset=self.elm_datasets[stage],
             sampler=sampler,
             batch_size=batch_size//self.trainer.world_size,  # batch size per rank
             num_workers=self.num_workers,
-            pin_memory=True,
             drop_last=True if stage=='train' else False,
             prefetch_factor=2 if self.num_workers else None,
-            persistent_workers=True if self.num_workers else False,
+            pin_memory=pin_memory,
+            persistent_workers=persistent_workers,
         )
 
     def prepare_global_confinement_data(self):
@@ -1233,7 +1237,7 @@ class Data(_Base_Class, LightningDataModule):
 
         self.zprint(f"    Valid t0 indices (per rank): {len(packaged_valid_t0_indices):,d}")
         self.rprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.4f} GB")
-        self.zprint(f"    Batches per epoch: {len(packaged_valid_t0_indices)*self.trainer.world_size/self.batch_size:.1f}")
+        # self.zprint(f"    Batches per epoch: {len(packaged_valid_t0_indices)*self.trainer.world_size/self.batch_size:.1f}")
         self.zprint(f"    {stage.upper()} data time: {time.time()-t_tmp:.1f} s")
 
         if stage in ['train', 'validation', 'test']:
@@ -1259,20 +1263,19 @@ class Data(_Base_Class, LightningDataModule):
             seed=int(self.rng.integers(0, 2**32-1)),
             drop_last=True if stage=='train' else False,
         )
-        if stage == 'train' and self.epochs_per_batch_size_reduction:
-            batch_size_reduction_pow2_factor = min(
-                self.max_pow2_batch_size_reduction, 
-                self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
-            ) 
-            batch_size = self.batch_size // (2**batch_size_reduction_pow2_factor)
-            if batch_size != self.batch_size:
-                self.zprint(f"Reduced global batch size: {batch_size}")
-        else:
-            batch_size = self.batch_size
+        # if stage == 'train' and self.epochs_per_batch_size_reduction:
+        #     batch_size_reduction_pow2_factor = min(
+        #         self.max_pow2_batch_size_reduction, 
+        #         self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
+        #     ) 
+        #     batch_size = self.batch_size // (2**batch_size_reduction_pow2_factor)
+        #     if batch_size != self.batch_size:
+        #         self.zprint(f"Reduced global batch size: {batch_size}")
+        # else:
         return torch.utils.data.DataLoader(
             dataset=self.confinement_datasets[stage],
             sampler=sampler,
-            batch_size=batch_size//self.trainer.world_size,  # batch size per rank
+            batch_size=self.batch_size//self.trainer.world_size,  # batch size per rank
             num_workers=self.num_workers,
             pin_memory=True,
             drop_last=True if stage=='train' else False,
@@ -1501,8 +1504,8 @@ def main(
         min_pre_elm_time: float = None,
         fir_bp_low: float = None,
         fir_bp_high: float = None,
-        epochs_per_batch_size_reduction: int = 100,
-        max_pow2_batch_size_reduction: int = 2,
+        # epochs_per_batch_size_reduction: int = 100,
+        # max_pow2_batch_size_reduction: int = 2,
         max_shots_per_class: int = None,
         max_confinement_event_length: int = None,
 ) -> tuple:
@@ -1623,6 +1626,10 @@ def main(
     zprint("\u2B1C Creating Trainer")
     if precision is None:
         precision = '16-mixed' if torch.cuda.is_available() else 32
+    reload_dataloaders_every_n_epochs = (
+        0 if isinstance(batch_size, int) else
+        list(batch_size.keys())[1]
+    )
     trainer = Trainer(
         max_epochs = max_epochs,
         gradient_clip_val = gradient_clip_val,
@@ -1641,6 +1648,7 @@ def main(
         num_nodes = num_nodes,
         use_distributed_sampler=False,
         num_sanity_val_steps=0,
+        reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs,
     )
 
     assert trainer.world_size == world_size
@@ -1678,14 +1686,11 @@ def main(
                 time_to_elm_quantile_min=time_to_elm_quantile_min,
                 time_to_elm_quantile_max=time_to_elm_quantile_max,
                 contrastive_learning=contrastive_learning,
-                # is_global_zero=is_global_zero,
-                # world_size=world_size,
-                # world_rank=world_rank,
                 min_pre_elm_time=min_pre_elm_time,
                 fir_bp_low=fir_bp_low,
                 fir_bp_high=fir_bp_high,
-                epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
-                max_pow2_batch_size_reduction=max_pow2_batch_size_reduction,
+                # epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
+                # max_pow2_batch_size_reduction=max_pow2_batch_size_reduction,
                 max_shots_per_class=max_shots_per_class,
                 max_confinement_event_length=max_confinement_event_length,
             )
@@ -1717,22 +1722,18 @@ def main(
 
 if __name__=='__main__':
     main(
-        restart_trial_name='',
-        wandb_id='',
+        # restart_trial_name='',
+        # wandb_id='',
         elm_data_file=ml_data.small_data_200,
-        # max_elms=100,
-        max_epochs=2,
+        batch_size={0:64, 3:128, 6:256},
+        # lr={0:1e-4, 5:3e-4, 10:1e-3},
+        lr=1e-3,
+        max_elms=100,
+        max_epochs=20,
         num_workers=4,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         max_shots_per_class=8,
-        # max_confinement_event_length=int(20e3),
-        elm_mean_loss_factor=1,
-        conf_mean_loss_factor=1,
-        initial_weight_factor=1,
-        # time_to_elm_quantile_min=0.4,
-        # time_to_elm_quantile_max=0.6,
-        # contrastive_learning=True,
         # fir_bp_low=5,
         # fir_bp_high=250,
         # skip_data=True,

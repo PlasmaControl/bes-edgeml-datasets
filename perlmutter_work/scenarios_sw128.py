@@ -2,7 +2,7 @@ from model_trainer.main_multitask import main
 from ml_data import small_data_200
 
 
-def scenario_128(
+def scenarios_sw128(
         batch_size=256,
         lr=1e-3,
         max_epochs=5,
@@ -38,8 +38,8 @@ def scenario_128(
     )
 
 if __name__=='__main__':
-    # scenario_128(max_elms=100, max_epochs=2)
-    scenario_128(
+    # scenarios_sw128(max_elms=100, max_epochs=2)
+    scenarios_sw128(
         batch_size=256,
         max_epochs=80,
         use_wandb=True,
