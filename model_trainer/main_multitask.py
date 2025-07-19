@@ -77,10 +77,9 @@ class _Base_Class:
 class Model(_Base_Class, LightningModule):
     elm_classifier: bool = True
     conf_classifier: bool = False
-    lr: float = 1e-3  # maximum LR used by first layer
+    lr: float|dict = 1e-3  # maximum LR used by first layer
     lr_scheduler_patience: int = 100
     lr_scheduler_threshold: float = 1e-3
-    lr_warmup_epochs: int = 5
     # lr_layerwise_decrement: float = 1.
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 2e-2
@@ -322,12 +321,20 @@ class Model(_Base_Class, LightningModule):
         #             lr /= self.lr_layerwise_decrement
 
         self.zprint(f"Using {self.use_optimizer.upper()} optimizer")
-        optimizer = None
+
+        lr = None
+        if isinstance(self.lr, float):
+            lr = float(self.lr)
+        elif isinstance(self.lr, dict):
+            lr = float(list(self.lr.values())[0])
+        assert isinstance(lr, float)
+
         optim_kwargs = {
             'params': self.parameters(),
             'lr': self.lr,
             'weight_decay': self.weight_decay,
         }
+        optimizer = None
         if self.use_optimizer.lower() == 'sgd':
             optimizer = torch.optim.SGD(
                 momentum=0.2, 
@@ -335,8 +342,7 @@ class Model(_Base_Class, LightningModule):
             )
         elif self.use_optimizer.lower() == 'adam':
             optimizer = torch.optim.Adam(**optim_kwargs)
-        else:
-            raise ValueError
+        assert optimizer is not None
 
         lr_reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer=optimizer,
@@ -345,20 +351,23 @@ class Model(_Base_Class, LightningModule):
             threshold=self.lr_scheduler_threshold,
             mode='min' if 'loss' in self.monitor_metric else 'max',
             min_lr=1e-4,
-            # verbose=True,
         )
-        lr_warm_up = torch.optim.lr_scheduler.LinearLR(
-            optimizer=optimizer,
-            start_factor=0.05,
-            total_iters=self.lr_warmup_epochs,
-            # verbose=True,
-        )
-        return_optim_list = [optimizer]
-        return_lr_scheduler_list = [
-            {'scheduler': lr_reduce_on_plateau, 'monitor': self.monitor_metric},
-            lr_warm_up, 
-        ]
-        return (return_optim_list, return_lr_scheduler_list)
+        # lr_warm_up = torch.optim.lr_scheduler.LinearLR(
+        #     optimizer=optimizer,
+        #     start_factor=0.05,
+        #     total_iters=self.lr_warmup_epochs,
+        #     # verbose=True,
+        # )
+        # return_optim_list = [optimizer]
+        # return_lr_scheduler_list = [
+        #     {'scheduler': lr_reduce_on_plateau, 'monitor': self.monitor_metric},
+        #     # lr_warm_up, 
+        # ]
+        # return (return_optim_list, return_lr_scheduler_list)
+        return {
+            'optimizer': optimizer,
+            'lr_scheduler': {'scheduler': lr_reduce_on_plateau, 'monitor': self.monitor_metric},
+        }
 
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
         return self.update_step(
@@ -474,15 +483,22 @@ class Model(_Base_Class, LightningModule):
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
+        if isinstance(self.lr, dict):
+            optimizer = self.optimizers()
+            for key, value in reversed(self.lr.items()):
+                if self.current_epoch >= key:
+                    for param_group in optimizer.param_groups:
+                        param_group['lr'] = value  # New learning rate
+                    break
 
-    def on_train_batch_start(self, batch, batch_idx):
-        # if batch_idx % 25 == 0:
-        #     self.rprint(f"Train batch start: batch {batch_idx}")
-        pass
+    # def on_train_batch_start(self, batch, batch_idx):
+    #     # if batch_idx % 25 == 0:
+    #     #     self.rprint(f"Train batch start: batch {batch_idx}")
+    #     pass
 
-    def on_validation_batch_start(self, batch, batch_idx, dataloader_idx=0):
-        # self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
-        pass
+    # def on_validation_batch_start(self, batch, batch_idx, dataloader_idx=0):
+    #     # self.zprint(f"Validation batch start: batch {batch_idx}, dataloader {dataloader_idx}")
+    #     pass
 
     def on_train_epoch_end(self):
         if self.is_global_zero and self.global_step > 0:
@@ -519,7 +535,7 @@ class Data(_Base_Class, LightningDataModule):
     conf_classifier: bool = False
     log_dir: str|Path = None
     max_elms: int = None
-    batch_size: int = 128
+    batch_size: int|dict = 128
     stride_factor: int = 8
     num_workers: int = 1
     outlier_value: float = 6
@@ -531,8 +547,6 @@ class Data(_Base_Class, LightningDataModule):
     time_to_elm_quantile_max: float = None
     contrastive_learning: bool = False
     min_pre_elm_time: float = None
-    # epochs_per_batch_size_reduction: int = 100
-    # max_pow2_batch_size_reduction: int = 2
     fir_bp_low: float = None  # bandpass filter cut-on freq in kHz
     fir_bp_high: float = None  # bandpass filter cut-off freq in kHz
     bad_shots: list = None
@@ -549,7 +563,6 @@ class Data(_Base_Class, LightningDataModule):
     n_rows: int = 8
     n_cols: int = 8
     mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
-    # prepare_data_per_node: bool = True  # hack to avoid error between dataclass and LightningDataModule
     max_confinement_event_length: int = None
 
     def __post_init__(self):
@@ -876,7 +889,7 @@ class Data(_Base_Class, LightningDataModule):
             batch_size = self.batch_size
             pin_memory = True
             persistent_workers = True if self.num_workers else False
-            self.zprint(f'*** Batch size {batch_size:d} for epoch {self.trainer.current_epoch:d}')
+            self.zprint(f'Ep {self.trainer.current_epoch:03d}  batch size {batch_size:d}')
         elif isinstance(self.batch_size, dict):
             pin_memory = False
             persistent_workers = False
@@ -885,7 +898,7 @@ class Data(_Base_Class, LightningDataModule):
                     batch_size = value
                     break
             if batch_size != self.old_batch_size:
-                self.zprint(f'*** Batch size {batch_size:d} for epoch {self.trainer.current_epoch:d}')
+                self.zprint(f'Ep {self.trainer.current_epoch:03d}  batch size {batch_size:d}')
                 self.old_batch_size = batch_size
         assert batch_size > 0
         return torch.utils.data.DataLoader(
@@ -1467,10 +1480,9 @@ def main(
         restart_trial_name: str = None,
         wandb_id: str = None,
         # model
-        lr: float = 1e-3,
+        lr: float|dict = 1e-3,
         weight_decay: float = 1e-4,
         lr_scheduler_patience: int = 100,
-        lr_warmup_epochs: int = 5,
         monitor_metric = None,
         use_optimizer: str = 'SGD',
         no_bias: bool = True,
@@ -1494,7 +1506,7 @@ def main(
         skip_data: bool = False,
         precision = None,
         # data
-        batch_size: int = 128,
+        batch_size: int|dict = 128,
         fraction_validation: float = 0.1,
         fraction_test: float = 0.0,
         num_workers: int = 1,
@@ -1533,7 +1545,6 @@ def main(
         signal_window_size=signal_window_size,
         lr=lr,
         lr_scheduler_patience=lr_scheduler_patience,
-        lr_warmup_epochs=lr_warmup_epochs,
         weight_decay=weight_decay,
         # dropout_percent=dropout_percent,
         monitor_metric=monitor_metric,
@@ -1579,7 +1590,6 @@ def main(
             min_delta=early_stopping_min_delta,
             patience=early_stopping_patience,
             log_rank_zero_only=True,
-            verbose=True,
         ),
     ]
 
@@ -1729,11 +1739,10 @@ if __name__=='__main__':
         # lr={0:1e-4, 5:3e-4, 10:1e-3},
         lr=1e-3,
         max_elms=100,
-        max_epochs=20,
+        max_epochs=8,
         num_workers=4,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
-        max_shots_per_class=8,
         # fir_bp_low=5,
         # fir_bp_high=250,
         # skip_data=True,
