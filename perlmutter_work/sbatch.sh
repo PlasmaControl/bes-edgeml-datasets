@@ -44,8 +44,9 @@ echo UNIQUE_IDENTIFIER: $UNIQUE_IDENTIFIER
 export WANDB__SERVICE_WAIT=500
 
 
-SCRIPT=${PWD}/job.py
+SCRIPT=${PWD}/scenarios_sw128.py
 echo Script: $SCRIPT
+cat $SCRIPT
 
 JOB_DIR=${HOME}/scratch-ml
 echo Job directory: $JOB_DIR
