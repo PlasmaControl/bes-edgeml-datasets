@@ -9,8 +9,8 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --time=30
-#SBATCH --qos=debug
+#SBATCH --time=0-8
+#SBATCH --qos=regular
 
 module --redirect list
 which python

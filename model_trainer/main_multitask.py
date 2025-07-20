@@ -120,7 +120,7 @@ class Model(_Base_Class, LightningModule):
         if self.mlp_task_models is None:
             self.mlp_task_models = {
                 'elm_class': {  # specifications for a single MLP task
-                    'layers': (self.feature_space_size, 32, 1),
+                    'layers': (self.feature_space_size, 16, 1),
                     'metrics': {
                         'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
                         'f1_score': sklearn.metrics.f1_score,
