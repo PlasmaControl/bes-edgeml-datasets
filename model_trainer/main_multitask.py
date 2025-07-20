@@ -77,10 +77,11 @@ class _Base_Class:
 class Model(_Base_Class, LightningModule):
     elm_classifier: bool = True
     conf_classifier: bool = False
-    lr: float|dict = 1e-3  # maximum LR used by first layer
+    lr: float = 1e-3
     lr_scheduler_patience: int = 100
     lr_scheduler_threshold: float = 1e-3
-    # lr_layerwise_decrement: float = 1.
+    deepest_layer_lr_factor: float = 0.1
+    lr_warmup_epochs: int = 5
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 2e-2
     monitor_metric: str = None
@@ -223,13 +224,13 @@ class Model(_Base_Class, LightningModule):
         out_channels: int = None
         for i_layer, layer in enumerate(self.feature_model_layers):
             conv_layer_name = f"L{i_layer:02d}_Conv"
-            bias = layer['bias'] and not self.no_bias
+            bias = layer['bias'] and (self.no_bias == False)
             conv = torch.nn.Conv3d(
                 in_channels=1 if out_channels is None else out_channels,
                 out_channels=layer['out_channels'],
                 kernel_size=layer['kernel'],
                 stride=layer['stride'],
-                bias=bias and not self.no_bias,
+                bias=bias,
             )
             n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
@@ -260,7 +261,7 @@ class Model(_Base_Class, LightningModule):
 
         for i_layer in range(n_layers-1):
             mlp_layer_name = f"L{i_layer:02d}_FC"
-            bias = (True and not self.no_bias) if i_layer+1<n_layers-1 else False
+            bias = (True and (self.no_bias==False)) if i_layer<n_layers-2 else False
             mlp_layer = torch.nn.Linear(
                 in_features=mlp_layers[i_layer],
                 out_features=mlp_layers[i_layer+1],
@@ -278,59 +279,62 @@ class Model(_Base_Class, LightningModule):
 
         return mlp_classifier
 
+    def make_parameter_list(self) -> list[dict]:
+        smallest_lr = self.deepest_layer_lr_factor * self.lr
+        parameter_list = []
+        n_feature_layers = 0
+        trainable_layer_names = []
+        for layer_name, layer in self.feature_model.named_children():
+            for param in layer.parameters():
+                if param.requires_grad:
+                    n_feature_layers += 1
+                    trainable_layer_names.append(layer_name)
+                    break
+        lrs_for_feature_layers = np.logspace(
+            np.log10(smallest_lr),
+            np.log10(self.lr),
+            n_feature_layers,
+        )
+        for i_layer, layer_name in enumerate(trainable_layer_names):
+            layer = self.feature_model.get_submodule(layer_name)
+            for param_name, param in layer.named_parameters():
+                if not param.requires_grad: continue
+                param_dict = {}
+                if 'bias' in param_name:
+                    param_dict['weight_decay'] = 0.
+                    param_dict['lr'] = lrs_for_feature_layers[i_layer]
+                elif 'weight' in param_name:
+                    param_dict['lr'] = lrs_for_feature_layers[i_layer]
+                else:
+                    raise ValueError
+                self.zprint(f"  {layer_name}  {param_name}: {param_dict}")
+                param_dict['params'] = param
+                parameter_list.append(param_dict)
+        for task_model in self.task_models.values():
+            for layer_name, layer in task_model.named_children():
+                for param_name, param in layer.named_parameters():
+                    if not param.requires_grad: continue
+                    param_dict = {}
+                    if 'bias' in param_name:
+                        param_dict['weight_decay'] = 0.
+                    elif 'weight' in param_name:
+                        pass
+                    else:
+                        raise ValueError
+                    self.zprint(f"  {layer_name}  {param_name}: {param_dict}")
+                    param_dict['params'] = param
+                    parameter_list.append(param_dict)
+        return parameter_list
+
     def configure_optimizers(self):
-        # parameter_group = []
-        # lr = self.lr
-        # self.zprint("Initial layer-wise learning rates")
-        # for layer_name, layer in self.feature_model.named_children():
-        #     if 'bn' in layer_name:
-        #         for param_name, param in layer.named_parameters():
-        #             parameter_group.append({
-        #                 'params': param,
-        #                 'lr': self.lr,
-        #             })
-        #     else:
-        #         for param_name, param in layer.named_parameters():
-        #             assert param_name.endswith('weight') or param_name.endswith('bias')
-        #             param_lr = lr if param_name.endswith('weight') else lr
-        #             parameter_group.append({
-        #                 'params': param,
-        #                 'lr': param_lr,
-        #             })
-        #             self.zprint(f"  {layer_name} {param_name} {param_lr:.3e}")
-        #         lr /= self.lr_layerwise_decrement
-        # lr_after_feature_model = lr
-        # for task_name, task_model in self.task_models.items():
-        #     lr = lr_after_feature_model
-        #     for layer_name, layer in task_model.named_children():
-        #         if 'bn' in layer_name:
-        #             for param_name, param in layer.named_parameters():
-        #                 parameter_group.append({
-        #                     'params': param,
-        #                     'lr': self.lr,
-        #                 })
-        #         else:
-        #             for param_name, param in layer.named_parameters():
-        #                 assert param_name.endswith('weight') or param_name.endswith('bias')
-        #                 param_lr = lr if param_name.endswith('weight') else lr
-        #                 parameter_group.append({
-        #                     'params': param,
-        #                     'lr': param_lr,
-        #                 })
-        #                 self.zprint(f"  {task_name} {layer_name} {param_name} {param_lr:.3e}")
-        #             lr /= self.lr_layerwise_decrement
-
-        self.zprint(f"Using {self.use_optimizer.upper()} optimizer")
-
-        lr = None
-        if isinstance(self.lr, float):
-            lr = float(self.lr)
-        elif isinstance(self.lr, dict):
-            lr = float(list(self.lr.values())[0])
-        assert isinstance(lr, float)
+        self.zprint("\u2B1C " + f"Creating {self.use_optimizer.upper()} optimizer")
+        self.zprint(f"  lr: {self.lr:.1e}")
+        self.zprint(f"  lr for deepest layer: {self.deepest_layer_lr_factor * self.lr:.1e}")
+        self.zprint(f"  Warmup epochs: {self.lr_warmup_epochs}")
+        self.zprint(f"  Reduce on plateau threshold {self.lr_scheduler_threshold:.1e} and patience {self.lr_scheduler_patience:d}")
 
         optim_kwargs = {
-            'params': self.parameters(),
+            'params': self.make_parameter_list(),
             'lr': self.lr,
             'weight_decay': self.weight_decay,
         }
@@ -344,7 +348,7 @@ class Model(_Base_Class, LightningModule):
             optimizer = torch.optim.Adam(**optim_kwargs)
         assert optimizer is not None
 
-        lr_reduce_on_plateau = torch.optim.lr_scheduler.ReduceLROnPlateau(
+        plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer=optimizer,
             factor=0.5,
             patience=self.lr_scheduler_patience,
@@ -352,22 +356,18 @@ class Model(_Base_Class, LightningModule):
             mode='min' if 'loss' in self.monitor_metric else 'max',
             min_lr=1e-4,
         )
-        # lr_warm_up = torch.optim.lr_scheduler.LinearLR(
-        #     optimizer=optimizer,
-        #     start_factor=0.05,
-        #     total_iters=self.lr_warmup_epochs,
-        #     # verbose=True,
-        # )
-        # return_optim_list = [optimizer]
-        # return_lr_scheduler_list = [
-        #     {'scheduler': lr_reduce_on_plateau, 'monitor': self.monitor_metric},
-        #     # lr_warm_up, 
-        # ]
-        # return (return_optim_list, return_lr_scheduler_list)
-        return {
-            'optimizer': optimizer,
-            'lr_scheduler': {'scheduler': lr_reduce_on_plateau, 'monitor': self.monitor_metric},
-        }
+        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+            optimizer=optimizer,
+            start_factor=0.05,
+            total_iters=self.lr_warmup_epochs,
+        )
+        return (
+            [optimizer],
+            [
+                {'scheduler': plateau_scheduler, 'monitor': self.monitor_metric},
+                warmup_scheduler, 
+            ],
+        )
 
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
         return self.update_step(
@@ -423,8 +423,6 @@ class Model(_Base_Class, LightningModule):
                             y_true=labels.detach().cpu(),
                             zero_division=0,
                         )
-                        # if self.current_epoch<10:
-                        #     metric_value /= 10
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
@@ -483,13 +481,24 @@ class Model(_Base_Class, LightningModule):
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
-        if isinstance(self.lr, dict):
-            optimizer = self.optimizers()
-            for key, value in reversed(self.lr.items()):
-                if self.current_epoch >= key:
-                    for param_group in optimizer.param_groups:
-                        param_group['lr'] = value  # New learning rate
-                    break
+        # if isinstance(self.warmup_lr_factors, dict):
+        #     if self.current_epoch not in self.warmup_lr_factors:
+        #         return
+            
+        #     lr: float = None
+        #     for key, value in reversed(self.lr.items()):
+        #         if self.current_epoch >= key:
+        #             lr = value
+        #             break
+        #     assert isinstance(lr, float)
+        #     optimizer: torch.optim.SGD = self.optimizers()
+        #     param_list = self.make_parameter_list(largest_lr=lr)
+        #     # self.zprint(param_list)
+        #     for param_group in optimizer.param_groups:
+        #         for param_dict in param_list:
+        #             if torch.equal(param_dict['params'], param_group['params']):
+        #                 print(param_group['lr'], param_dict['lr'])
+        #                 break
 
     # def on_train_batch_start(self, batch, batch_idx):
     #     # if batch_idx % 25 == 0:
@@ -762,19 +771,12 @@ class Data(_Base_Class, LightningDataModule):
                     self.zprint(f"  Using {sub_stage.upper()} for standardizing mean and stdev")
                     self.elm_raw_signal_mean = mean.item()
                     self.elm_raw_signal_stdev = stdev.item()
-                    # self.save_hyperparameters({
-                    #     'elm_raw_signal_mean': self.elm_raw_signal_mean,
-                    #     'elm_raw_signal_stdev': self.elm_raw_signal_stdev,
-                    # })
                     self.zprint(f"  Standarizing signals with mean {self.elm_raw_signal_mean:.3f} and std {self.elm_raw_signal_stdev:.3f}")
 
                     quantiles = [0.5]
                     time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in global_signal_window_metadata]
                     quantile_values = np.quantile(time_to_elm_labels, quantiles)
                     self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
-                    # self.save_hyperparameters({
-                    #     'time_to_elm_quantiles': self.time_to_elm_quantiles,
-                    # })
                     self.zprint(f"  Time-to-ELM quantiles for binary labels:")
                     for q, qval in self.time_to_elm_quantiles.items():
                         self.zprint(f"    Quantile {q:.2f}: {qval:.1f} ms")
@@ -800,7 +802,6 @@ class Data(_Base_Class, LightningDataModule):
                     global_signal_window_metadata = global_signal_window_metadata[:-remainder]
                 assert len(global_signal_window_metadata) % self.trainer.world_size == 0
                 self.zprint(f"  Global signal window count (final): {len(global_signal_window_metadata):,d}")
-                # self.zprint(f"  Batches per epoch: {len(global_signal_window_metadata)/self.batch_size:,.1f}")
                 # split signal windows across ranks
                 self.rankwise_signal_window_metadata[sub_stage] = np.array_split(
                     global_signal_window_metadata, 
@@ -868,9 +869,6 @@ class Data(_Base_Class, LightningDataModule):
                 time_to_elm_quantiles=self.time_to_elm_quantiles,
                 sw_list=sw_for_rank,
                 elms_to_signals_dict=elms_to_signals,
-                # quantile_min=self.time_to_elm_quantile_min,
-                # quantile_max=self.time_to_elm_quantile_max,
-                # contrastive_learning=self.contrastive_learning,
             )
         elif sub_stage == 'predict':
             pass
@@ -888,11 +886,9 @@ class Data(_Base_Class, LightningDataModule):
         if isinstance(self.batch_size, int):
             batch_size = self.batch_size
             pin_memory = True
-            persistent_workers = True if self.num_workers else False
             self.zprint(f'Ep {self.trainer.current_epoch:03d}  batch size {batch_size:d}')
         elif isinstance(self.batch_size, dict):
             pin_memory = False
-            persistent_workers = False
             for key, value in reversed(self.batch_size.items()):
                 if self.trainer.current_epoch >= key:
                     batch_size = value
@@ -909,7 +905,7 @@ class Data(_Base_Class, LightningDataModule):
             drop_last=True if stage=='train' else False,
             prefetch_factor=2 if self.num_workers else None,
             pin_memory=pin_memory,
-            persistent_workers=persistent_workers,
+            persistent_workers=True if self.num_workers else False,
         )
 
     def prepare_global_confinement_data(self):
@@ -1103,8 +1099,6 @@ class Data(_Base_Class, LightningDataModule):
                 rankwise_sw_counts = [rd['sw_count'] for rd in rankwise_stage_event_split]
                 self.zprint(f"    Rank-wise signal window count (approx): {rankwise_sw_counts}")
                 rankwise_stage_event_split = [re['events'] for re in rankwise_stage_event_split]
-                # for i, re in enumerate(rankwise_stage_event_split):
-                #     self.zprint(f"    Rank {i} shot/ev keys: {[e['shot_event_key'] for e in re[0:4]]}")
         rankwise_stage_event_split = self.broadcast(rankwise_stage_event_split)
 
         # package data for rank
@@ -1276,15 +1270,6 @@ class Data(_Base_Class, LightningDataModule):
             seed=int(self.rng.integers(0, 2**32-1)),
             drop_last=True if stage=='train' else False,
         )
-        # if stage == 'train' and self.epochs_per_batch_size_reduction:
-        #     batch_size_reduction_pow2_factor = min(
-        #         self.max_pow2_batch_size_reduction, 
-        #         self.trainer.current_epoch//self.epochs_per_batch_size_reduction,
-        #     ) 
-        #     batch_size = self.batch_size // (2**batch_size_reduction_pow2_factor)
-        #     if batch_size != self.batch_size:
-        #         self.zprint(f"Reduced global batch size: {batch_size}")
-        # else:
         return torch.utils.data.DataLoader(
             dataset=self.confinement_datasets[stage],
             sampler=sampler,
@@ -1396,16 +1381,9 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
     sw_list: list = None # global signal window data mapping to dataset index
     elms_to_signals_dict: dict[int,torch.Tensor] = None # rank-wise signals (map to ELM indices)
     time_to_elm_quantiles: dict[float, float] = None
-    # quantile_min: float = None
-    # quantile_max: float = None
-    # contrastive_learning: bool = False
 
     def __post_init__(self):
         super().__init__()
-        # for elm_index in self.elms_to_signals_dict:
-        #     self.elms_to_signals_dict[elm_index] = torch.from_numpy(
-        #         self.elms_to_signals_dict[elm_index]
-        #     )
 
     def __len__(self) -> int:
         return len(self.sw_list)
@@ -1480,8 +1458,10 @@ def main(
         restart_trial_name: str = None,
         wandb_id: str = None,
         # model
-        lr: float|dict = 1e-3,
+        lr: float = 1e-3,
         weight_decay: float = 1e-4,
+        deepest_layer_lr_factor: float = 0.1,
+        lr_warmup_epochs: int = 5,
         lr_scheduler_patience: int = 100,
         monitor_metric = None,
         use_optimizer: str = 'SGD',
@@ -1516,8 +1496,6 @@ def main(
         min_pre_elm_time: float = None,
         fir_bp_low: float = None,
         fir_bp_high: float = None,
-        # epochs_per_batch_size_reduction: int = 100,
-        # max_pow2_batch_size_reduction: int = 2,
         max_shots_per_class: int = None,
         max_confinement_event_length: int = None,
 ) -> tuple:
@@ -1540,22 +1518,18 @@ def main(
     ### model
     zprint("\u2B1C Creating model")
     lit_model = Model(
-        # elm_classifier=elm_classifier,
-        # conf_classifier=conf_classifier,
         signal_window_size=signal_window_size,
         lr=lr,
         lr_scheduler_patience=lr_scheduler_patience,
+        deepest_layer_lr_factor=deepest_layer_lr_factor,
+        lr_warmup_epochs=lr_warmup_epochs,
         weight_decay=weight_decay,
         # dropout_percent=dropout_percent,
         monitor_metric=monitor_metric,
         use_optimizer=use_optimizer,
-        # is_global_zero=is_global_zero,
         elm_loss_weight=elm_mean_loss_factor,
         conf_loss_weight=conf_mean_loss_factor,
         initial_weight_factor=initial_weight_factor,
-        # world_size=world_size,
-        # world_rank=world_rank,
-        # lr_layerwise_decrement=layerwise_lr_decrement,
         no_bias=no_bias,
         batch_norm=batch_norm,
         feature_model_layers=feature_model_layers,
@@ -1583,7 +1557,6 @@ def main(
             mode=metric_mode,
             save_last=True,
         ),
-        # DeviceStatsMonitor(),
         EarlyStopping(
             monitor=monitor_metric,
             mode=metric_mode,
@@ -1699,8 +1672,6 @@ def main(
                 min_pre_elm_time=min_pre_elm_time,
                 fir_bp_low=fir_bp_low,
                 fir_bp_high=fir_bp_high,
-                # epochs_per_batch_size_reduction=epochs_per_batch_size_reduction,
-                # max_pow2_batch_size_reduction=max_pow2_batch_size_reduction,
                 max_shots_per_class=max_shots_per_class,
                 max_confinement_event_length=max_confinement_event_length,
             )
@@ -1734,18 +1705,21 @@ if __name__=='__main__':
     main(
         # restart_trial_name='',
         # wandb_id='',
-        elm_data_file=ml_data.small_data_200,
-        batch_size={0:64, 3:128, 6:256},
-        # lr={0:1e-4, 5:3e-4, 10:1e-3},
-        lr=1e-3,
-        max_elms=100,
-        max_epochs=8,
-        num_workers=4,
+        elm_data_file=ml_data.small_data_100,
+        batch_size={0:32, 5:64, 10:128},
+        lr=3e-3,
+        deepest_layer_lr_factor=0.0316,
+        lr_warmup_epochs=10,
+        # max_elms=50,
+        max_epochs=20,
+        num_workers=3,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
-        # fir_bp_low=5,
-        # fir_bp_high=250,
+        # log_freq=50,
+        # no_bias=False,
+        fir_bp_low=5,
+        fir_bp_high=250,
         # skip_data=True,
         # skip_train=True,
-        # use_wandb=True,
+        use_wandb=True,
     )
