@@ -236,7 +236,7 @@ class Model(_Base_Class, LightningModule):
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
             self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
-            if self.dropout and i_layer > 0:
+            if self.dropout and i_layer > 0 and i_layer < len(self.feature_model_layers) - 1:
                 feature_layer_dict[f"L{i_layer:02d}_Dropout"] = torch.nn.Dropout3d(self.dropout)
             feature_layer_dict[conv_layer_name] = conv
             feature_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
@@ -311,14 +311,16 @@ class Model(_Base_Class, LightningModule):
                 param_dict['params'] = param
                 parameter_list.append(param_dict)
         for task_model in self.task_models.values():
-            for layer_name, layer in task_model.named_children():
+            for i_layer, layer_name, layer in enumerate(task_model):
+                layer = task_model.get_submodule(layer_name)
                 for param_name, param in layer.named_parameters():
                     if not param.requires_grad: continue
                     param_dict = {}
                     if 'bias' in param_name:
                         param_dict['weight_decay'] = 0.
                     elif 'weight' in param_name:
-                        pass
+                        if i_layer == 0:
+                            param_dict['lr'] = self.lr/10
                     else:
                         raise ValueError
                     self.zprint(f"  {layer_name}  {param_name}: {param_dict}")
@@ -1472,6 +1474,7 @@ def main(
         elm_mean_loss_factor = None,
         conf_mean_loss_factor = None,
         initial_weight_factor = 1.0,
+        dropout: float = None,
         # loggers
         log_freq: int = 100,
         use_wandb: bool = False,
@@ -1534,6 +1537,7 @@ def main(
         batch_norm=batch_norm,
         feature_model_layers=feature_model_layers,
         mlp_task_models=mlp_task_models,
+        dropout=dropout,
     )
 
     monitor_metric = lit_model.monitor_metric

@@ -9,7 +9,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --time=0-8
+#SBATCH --time=0-12
 #SBATCH --qos=regular
 
 module --redirect list
