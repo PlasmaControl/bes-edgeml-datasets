@@ -1,9 +1,8 @@
 from model_trainer.main_multitask import main
-import ml_data
+
 
 signal_window_size = 128
 experiment_name='experiment_128_v1',
-
 
 if __name__=='__main__':
     feature_model_layers = (
@@ -21,7 +20,7 @@ if __name__=='__main__':
         restart_trial_name='',
         wandb_id='',
         # data
-        elm_data_file=ml_data.small_data_500,
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         max_elms=300,
         # model
         feature_model_layers=feature_model_layers,
@@ -38,7 +37,7 @@ if __name__=='__main__':
         deepest_layer_lr_factor=0.1,
         early_stopping_patience=250,
         batch_size={0:64, 15:128, 30:256, 45:512},
-        num_workers=4,
+        num_workers=8,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         use_wandb=True,
