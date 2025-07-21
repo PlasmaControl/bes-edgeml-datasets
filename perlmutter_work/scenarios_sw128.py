@@ -1,5 +1,9 @@
 from model_trainer.main_multitask import main
-from ml_data import small_data_200
+import ml_data
+
+signal_window_size = 128
+experiment_name='experiment_128_v1',
+
 
 if __name__=='__main__':
     feature_model_layers = (
@@ -10,26 +14,32 @@ if __name__=='__main__':
         {'out_channels': 2, 'kernel': (1, 3, 3), 'stride': 1,         'bias': False},
     )
     main(
-        signal_window_size=128,
+        # scenario
+        signal_window_size=signal_window_size,
+        experiment_name=experiment_name,
+        # restart
         restart_trial_name='',
         wandb_id='',
-        experiment_name='experiment_128_v1',
-        max_epochs=500,
-        lr=1e-3,
-        deepest_layer_lr_factor=0.1,
-        lr_warmup_epochs=20,
-        lr_scheduler_patience=100,
-        early_stopping_patience=250,
-        use_wandb=True,
-        no_bias=True,
-        elm_data_file=small_data_200,
-        batch_size={0:64, 15:128, 30:256, 45:512},
-        gradient_clip_val=1,
-        gradient_clip_algorithm='value',
-        num_workers=4,
+        # data
+        elm_data_file=ml_data.small_data_500,
+        max_elms=300,
+        # model
         feature_model_layers=feature_model_layers,
         mlp_task_models=None,
+        no_bias=True,
         fir_bp_low=5,
         fir_bp_high=250,
         dropout=0.05,
+        # training
+        max_epochs=500,
+        lr=1e-3,
+        lr_warmup_epochs=30,
+        lr_scheduler_patience=100,
+        deepest_layer_lr_factor=0.1,
+        early_stopping_patience=250,
+        batch_size={0:64, 15:128, 30:256, 45:512},
+        num_workers=4,
+        gradient_clip_val=1,
+        gradient_clip_algorithm='value',
+        use_wandb=True,
     )
