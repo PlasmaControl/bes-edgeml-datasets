@@ -1300,11 +1300,12 @@ def make_small_data_file(
         dest.require_group('elms')
         dest_elms_per_shot: dict[int,int] = {}
 
+        max_elms_per_shot = (n_elms-1) // 100 + 1
         for elm in existing_elms:
             elm_key = f"{elm:06d}"
             shot = src['elms'][elm_key].attrs['shot']
-            # check for max 
-            if shot in dest_elms_per_shot and dest_elms_per_shot[shot] >= 3:
+            # check for max elms per shot
+            if shot in dest_elms_per_shot and dest_elms_per_shot[shot] > max_elms_per_shot:
                 continue
             # check for pre-ELM time
             t_start = src['elms'][elm_key].attrs['t_start']
@@ -1355,7 +1356,7 @@ if __name__=='__main__':
     #     dry_run=False,
     # )
 
-    for n_elms in [200]:
+    for n_elms in [20, 50, 100, 200, 500]:
         make_small_data_file(
             f'small_data_{n_elms:d}.hdf5',
             n_elms=n_elms,
