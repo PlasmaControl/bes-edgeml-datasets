@@ -311,8 +311,7 @@ class Model(_Base_Class, LightningModule):
                 param_dict['params'] = param
                 parameter_list.append(param_dict)
         for task_model in self.task_models.values():
-            for i_layer, layer_name, layer in enumerate(task_model):
-                layer = task_model.get_submodule(layer_name)
+            for i_layer, (layer_name, layer) in enumerate(task_model.named_children()):
                 for param_name, param in layer.named_parameters():
                     if not param.requires_grad: continue
                     param_dict = {}
@@ -1710,20 +1709,22 @@ if __name__=='__main__':
         # restart_trial_name='',
         # wandb_id='',
         elm_data_file=ml_data.small_data_100,
-        batch_size={0:32, 5:64, 10:128},
+        # batch_size={0:32, 5:64, 10:128},
+        batch_size=128,
         lr=3e-3,
         deepest_layer_lr_factor=0.0316,
         lr_warmup_epochs=10,
-        # max_elms=50,
-        max_epochs=20,
-        num_workers=3,
+        max_elms=20,
+        max_epochs=2,
+        num_workers=2,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         # log_freq=50,
         # no_bias=False,
         fir_bp_low=5,
         fir_bp_high=250,
+        dropout=0.05,
         # skip_data=True,
         # skip_train=True,
-        use_wandb=True,
+        # use_wandb=True,
     )
