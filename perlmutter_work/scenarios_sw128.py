@@ -2,7 +2,7 @@ from model_trainer.main_multitask import main
 
 
 signal_window_size = 128
-experiment_name='experiment_128_v1',
+experiment_name='experiment_128_v1'
 
 if __name__=='__main__':
     feature_model_layers = (
