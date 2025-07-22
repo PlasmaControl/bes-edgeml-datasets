@@ -319,7 +319,7 @@ class Model(_Base_Class, LightningModule):
                         param_dict['weight_decay'] = 0.
                     elif 'weight' in param_name:
                         if i_layer == 0:
-                            param_dict['lr'] = self.lr/10
+                            param_dict['lr'] = self.lr/4
                     else:
                         raise ValueError
                     self.zprint(f"  {layer_name}  {param_name}: {param_dict}")
@@ -1588,6 +1588,7 @@ def main(
     )
     loggers.append(tb_logger)
     zprint(f"Tensorboard trial name: {trial_name}")
+    use_wandb = use_wandb and not skip_train and not skip_data
     if use_wandb:
         wandb.login()
         wandb_save_dir = experiment_dir
