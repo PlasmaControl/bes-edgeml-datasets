@@ -93,7 +93,7 @@ class Model(_Base_Class, LightningModule):
     # task_batchnorm: bool = False
     no_bias: bool = False
     batch_norm: bool = False
-    dropout: float = None
+    dropout: float = 0.0
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
     mlp_task_models: dict[str, dict[str, LightningModule]] = None
 
@@ -236,7 +236,7 @@ class Model(_Base_Class, LightningModule):
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
             self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             out_channels = conv.out_channels
-            if self.dropout and i_layer > 0 and i_layer < len(self.feature_model_layers) - 1:
+            if i_layer > 0 and i_layer < len(self.feature_model_layers) - 1:
                 feature_layer_dict[f"L{i_layer:02d}_Dropout"] = torch.nn.Dropout3d(self.dropout)
             feature_layer_dict[conv_layer_name] = conv
             feature_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
@@ -262,16 +262,20 @@ class Model(_Base_Class, LightningModule):
         for i_layer in range(n_layers-1):
             mlp_layer_name = f"L{i_layer:02d}_FC"
             bias = (True and (self.no_bias==False)) if i_layer<n_layers-2 else False
+            in_features = mlp_layers[i_layer]
+            out_features = mlp_layers[i_layer+1]
             mlp_layer = torch.nn.Linear(
-                in_features=mlp_layers[i_layer],
-                out_features=mlp_layers[i_layer+1],
+                in_features=in_features,
+                out_features=out_features,
                 bias=bias,
             )
             n_params = sum(p.numel() for p in mlp_layer.parameters() if p.requires_grad)
             self.zprint(f"  {mlp_layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
             mlp_layer_dict[mlp_layer_name] = mlp_layer
-            if i_layer+1 < n_layers-1:
+            if i_layer < n_layers-2:
                 mlp_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
+                if self.batch_norm:
+                    mlp_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm1d(out_features)
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
@@ -1473,7 +1477,7 @@ def main(
         elm_mean_loss_factor = None,
         conf_mean_loss_factor = None,
         initial_weight_factor = 1.0,
-        dropout: float = None,
+        dropout: float = 0.0,
         # loggers
         log_freq: int = 100,
         use_wandb: bool = False,
@@ -1724,7 +1728,8 @@ if __name__=='__main__':
         # no_bias=False,
         fir_bp_low=5,
         fir_bp_high=250,
-        dropout=0.05,
+        dropout=0.0,
+        batch_norm=True,
         # skip_data=True,
         # skip_train=True,
         # use_wandb=True,
