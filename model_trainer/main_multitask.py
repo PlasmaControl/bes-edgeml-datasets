@@ -1285,7 +1285,7 @@ class Data(_Base_Class, LightningDataModule):
         )
 
     def set_fir_filter(self):
-        if self.fir_bp_low is None and self.fir_bp_high is None:
+        if not self.fir_bp_low and not self.fir_bp_high:
             self.zprint("  Using raw BES signals; no FIR filter")
         else:
             self.zprint(f"  Using FIR filter with f_low-f_high: {self.fir_bp_low}-{self.fir_bp_high} kHz")
@@ -1727,7 +1727,7 @@ if __name__=='__main__':
         # log_freq=50,
         # no_bias=False,
         fir_bp_low=5,
-        fir_bp_high=250,
+        # fir_bp_high=250,
         dropout=0.0,
         batch_norm=True,
         # skip_data=True,
