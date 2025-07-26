@@ -1506,6 +1506,9 @@ def main(
         max_confinement_event_length: int = None,
 ) -> tuple:
 
+    #TODO delete this after testing
+    early_stopping_patience = 150
+
     ### SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
     world_size = int(os.getenv("SLURM_NTASKS", default=1))
