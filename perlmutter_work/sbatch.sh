@@ -12,7 +12,9 @@
 #SBATCH --time=0-12
 #SBATCH --qos=regular
 
-#SBATCH --array=1-30%5
+#SBATCH --signal=SIGTERM@1200
+
+#####SBATCH --array=1-30%5
 
 module --redirect list
 which python
@@ -98,7 +100,7 @@ main(
     gradient_clip_algorithm='value',
     use_wandb=True,
     # kwargs
-    **kwargs
+    **kwargs,
 )
 END
 )

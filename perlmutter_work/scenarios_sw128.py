@@ -47,5 +47,5 @@ main(
     gradient_clip_algorithm='value',
     use_wandb=True,
     # kwargs
-    **kwargs
+    **kwargs,
 )
