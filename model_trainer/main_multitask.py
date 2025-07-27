@@ -1483,7 +1483,7 @@ def main(
         use_wandb: bool = False,
         # callbacks
         early_stopping_min_delta: float = 1e-3,
-        early_stopping_patience: int = 100,
+        early_stopping_patience: int = 120,
         # trainer
         max_epochs = 2,
         gradient_clip_val: float = None,
@@ -1504,10 +1504,8 @@ def main(
         fir_bp_high: float = None,
         max_shots_per_class: int = None,
         max_confinement_event_length: int = None,
+        seed: int = 42,
 ) -> tuple:
-
-    #TODO delete this after testing
-    early_stopping_patience = 150
 
     ### SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
@@ -1685,6 +1683,7 @@ def main(
                 fir_bp_high=fir_bp_high,
                 max_shots_per_class=max_shots_per_class,
                 max_confinement_event_length=max_confinement_event_length,
+                seed=seed,
             )
 
     if not skip_train and not skip_data:
