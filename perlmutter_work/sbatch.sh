@@ -14,7 +14,7 @@
 
 #SBATCH --signal=SIGTERM@1200
 
-#####SBATCH --array=1-30%5
+#SBATCH --array=1-8%2
 
 module --redirect list
 which python
