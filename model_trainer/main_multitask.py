@@ -93,7 +93,7 @@ class Model(_Base_Class, LightningModule):
     # task_batchnorm: bool = False
     no_bias: bool = False
     batch_norm: bool = False
-    dropout: float = None
+    dropout: float = 0.0
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
     mlp_task_models: dict[str, dict[str, LightningModule]] = None
 
@@ -264,18 +264,20 @@ class Model(_Base_Class, LightningModule):
         for i_layer in range(n_layers-1):
             mlp_layer_name = f"L{i_layer:02d}_FC"
             bias = (True and (self.no_bias==False)) if i_layer<n_layers-2 else False
+            in_features = mlp_layers[i_layer]
+            out_features = mlp_layers[i_layer+1]
             mlp_layer = torch.nn.Linear(
-                in_features=mlp_layers[i_layer],
-                out_features=mlp_layers[i_layer+1],
+                in_features=in_features,
+                out_features=out_features,
                 bias=bias,
             )
             n_params = sum(p.numel() for p in mlp_layer.parameters() if p.requires_grad)
             self.zprint(f"  {mlp_layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
             mlp_layer_dict[mlp_layer_name] = mlp_layer
-            if i_layer+1 < n_layers-1:
+            if i_layer < n_layers-2:
                 mlp_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
-                # if self.batch_norm:
-                #     mlp_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm1d(out_features)
+                if self.batch_norm:
+                    mlp_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm1d(out_features)
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
@@ -1375,8 +1377,9 @@ class Data(_Base_Class, LightningDataModule):
             self.trainer.strategy.barrier()
 
     def broadcast(self, obj):
-        if self.world_size > 0:
+        if self.world_size > 1:
             obj = self.trainer.strategy.broadcast(obj)
+            self.barrier()
         return obj
 
 
@@ -1477,7 +1480,7 @@ def main(
         elm_mean_loss_factor = None,
         conf_mean_loss_factor = None,
         initial_weight_factor = 1.0,
-        dropout: float = None,
+        dropout: float = 0.0,
         # loggers
         log_freq: int = 100,
         use_wandb: bool = False,

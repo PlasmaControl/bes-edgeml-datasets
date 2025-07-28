@@ -14,7 +14,7 @@
 
 #SBATCH --signal=SIGTERM@1200
 
-#SBATCH --array=1-8%2
+#SBATCH --array=1-50%5
 
 module --redirect list
 which python
@@ -47,14 +47,15 @@ echo UNIQUE_IDENTIFIER: ${UNIQUE_IDENTIFIER}
 
 export WANDB__SERVICE_WAIT=500
 
-export TORCH_DISTRIBUTED_DEBUG=DETAIL
-
+rand=${RANDOM}
+echo Random number: ${rand}
 
 SCRIPT=$(cat << END
 from numpy import random
 from model_trainer.main_multitask import main
 
-rng = random.default_rng()
+print(f'Linux rand: { ${rand} }')
+rng = random.default_rng(seed=${rand})
 
 kwargs = {}
 kwargs['feature_model_layers'] = (
