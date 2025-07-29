@@ -8,7 +8,6 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': False},
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': False},
     )
-
     mlp_tasks = {'elm_class': [None, 32, 1]}
 
     main(
@@ -18,19 +17,21 @@ if __name__=='__main__':
         restart_trial_name='',
         wandb_id='',
         # data
-        elm_data_file=ml_data.small_data_100,
-        max_elms=30,
+        elm_data_file=ml_data.small_data_200,
+        # max_elms=30,
         # model
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         # training
-        max_epochs=2,
+        max_epochs=20,
         lr=1e-3,
-        deepest_layer_lr_factor=0.1,
-        batch_size=256,
+        deepest_layer_lr_factor=1,
+        batch_size={0:64, 4:128, 8:256},
         num_workers=2,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
+        use_wandb=True,
+        early_stopping_patience=300,
         # skip_data=True,
         # skip_train=True,
     )

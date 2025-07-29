@@ -26,7 +26,7 @@ if __name__=='__main__':
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         # model
-        mlp_task_models=None,
+        mlp_tasks=None,
         no_bias=rng.choice([True, False]),
         # fir_bp_low=5,
         fir_bp_low=rng.choice([0, 10]),
