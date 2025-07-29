@@ -95,7 +95,8 @@ class Model(_Base_Class, LightningModule):
     batch_norm: bool = False
     dropout: float = 0.0
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
-    mlp_task_models: dict[str, dict[str, LightningModule]] = None
+    mlp_tasks: dict[str, Sequence] = None
+    # mlp_task_models: dict[str, dict[str, LightningModule]] = None
 
     def __post_init__(self):
 
@@ -116,30 +117,55 @@ class Model(_Base_Class, LightningModule):
         self.feature_model: LightningModule = None
         self.feature_space_size: int = None
         self.make_feature_model()
+        assert self.feature_space_size
 
         # default task sub-model and metrics
-        assert self.feature_space_size
-        if self.mlp_task_models is None:
-            self.mlp_task_models = {
-                'elm_class': {  # specifications for a single MLP task
-                    'layers': (self.feature_space_size, 16, 1),
-                    'metrics': {
+        if self.mlp_tasks is None:
+            self.mlp_tasks = {
+                'elm_class': [self.feature_space_size, 16, 1],
+            }
+        
+        # set input layer size
+        for task in self.mlp_tasks:
+            if not self.mlp_tasks[task][0]:
+                self.mlp_tasks[task][0] = self.feature_space_size
+
+        # create MLP configs
+        self.mlp_task_configs = {}
+        for task in self.mlp_tasks:
+            self.mlp_task_configs[task] = {}
+            self.mlp_task_configs[task]['layers'] = self.mlp_tasks[task]
+            if 'class' in task:
+                self.mlp_task_configs[task]['metrics'] = {
                         'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
                         'f1_score': sklearn.metrics.f1_score,
                         'precision_score': sklearn.metrics.precision_score,
                         'recall_score': sklearn.metrics.recall_score,
                         'mean_stat': torch.mean,
                         'std_stat': torch.std,
-                    },
-                    'monitor_metric': 'f1_score/val',
-                },
-            }        
+                    }
+                self.mlp_task_configs[task]['monitor_metric'] = 'f1_score/val'
+        # if self.mlp_task_models is None:
+        #     self.mlp_task_models = {
+        #         'elm_class': {  # specifications for a single MLP task
+        #             'layers': (self.feature_space_size, 16, 1),
+        #             'metrics': {
+        #                 'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
+        #                 'f1_score': sklearn.metrics.f1_score,
+        #                 'precision_score': sklearn.metrics.precision_score,
+        #                 'recall_score': sklearn.metrics.recall_score,
+        #                 'mean_stat': torch.mean,
+        #                 'std_stat': torch.std,
+        #             },
+        #             'monitor_metric': 'f1_score/val',
+        #         },
+        #     }        
 
         # make task sub-models
-        self.task_names = list(self.mlp_task_models.keys())
+        self.task_names = list(self.mlp_task_configs.keys())
         self.task_metrics: dict[str, dict] = {}
         self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
-        for task_name, task_dict in self.mlp_task_models.items():
+        for task_name, task_dict in self.mlp_task_configs.items():
             self.zprint(f'Task sub-model: {task_name}')
             task_layers: tuple[int] = task_dict['layers']
             task_metrics: dict = task_dict['metrics']
@@ -1476,7 +1502,8 @@ def main(
         no_bias: bool = True,
         batch_norm: bool = False,
         feature_model_layers = None,
-        mlp_task_models = None,
+        # mlp_task_models = None,
+        mlp_tasks = None,
         elm_mean_loss_factor = None,
         conf_mean_loss_factor = None,
         initial_weight_factor = 1.0,
@@ -1542,7 +1569,8 @@ def main(
         no_bias=no_bias,
         batch_norm=batch_norm,
         feature_model_layers=feature_model_layers,
-        mlp_task_models=mlp_task_models,
+        # mlp_task_models=mlp_task_models,
+        mlp_tasks=mlp_tasks,
         dropout=dropout,
     )
 
@@ -1719,21 +1747,20 @@ if __name__=='__main__':
         # wandb_id='',
         elm_data_file=ml_data.small_data_100,
         # batch_size={0:32, 5:64, 10:128},
-        batch_size=128,
+        batch_size=256,
         lr=3e-3,
-        deepest_layer_lr_factor=0.0316,
-        lr_warmup_epochs=10,
-        max_elms=20,
+        deepest_layer_lr_factor=0.1,
+        max_elms=30,
         max_epochs=2,
         num_workers=2,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         # log_freq=50,
         # no_bias=False,
-        fir_bp_low=5,
+        # fir_bp_low=5,
         # fir_bp_high=250,
-        dropout=0.0,
-        batch_norm=True,
+        # dropout=0.0,
+        # batch_norm=True,
         # skip_data=True,
         # skip_train=True,
         # use_wandb=True,
