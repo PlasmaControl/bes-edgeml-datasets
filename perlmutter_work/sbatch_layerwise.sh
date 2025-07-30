@@ -9,12 +9,12 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --time=30
+#SBATCH --time=40
 #SBATCH --qos=regular
 
-#SBATCH --signal=SIGTERM@200
+#SBATCH --signal=SIGTERM@300
 
-#SBATCH --array=1-50%5
+#SBATCH --array=1-60%5
 
 module --redirect list
 which python
@@ -76,7 +76,7 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='experiment_256_v1',
+        experiment_name='experiment_256_v2',
         # restart
         restart_trial_name='',
         wandb_id='',
@@ -84,26 +84,27 @@ if __name__=='__main__':
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         max_elms=rng.choice([20, 40, 80]),
         # model,
-        no_bias=rng.choice([True, False]),
+        # no_bias=rng.choice([True, False]),
+        no_bias=True,
         # fir_bp_low=5,
-        fir_bp_low=rng.choice([0, 10]),
+        # fir_bp_low=rng.choice([0, 10]),
         # fir_bp_high=250,
         fir_bp_high=rng.choice([0, 75, 250]),
         # training
         max_epochs=500,
         log_freq=100,
         # lr=1e-4,
-        lr=rng.choice([3e-4, 1e-3, 3e-3]),
+        lr=rng.choice([1e-3, 3e-3, 1e-2]),
         lr_warmup_epochs=5,
         lr_scheduler_patience=50,
-        # deepest_layer_lr_factor=0.5,
-        deepest_layer_lr_factor=rng.choice([1.0, 0.2]),
+        deepest_layer_lr_factor=1.,
+        # deepest_layer_lr_factor=rng.choice([1.0, 0.2]),
         batch_size={0:64, 10:128, 20:256},
         num_workers=8,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         use_wandb=True,
-        early_stopping_patience=200,
+        early_stopping_patience=500,
         # kwargs
         **kwargs,
     )
