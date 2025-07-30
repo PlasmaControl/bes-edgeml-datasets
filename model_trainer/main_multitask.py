@@ -334,7 +334,7 @@ class Model(_Base_Class, LightningModule):
                 param_dict = {}
                 if 'bias' in param_name:
                     param_dict['weight_decay'] = 0.
-                    param_dict['lr'] = lrs_for_feature_layers[i_layer]
+                    param_dict['lr'] = lrs_for_feature_layers[i_layer]/10
                 elif 'weight' in param_name:
                     param_dict['lr'] = lrs_for_feature_layers[i_layer]
                 else:
@@ -349,6 +349,7 @@ class Model(_Base_Class, LightningModule):
                     param_dict = {}
                     if 'bias' in param_name:
                         param_dict['weight_decay'] = 0.
+                        param_dict['lr'] = self.lr/10
                     elif 'weight' in param_name:
                         if i_layer == 0:
                             param_dict['lr'] = self.lr/4
