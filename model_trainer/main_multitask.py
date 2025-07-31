@@ -333,8 +333,8 @@ class Model(_Base_Class, LightningModule):
                 if not param.requires_grad: continue
                 param_dict = {}
                 if 'bias' in param_name:
-                    param_dict['weight_decay'] = 0.
                     param_dict['lr'] = lrs_for_feature_layers[i_layer]/10
+                    param_dict['weight_decay'] = 0.
                 elif 'weight' in param_name:
                     param_dict['lr'] = lrs_for_feature_layers[i_layer]
                 else:
@@ -348,12 +348,11 @@ class Model(_Base_Class, LightningModule):
                     if not param.requires_grad: continue
                     param_dict = {}
                     if 'bias' in param_name:
-                        param_dict['weight_decay'] = 0.
                         param_dict['lr'] = self.lr/10
+                        param_dict['weight_decay'] = 0.
                     elif 'weight' in param_name:
                         if i_layer == 0:
                             param_dict['lr'] = self.lr/4
-                            # pass
                     else:
                         raise ValueError
                     self.zprint(f"  {layer_name}  {param_name}: {param_dict}")
@@ -389,7 +388,7 @@ class Model(_Base_Class, LightningModule):
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
             mode='min' if 'loss' in self.monitor_metric else 'max',
-            min_lr=1e-5,
+            min_lr=3e-5,
         )
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer=optimizer,
