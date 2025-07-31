@@ -9,7 +9,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --time=60
+#SBATCH --time=45
 #SBATCH --qos=regular
 
 #SBATCH --signal=SIGTERM@240
@@ -65,57 +65,42 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
     )
 
-    if rng.choice(2):
-        kwargs['mlp_tasks'] = {'elm_class': [None, rng.choice([16, 32]), 1]}
-    else:
-        kwargs['mlp_tasks'] = {'elm_class': [None, 32, 16, 1]}
-
-    # regularization_choice = rng.choice(3)
-    # if regularization_choice == 0:
-        # kwargs['batch_norm'] = True
-    # elif regularization_choice == 1:
-        # kwargs['dropout'] = rng.choice([0.04, 0.12])
-
-    batch_size = {0:64, 10:128, 20:256}
-    if rng.choice(2):
-        batch_size[80] = 512
-
-    use_optimizer = 'sgd' if rng.choice(2) else 'adam'
+    regularization_choice = rng.choice(3)
+    if regularization_choice == 0:
+        kwargs['batch_norm'] = True
+    elif regularization_choice == 1:
+        kwargs['dropout'] = rng.choice([0.04, 0.12])
 
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='experiment_256_v3',
-        # restart
-        restart_trial_name='',
-        wandb_id='',
+        experiment_name='experiment_256_v4',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         max_elms=rng.choice([20, 40]),
         # model,
-        use_optimizer=use_optimizer,
-        # no_bias=rng.choice([True, False]),
-        no_bias=True,
-        batch_norm=rng.choice([True, False]),
-        # fir_bp_low=5,
-        # fir_bp_low=rng.choice([0, 10]),
-        # fir_bp_high=250,
+        use_optimizer='adam',
+        mlp_tasks = {
+            'elm_class': [None, rng.choice([16, 32]), 1],
+        },
+        no_bias=rng.choice([True, False]),
+        fir_bp_low=rng.choice([0, 10]),
         fir_bp_high=rng.choice([0, 75, 250]),
+        monitor_metric='elm_class/bce_loss/train',
         # training
-        max_epochs=800,
+        max_epochs=500,
         log_freq=100,
-        # lr=1e-4,
         lr=rng.choice([1e-2, 3e-2]),
         lr_warmup_epochs=10,
         lr_scheduler_patience=80,
         deepest_layer_lr_factor=1.,
         # deepest_layer_lr_factor=rng.choice([1.0, 0.2]),
-        batch_size=batch_size,
+        batch_size={0:64, 10:128, 20:256},
         num_workers=8,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         use_wandb=True,
-        early_stopping_patience=1000,
+        early_stopping_patience=150,
         # kwargs
         **kwargs,
     )

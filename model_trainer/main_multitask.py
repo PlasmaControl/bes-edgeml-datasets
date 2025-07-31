@@ -174,6 +174,7 @@ class Model(_Base_Class, LightningModule):
             if self.monitor_metric is None:
                 # if not specified, use `monitor_metric` from first task
                 self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
+        self.save_hyperparameters({'monitor_metric': self.monitor_metric})
 
         # # sub-model: Confinement mode multi-class classifier
         # if self.conf_classifier:
@@ -1514,7 +1515,7 @@ def main(
         use_wandb: bool = False,
         # callbacks
         early_stopping_min_delta: float = 1e-3,
-        early_stopping_patience: int = 100,
+        early_stopping_patience: int = None,
         # trainer
         max_epochs = 2,
         gradient_clip_val: float = None,
@@ -1596,14 +1597,17 @@ def main(
             mode=metric_mode,
             save_last=True,
         ),
-        EarlyStopping(
+    ]
+    if early_stopping_patience:
+        early_stopping_callback = EarlyStopping(
             monitor=monitor_metric,
             mode=metric_mode,
             min_delta=early_stopping_min_delta,
             patience=early_stopping_patience,
             log_rank_zero_only=True,
-        ),
-    ]
+        )
+        callbacks.append(early_stopping_callback)
+
 
     ### loggers
     zprint("\u2B1C Creating loggers")
