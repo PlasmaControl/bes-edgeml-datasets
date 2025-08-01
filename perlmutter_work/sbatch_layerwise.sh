@@ -12,7 +12,7 @@
 #SBATCH --time=45
 #SBATCH --qos=regular
 
-#SBATCH --signal=SIGTERM@240
+#SBATCH --signal=SIGTERM@300
 
 #SBATCH --array=1-60%6
 
@@ -65,11 +65,11 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
     )
 
-    regularization_choice = rng.choice(3)
-    if regularization_choice == 0:
-        kwargs['batch_norm'] = True
-    elif regularization_choice == 1:
-        kwargs['dropout'] = rng.choice([0.04, 0.12])
+    # regularization_choice = rng.choice(3)
+    # if regularization_choice == 0:
+    kwargs['batch_norm'] = True
+    # elif regularization_choice == 1:
+    #     kwargs['dropout'] = rng.choice([0.04, 0.12])
 
     main(
         # scenario
@@ -77,7 +77,7 @@ if __name__=='__main__':
         experiment_name='experiment_256_v4',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        max_elms=rng.choice([20, 40]),
+        max_elms=rng.choice([40, 80], p=[0.333, 0.667]),
         # model,
         use_optimizer='adam',
         mlp_tasks = {
@@ -89,7 +89,7 @@ if __name__=='__main__':
         monitor_metric='elm_class/bce_loss/train',
         # training
         max_epochs=500,
-        log_freq=100,
+        log_freq=25,
         lr=rng.choice([1e-2, 3e-2]),
         lr_warmup_epochs=10,
         lr_scheduler_patience=80,
