@@ -77,13 +77,16 @@ if __name__=='__main__':
         mlp_tasks = {
             'elm_class': [None, 32, 1],
         },
-        no_bias=False,
+        no_bias=rng.choice([True, False]),
+        fir_bp_low=rng.choice([0, 10]),
+        fir_bp_high=rng.choice([0, 75, 250]),
         monitor_metric='elm_class/bce_loss/train',
         batch_norm=True,
         # training
         max_epochs=500,
         log_freq=100,
-        lr=3e-2,
+        lr=rng.choice([1e-2, 3e-2]),
+        # lr=3e-2,
         lr_warmup_epochs=15,
         lr_scheduler_patience=80,
         deepest_layer_lr_factor=1.,
