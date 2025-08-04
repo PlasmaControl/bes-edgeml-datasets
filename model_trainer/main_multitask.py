@@ -1854,6 +1854,6 @@ if __name__=='__main__':
         # skip_data=True,
         # skip_train=True,
         # use_wandb=True,
-        transfer_model='experiment_default/r2025_08_03_19_40_42/checkpoints/last.ckpt',
+        transfer_model='experiment_default/r2025_08_03_19_05_44/checkpoints/last.ckpt',
         transfer_max_layer=7,
     )
