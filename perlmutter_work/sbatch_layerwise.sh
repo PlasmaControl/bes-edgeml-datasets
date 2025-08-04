@@ -47,7 +47,7 @@ echo UNIQUE_IDENTIFIER: ${UNIQUE_IDENTIFIER}
 
 export WANDB__SERVICE_WAIT=500
 
-rand=${RANDOM}
+export rand=${RANDOM}
 echo Random number: ${rand}
 
 # SCRIPT=$(cat << END
