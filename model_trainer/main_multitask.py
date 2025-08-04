@@ -665,8 +665,7 @@ class Data(_Base_Class, LightningDataModule):
     time_to_elm_quantile_max: float = None
     contrastive_learning: bool = False
     min_pre_elm_time: float = None
-    fir_bp_low: float = None  # bandpass filter cut-on freq in kHz
-    fir_bp_high: float = None  # bandpass filter cut-off freq in kHz
+    fir_bp: Sequence[float] = None  # bandpass filter cut-on and cut-off frequencies in kHz
     bad_shots: list = None
     num_classes: int = 4
     metadata_bounds = {
@@ -1389,19 +1388,20 @@ class Data(_Base_Class, LightningDataModule):
         )
 
     def set_fir_filter(self):
-        if not self.fir_bp_low and not self.fir_bp_high:
-            self.zprint("  Using raw BES signals; no FIR filter")
-        else:
-            self.zprint(f"  Using FIR filter with f_low-f_high: {self.fir_bp_low}-{self.fir_bp_high} kHz")
-            if self.fir_bp_low and self.fir_bp_high:
+        if self.fir_bp:
+            assert len(self.fir_bp) == 2, "fir_bp must be a sequence of (f_low, f_high)"
+        if self.fir_bp and (self.fir_bp[0] or self.fir_bp[1]):
+            f_low, f_high = self.fir_bp
+            self.zprint(f"  Using FIR filter with f_low-f_high: {f_low}-{f_high} kHz")
+            if f_low and f_high:
                 pass_zero = 'bandpass'
-                cutoff = [self.fir_bp_low, self.fir_bp_high]
-            elif self.fir_bp_low:
+                cutoff = [f_low, f_high]
+            elif f_low:
                 pass_zero = 'highpass'
-                cutoff = self.fir_bp_low
-            elif self.fir_bp_high:
+                cutoff = f_low
+            elif f_high:
                 pass_zero = 'lowpass'
-                cutoff = self.fir_bp_high
+                cutoff = f_high
             self.b_coeffs = scipy.signal.firwin(
                 numtaps=501,  # must be odd
                 cutoff=cutoff,  # transition width in kHz
@@ -1410,6 +1410,8 @@ class Data(_Base_Class, LightningDataModule):
             )
             self.a_coeffs = np.zeros_like(self.b_coeffs)
             self.a_coeffs[0] = 1
+        else:
+            self.zprint("  Using raw BES signals; no FIR filter")
 
     def train_dataloader(self) -> CombinedLoader:
         loaders = {}
@@ -1608,8 +1610,7 @@ def main(
         time_to_elm_quantile_max: float = None,
         contrastive_learning: bool = True,
         min_pre_elm_time: float = None,
-        fir_bp_low: float = None,
-        fir_bp_high: float = None,
+        fir_bp: Sequence[float] = None,
         max_shots_per_class: int = None,
         max_confinement_event_length: int = None,
         seed: int = 42,
@@ -1791,8 +1792,7 @@ def main(
                 time_to_elm_quantile_max=time_to_elm_quantile_max,
                 contrastive_learning=contrastive_learning,
                 min_pre_elm_time=min_pre_elm_time,
-                fir_bp_low=fir_bp_low,
-                fir_bp_high=fir_bp_high,
+                fir_bp=fir_bp,
                 max_shots_per_class=max_shots_per_class,
                 max_confinement_event_length=max_confinement_event_length,
                 seed=seed,
@@ -1847,13 +1847,12 @@ if __name__=='__main__':
         num_workers=2,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
+        fir_bp=(10,100),
         # log_freq=50,
         # no_bias=False,
-        # fir_bp_low=5,
-        # fir_bp_high=250,
         # skip_data=True,
         # skip_train=True,
         # use_wandb=True,
-        transfer_model='experiment_default/r2025_08_03_19_05_44/checkpoints/last.ckpt',
-        transfer_max_layer=7,
+        # transfer_model='experiment_default/r2025_08_03_19_05_44/checkpoints/last.ckpt',
+        # transfer_max_layer=7,
     )
