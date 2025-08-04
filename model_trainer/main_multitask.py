@@ -97,6 +97,9 @@ class Model(_Base_Class, LightningModule):
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
     mlp_tasks: dict[str, Sequence] = None
     # mlp_task_models: dict[str, dict[str, LightningModule]] = None
+    transfer_model: str|Path = None  # ckpt file
+    transfer_max_layer: int = None
+    transfer_layer_lr_factor: float = 1e-3
 
     def __post_init__(self):
 
@@ -114,6 +117,7 @@ class Model(_Base_Class, LightningModule):
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
+        self.i_layer: int = 0
         self.feature_model: LightningModule = None
         self.feature_space_size: int = None
         self.make_feature_model()
@@ -176,6 +180,8 @@ class Model(_Base_Class, LightningModule):
                 self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
         self.save_hyperparameters({'monitor_metric': self.monitor_metric})
 
+        self.zprint(f"Total model parameters: {self.param_count(self):,d}")
+
         # # sub-model: Confinement mode multi-class classifier
         # if self.conf_classifier:
         #     task_name = 'conf_classifier'
@@ -192,26 +198,30 @@ class Model(_Base_Class, LightningModule):
         #     if self.monitor_metric is None:
         #         self.monitor_metric = f'{task_name}/f1_score/val'
 
-        # initialize model parameters
+        self.initialize_parameters()
+        if self.transfer_model and self.transfer_max_layer:
+            self.import_layers()
+
+    def initialize_parameters(self) -> None:
         if self.is_global_zero: 
             good_init = False
             while good_init == False:
                 self.zprint("Initializing model to uniform random weights and biases=0")
                 good_init = True
-                for name, param in self.named_parameters():
-                    assert name.endswith(('bias','weight'))
-                    if name.endswith("bias"):
-                        self.zprint(f"  {name}: initialized to zeros (numel {param.data.numel()})")
+                for param_name, param in self.named_parameters():
+                    assert param_name.endswith(('bias','weight'))
+                    if param_name.endswith("bias"):
+                        self.zprint(f"  {param_name}: initialized to zeros (numel {param.data.numel()})")
                         param.data.fill_(0)
-                    elif name.endswith("weight"):
-                        if 'BatchNorm' in name:
-                            self.zprint(f"  {name}: initialized to ones (numel {param.data.numel()})")
+                    elif param_name.endswith("weight"):
+                        if 'BatchNorm' in param_name:
+                            self.zprint(f"  {param_name}: initialized to ones (numel {param.data.numel()})")
                             param.data.fill_(1)
                         else:
                             n_in = np.prod(param.shape[1:])
                             sqrt_k = np.sqrt(3*self.initial_weight_factor / n_in)
                             param.data.uniform_(-sqrt_k, sqrt_k)
-                            self.zprint(f"  {name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
+                            self.zprint(f"  {param_name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
                 random_batch_input = {
                     task: [torch.randn(
                         size=[512]+list(self.input_data_shape[1:]),
@@ -231,7 +241,42 @@ class Model(_Base_Class, LightningModule):
                 self.zprint(f"  Task {task_name} output shape: {task_output.shape}")
                 self.zprint(f"  Task {task_name} output mean {task_output.mean():.4f} stdev {task_output.std():.4f} min/max {task_output.min():.3f}/{task_output.max():.3f}")
 
-        self.zprint(f"Total model parameters: {self.param_count(self):,d}")
+    def import_layers(self) -> None:
+        if self.is_global_zero and self.transfer_model and self.transfer_max_layer:
+            self.transfer_model = Path(self.transfer_model).absolute()
+            self_param_names = [param_name for param_name, _ in self.named_parameters()]
+            source_model = torch.load(
+                self.transfer_model,
+                weights_only=False,
+            )
+            src_state_dict = source_model['state_dict']
+            for param_name in list(src_state_dict.keys()):
+                if not param_name.endswith(('bias', 'weight')):
+                    src_state_dict.pop(param_name)
+                    continue
+                valid = False
+                for i in range(self.transfer_max_layer):
+                    if f'L{i:02d}_' in param_name:
+                        valid = True
+                        break
+                if not valid:
+                    src_state_dict.pop(param_name)
+            src_param_names = list(src_state_dict.keys())
+            print('params to copy from src to self: ', src_param_names)
+            for param_name in src_param_names:
+                assert param_name in self_param_names, \
+                    f"{param_name} in source model, but not in self model"
+            missing, unexpected = self.load_state_dict(
+                state_dict=src_state_dict, 
+                strict=False,
+            )
+            # print('missing from src:', missing)
+            # print('unexpected in src:', unexpected)
+            # # for self_mod_name, self_mod in self.named_modules():
+            # #     print(self_mod.named_parameters())
+            # #     for src_param_name, src_param in source_model['state_dict'].items():
+            # #         if src_param_name.startswith(self_mod_name):
+            # #             print(self_mod_name, self_mod.shape, src_param.shape)
 
     @staticmethod
     def param_count(model: LightningModule) -> int:
@@ -250,12 +295,26 @@ class Model(_Base_Class, LightningModule):
         feature_layer_dict = OrderedDict()
         data_shape = self.input_data_shape
         self.zprint(f"  Input data shape: {data_shape}  (size {np.prod(data_shape)})")
-        out_channels: int = None
-        for i_layer, layer in enumerate(self.feature_model_layers):
-            conv_layer_name = f"L{i_layer:02d}_Conv"
+        # out_channels: int = None
+        previous_out_channels: int = None
+        for layer in self.feature_model_layers:
+            in_channels: int = 1 if self.i_layer==0 else previous_out_channels
+            # regularization layer
+            if self.i_layer > 0 and (self.batch_norm or self.dropout):
+                if self.batch_norm:
+                    layer_name = f"L{self.i_layer:02d}_BatchNorm"
+                    feature_layer_dict[layer_name] = torch.nn.BatchNorm3d(in_channels)
+                elif self.dropout:
+                    layer_name = f"L{self.i_layer:02d}_Dropout"
+                    feature_layer_dict[layer_name] = torch.nn.Dropout3d(self.dropout)
+                if self.batch_norm or self.dropout:
+                    print(f"  {layer_name} (regularization)")
+                    self.i_layer += 1
+            # conv layer
+            conv_layer_name = f"L{self.i_layer:02d}_Conv"
             bias = layer['bias'] and (self.no_bias == False)
             conv = torch.nn.Conv3d(
-                in_channels=1 if out_channels is None else out_channels,
+                in_channels=in_channels,
                 out_channels=layer['out_channels'],
                 kernel_size=layer['kernel'],
                 stride=layer['stride'],
@@ -264,15 +323,19 @@ class Model(_Base_Class, LightningModule):
             n_params = sum(p.numel() for p in conv.parameters() if p.requires_grad)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
             self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
-            out_channels = conv.out_channels
-            if self.dropout and i_layer > 0 and i_layer < len(self.feature_model_layers) - 1:
-                feature_layer_dict[f"L{i_layer:02d}_Dropout"] = torch.nn.Dropout3d(self.dropout)
             feature_layer_dict[conv_layer_name] = conv
-            feature_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
-            if self.batch_norm:
-                feature_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm3d(out_channels)
+            self.i_layer += 1
+            previous_out_channels = layer['out_channels']
+            # Leaky ReLU layer
+            relu_layer_name = f"L{self.i_layer:02d}_LeRu"
+            feature_layer_dict[relu_layer_name] = torch.nn.LeakyReLU(self.leaky_relu_slope)
+            print(f"  {relu_layer_name} (activation)")
+            self.i_layer += 1
 
-        feature_layer_dict['Flatten'] = torch.nn.Flatten()
+        layer_name = f'L{self.i_layer:02d}_Flatten'
+        feature_layer_dict[layer_name] = torch.nn.Flatten()
+        self.i_layer += 1
+        print(f"  {layer_name}  (flatten to vector)")
         self.feature_model = torch.nn.Sequential(feature_layer_dict)
         self.feature_space_size = self.feature_model(torch.zeros(self.input_data_shape)).numel()
 
@@ -288,23 +351,31 @@ class Model(_Base_Class, LightningModule):
         assert mlp_layers
         n_layers = len(mlp_layers)
 
-        for i_layer in range(n_layers-1):
-            mlp_layer_name = f"L{i_layer:02d}_FC"
-            bias = (True and (self.no_bias==False)) if i_layer<n_layers-2 else False
-            in_features = mlp_layers[i_layer]
-            out_features = mlp_layers[i_layer+1]
+        for i_mlp_layer in range(n_layers-1):
+            # batch norm
+            if self.batch_norm:
+                layer_name = f"L{self.i_layer:02d}_BatchNorm"
+                mlp_layer_dict[layer_name] = torch.nn.BatchNorm1d(mlp_layers[i_mlp_layer])
+                self.i_layer += 1
+                print(f'  {layer_name} (regularization)')
+            # fully-connected layer
+            layer_name = f"L{self.i_layer:02d}_FC"
+            bias = (True and (self.no_bias==False)) if i_mlp_layer<n_layers-2 else False
             mlp_layer = torch.nn.Linear(
-                in_features=in_features,
-                out_features=out_features,
+                in_features=mlp_layers[i_mlp_layer],
+                out_features=mlp_layers[i_mlp_layer+1],
                 bias=bias,
             )
             n_params = sum(p.numel() for p in mlp_layer.parameters() if p.requires_grad)
-            self.zprint(f"  {mlp_layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
-            mlp_layer_dict[mlp_layer_name] = mlp_layer
-            if i_layer < n_layers-2:
-                mlp_layer_dict[f"L{i_layer:02d}_LeRu"] = torch.nn.LeakyReLU(self.leaky_relu_slope)
-                if self.batch_norm:
-                    mlp_layer_dict[f"L{i_layer:02d}_BatchNorm"] = torch.nn.BatchNorm1d(out_features)
+            self.zprint(f"  {layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
+            mlp_layer_dict[layer_name] = mlp_layer
+            self.i_layer += 1
+            # leaky relu
+            if i_mlp_layer != n_layers-2:
+                layer_name = f"L{self.i_layer:02d}_LeRu"
+                mlp_layer_dict[layer_name] = torch.nn.LeakyReLU(self.leaky_relu_slope)
+                self.i_layer += 1
+                print(f"  {layer_name} (activation)")
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
@@ -332,14 +403,18 @@ class Model(_Base_Class, LightningModule):
             layer = self.feature_model.get_submodule(layer_name)
             for param_name, param in layer.named_parameters():
                 if not param.requires_grad: continue
+                assert param_name.endswith(('bias', 'weight'))
                 param_dict = {}
                 if 'bias' in param_name:
-                    param_dict['lr'] = lrs_for_feature_layers[i_layer]/10
+                    param_dict['lr'] = lrs_for_feature_layers[i_layer]/50
                     param_dict['weight_decay'] = 0.
                 elif 'weight' in param_name:
                     param_dict['lr'] = lrs_for_feature_layers[i_layer]
-                else:
-                    raise ValueError
+                if self.transfer_model and self.transfer_max_layer:
+                    for i in range(self.transfer_max_layer):
+                        if f'L{i:02d}_' in layer_name:
+                            param_dict['lr'] *= self.transfer_layer_lr_factor
+                            break
                 self.zprint(f"  {layer_name}  {param_name}: {param_dict}")
                 param_dict['params'] = param
                 parameter_list.append(param_dict)
@@ -347,6 +422,7 @@ class Model(_Base_Class, LightningModule):
             for i_layer, (layer_name, layer) in enumerate(task_model.named_children()):
                 for param_name, param in layer.named_parameters():
                     if not param.requires_grad: continue
+                    assert param_name.endswith(('bias', 'weight'))
                     param_dict = {}
                     if 'bias' in param_name:
                         param_dict['lr'] = self.lr/10
@@ -375,13 +451,11 @@ class Model(_Base_Class, LightningModule):
         }
         optimizer = None
         if self.use_optimizer.lower() == 'sgd':
-            optimizer = torch.optim.SGD(
-                momentum=0.2, 
-                **optim_kwargs,
-            )
+            optimizer = torch.optim.SGD(momentum=0.2, **optim_kwargs)
         elif self.use_optimizer.lower() == 'adam':
             optimizer = torch.optim.Adam(**optim_kwargs)
-        assert optimizer is not None
+        else:
+            raise ValueError(f"Unknown optimizer {self.use_optimizer}")
 
         plateau_scheduler = torch.optim.lr_scheduler.ReduceLROnPlateau(
             optimizer=optimizer,
@@ -1503,9 +1577,11 @@ def main(
         use_optimizer: str = 'SGD',
         no_bias: bool = True,
         batch_norm: bool = False,
-        feature_model_layers = None,
+        feature_model_layers: Sequence[dict[str, LightningModule]] = None,
+        transfer_model: str|Path = None,
+        transfer_max_layer: int = None,
         # mlp_task_models = None,
-        mlp_tasks = None,
+        mlp_tasks: dict[str, Sequence] = None,
         elm_mean_loss_factor = None,
         conf_mean_loss_factor = None,
         initial_weight_factor = 1.0,
@@ -1571,9 +1647,10 @@ def main(
         no_bias=no_bias,
         batch_norm=batch_norm,
         feature_model_layers=feature_model_layers,
-        # mlp_task_models=mlp_task_models,
         mlp_tasks=mlp_tasks,
         dropout=dropout,
+        transfer_model=transfer_model,
+        transfer_max_layer=transfer_max_layer,
     )
 
     monitor_metric = lit_model.monitor_metric
@@ -1747,16 +1824,26 @@ def main(
     return (trial_name, wandb_id)
 
 if __name__=='__main__':
+    feature_model_layers = (
+        {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
+        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+        {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
+        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+    )
     main(
         # restart_trial_name='',
         # wandb_id='',
+        use_optimizer='adam',
+        signal_window_size=256,
         elm_data_file=ml_data.small_data_100,
-        # batch_size={0:32, 5:64, 10:128},
-        batch_size=256,
-        lr=3e-3,
-        deepest_layer_lr_factor=0.1,
-        max_elms=30,
-        max_epochs=2,
+        feature_model_layers=feature_model_layers,
+        mlp_tasks={'elm_class': [None, 16, 1]},
+        batch_size=128,
+        batch_norm=True,
+        no_bias=False,
+        lr=1e-3,
+        max_elms=20,
+        max_epochs=4,
         num_workers=2,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
@@ -1764,9 +1851,9 @@ if __name__=='__main__':
         # no_bias=False,
         # fir_bp_low=5,
         # fir_bp_high=250,
-        # dropout=0.0,
-        # batch_norm=True,
         # skip_data=True,
         # skip_train=True,
         # use_wandb=True,
+        transfer_model='experiment_default/r2025_08_03_19_40_42/checkpoints/last.ckpt',
+        transfer_max_layer=7,
     )
