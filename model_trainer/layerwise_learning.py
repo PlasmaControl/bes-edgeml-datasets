@@ -1,9 +1,11 @@
+import os
 from numpy import random
 from model_trainer.main_multitask import main
 
 if __name__=='__main__':
-    print(f'Linux rand: { 0 }')
-    rng = random.default_rng(seed=0)
+    seed = int(os.environ.get('rand', 0))
+    print(f'RNG seed: {seed}')
+    rng = random.default_rng(seed=seed)
 
     kwargs = {}
     kwargs['feature_model_layers'] = (
@@ -12,11 +14,13 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
     )
 
-    # regularization_choice = rng.choice(3)
-    # if regularization_choice == 0:
-    #     kwargs['batch_norm'] = True
-    # elif regularization_choice == 1:
-    #     kwargs['dropout'] = rng.choice([0.04, 0.12])
+    fir_choices = (
+        (8, None),
+        (8, 150),
+        (None, 150),
+    )
+    fir_choice = rng.choice(len(fir_choices))
+    kwargs['fir_bp'] = fir_choices[fir_choice]
 
     main(
         # scenario
@@ -30,21 +34,16 @@ if __name__=='__main__':
         mlp_tasks = {
             'elm_class': [None, 32, 1],
         },
-        # no_bias=rng.choice([True, False]),
-        no_bias=False,
-        # fir_bp_low=rng.choice([0, 10]),
-        # fir_bp_high=rng.choice([0, 75, 250]),
+        no_bias=rng.choice([True, False]),
         monitor_metric='elm_class/bce_loss/train',
         batch_norm=True,
         # training
         max_epochs=500,
         log_freq=100,
-        # lr=rng.choice([1e-2, 3e-2]),
-        lr=3e-2,
+        lr=rng.choice([1e-2, 3e-2]),
         lr_warmup_epochs=15,
         lr_scheduler_patience=80,
         deepest_layer_lr_factor=1.,
-        # deepest_layer_lr_factor=rng.choice([1.0, 0.2]),
         batch_size={0:64, 15:128, 30:256},
         num_workers=8,
         gradient_clip_val=1,
