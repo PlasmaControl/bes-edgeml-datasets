@@ -262,7 +262,7 @@ class Model(_Base_Class, LightningModule):
                 if not valid:
                     src_state_dict.pop(param_name)
             src_param_names = list(src_state_dict.keys())
-            print('params to copy from src to self: ', src_param_names)
+            self.zprint(f'params to copy from src to self: {src_param_names}')
             for param_name in src_param_names:
                 assert param_name in self_param_names, \
                     f"{param_name} in source model, but not in self model"
@@ -308,7 +308,7 @@ class Model(_Base_Class, LightningModule):
                     layer_name = f"L{self.i_layer:02d}_Dropout"
                     feature_layer_dict[layer_name] = torch.nn.Dropout3d(self.dropout)
                 if self.batch_norm or self.dropout:
-                    print(f"  {layer_name} (regularization)")
+                    self.zprint(f"  {layer_name} (regularization)")
                     self.i_layer += 1
             # conv layer
             conv_layer_name = f"L{self.i_layer:02d}_Conv"
@@ -329,13 +329,13 @@ class Model(_Base_Class, LightningModule):
             # Leaky ReLU layer
             relu_layer_name = f"L{self.i_layer:02d}_LeRu"
             feature_layer_dict[relu_layer_name] = torch.nn.LeakyReLU(self.leaky_relu_slope)
-            print(f"  {relu_layer_name} (activation)")
+            self.zprint(f"  {relu_layer_name} (activation)")
             self.i_layer += 1
 
         layer_name = f'L{self.i_layer:02d}_Flatten'
         feature_layer_dict[layer_name] = torch.nn.Flatten()
         self.i_layer += 1
-        print(f"  {layer_name}  (flatten to vector)")
+        self.zprint(f"  {layer_name}  (flatten to vector)")
         self.feature_model = torch.nn.Sequential(feature_layer_dict)
         self.feature_space_size = self.feature_model(torch.zeros(self.input_data_shape)).numel()
 
@@ -357,7 +357,7 @@ class Model(_Base_Class, LightningModule):
                 layer_name = f"L{self.i_layer:02d}_BatchNorm"
                 mlp_layer_dict[layer_name] = torch.nn.BatchNorm1d(mlp_layers[i_mlp_layer])
                 self.i_layer += 1
-                print(f'  {layer_name} (regularization)')
+                self.zprint(f'  {layer_name} (regularization)')
             # fully-connected layer
             layer_name = f"L{self.i_layer:02d}_FC"
             bias = (True and (self.no_bias==False)) if i_mlp_layer<n_layers-2 else False
@@ -375,7 +375,7 @@ class Model(_Base_Class, LightningModule):
                 layer_name = f"L{self.i_layer:02d}_LeRu"
                 mlp_layer_dict[layer_name] = torch.nn.LeakyReLU(self.leaky_relu_slope)
                 self.i_layer += 1
-                print(f"  {layer_name} (activation)")
+                self.zprint(f"  {layer_name} (activation)")
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
@@ -1582,6 +1582,7 @@ def main(
         feature_model_layers: Sequence[dict[str, LightningModule]] = None,
         transfer_model: str|Path = None,
         transfer_max_layer: int = None,
+        transfer_layer_lr_factor: float = 1e-3,
         # mlp_task_models = None,
         mlp_tasks: dict[str, Sequence] = None,
         elm_mean_loss_factor = None,
@@ -1652,6 +1653,7 @@ def main(
         dropout=dropout,
         transfer_model=transfer_model,
         transfer_max_layer=transfer_max_layer,
+        transfer_layer_lr_factor=transfer_layer_lr_factor,
     )
 
     monitor_metric = lit_model.monitor_metric
@@ -1843,7 +1845,7 @@ if __name__=='__main__':
         no_bias=False,
         lr=1e-3,
         max_elms=20,
-        max_epochs=4,
+        max_epochs=2,
         num_workers=2,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
