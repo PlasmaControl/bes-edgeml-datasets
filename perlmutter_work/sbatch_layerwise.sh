@@ -14,7 +14,7 @@
 
 #SBATCH --signal=SIGTERM@300
 
-#SBATCH --array=1-5%2
+#SBATCH --array=1-8%2
 
 module --redirect list
 which python
@@ -75,23 +75,23 @@ if __name__=='__main__':
         no_bias=False,
         monitor_metric='elm_class/bce_loss/train',
         batch_norm=True,
-        fir_bp=(10, None),
         # training
         max_epochs=500,
         log_freq=100,
-        lr=1e-3,
+        lr=3e-4,
         lr_warmup_epochs=10,
         lr_scheduler_patience=80,
         deepest_layer_lr_factor=0.1,
-        batch_size={0:64, 10:128, 20:256},
+        batch_size=256,
         num_workers=8,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
         use_wandb=True,
         early_stopping_patience=200,
-        transfer_model='/global/homes/d/drsmith/scratch-ml/experiment_256_v5/r41396289_56_2025_08_05_16_15_22/checkpoints/epoch=254-step=43395.ckpt',
+        transfer_model='experiment_256_v5/r41396289_3_2025_08_05_05_43_31/checkpoints/epoch=202-step=35751.ckpt',
+        fir_bp=(8, None),
         transfer_max_layer=7,
-        transfer_layer_lr_factor=1e-3,
+        transfer_layer_lr_factor=1e-2,
     )
 END
 )
