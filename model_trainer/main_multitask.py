@@ -413,7 +413,8 @@ class Model(_Base_Class, LightningModule):
                 if self.transfer_model and self.transfer_max_layer:
                     for i in range(self.transfer_max_layer):
                         if f'L{i:02d}_' in layer_name:
-                            param_dict['lr'] *= self.transfer_layer_lr_factor
+                            if 'lr' in param_dict:
+                                param_dict['lr'] *= self.transfer_layer_lr_factor
                             break
                 self.zprint(f"  {layer_name}  {param_name}: {param_dict}")
                 param_dict['params'] = param
@@ -430,8 +431,12 @@ class Model(_Base_Class, LightningModule):
                     elif 'weight' in param_name:
                         if i_layer == 0:
                             param_dict['lr'] = self.lr/4
-                    else:
-                        raise ValueError
+                    if self.transfer_model and self.transfer_max_layer:
+                        for i in range(self.transfer_max_layer):
+                            if f'L{i:02d}_' in layer_name:
+                                if 'lr' in param_dict:
+                                    param_dict['lr'] *= self.transfer_layer_lr_factor
+                                break
                     self.zprint(f"  {layer_name}  {param_name}: {param_dict}")
                     param_dict['params'] = param
                     parameter_list.append(param_dict)
