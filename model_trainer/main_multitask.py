@@ -468,7 +468,7 @@ class Model(_Base_Class, LightningModule):
             patience=self.lr_scheduler_patience,
             threshold=self.lr_scheduler_threshold,
             mode='min' if 'loss' in self.monitor_metric else 'max',
-            min_lr=3e-5,
+            min_lr=1e-6,
         )
         warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
             optimizer=optimizer,

@@ -9,7 +9,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --time=45
+#SBATCH --time=60
 #SBATCH --qos=regular
 
 #SBATCH --signal=SIGTERM@300
@@ -103,12 +103,12 @@ if __name__=='__main__':
         monitor_metric='elm_class/bce_loss/train',
         batch_norm=True,
         # training
-        max_epochs=500,
+        max_epochs=1000,
         lr=3e-2,
         lr_warmup_epochs=15,
-        lr_scheduler_patience=60,
-        deepest_layer_lr_factor=0.2,
-        batch_size={0:128, 15:256, 120:512},
+        lr_scheduler_patience=80,
+        deepest_layer_lr_factor=1./2,
+        batch_size={0:128, 15:256, 120:512, 400:1024},
         num_workers=8,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
@@ -117,7 +117,7 @@ if __name__=='__main__':
         transfer_model=f'experiment_256_v6/{job_id}/checkpoints/last.ckpt',
         fir_bp=fir_bp,
         transfer_max_layer=10,
-        transfer_layer_lr_factor=1./20,
+        transfer_layer_lr_factor=1./10,
     )
 END
 )
