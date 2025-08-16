@@ -24,7 +24,7 @@ from lightning.pytorch import Trainer, LightningModule, LightningDataModule
 from lightning.pytorch.strategies import DDPStrategy
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import \
-    LearningRateMonitor, EarlyStopping, ModelCheckpoint
+    LearningRateMonitor, EarlyStopping, ModelCheckpoint, BackboneFinetuning
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 from lightning.pytorch.utilities import grad_norm
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
@@ -94,9 +94,11 @@ class Model(_Base_Class, LightningModule):
     dropout: float = 0.0
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
     mlp_tasks: dict[str, Sequence] = None
-    transfer_model: str|Path = None  # ckpt file
-    transfer_max_layer: int = None
-    transfer_layer_lr_factor: float = 1e-3
+    backbone_model_path: str|Path = None
+    backbone_first_n_layers: int = None
+    backbone_unfreeze_at_epoch: int = 50
+    backbone_initial_ratio_lr: float = 1e-3
+    backbone_warmup_rate: float = 2
 
     def __post_init__(self):
 
@@ -182,7 +184,7 @@ class Model(_Base_Class, LightningModule):
         #         self.monitor_metric = f'{task_name}/f1_score/val'
 
         self.initialize_parameters()
-        if self.transfer_model and self.transfer_max_layer:
+        if self.backbone_model_path and self.backbone_first_n_layers:
             self.transfer_layers()
 
     def make_feature_model(self) -> None:
@@ -319,13 +321,13 @@ class Model(_Base_Class, LightningModule):
             self.zprint(f"  Task {task_name} output mean {task_output.mean():.4f} stdev {task_output.std():.4f} min/max {task_output.min():.3f}/{task_output.max():.3f}")
 
     def transfer_layers(self) -> None:
-        if not self.is_global_zero or not self.transfer_model or not self.transfer_max_layer:
+        if not self.is_global_zero or not self.backbone_model_path or not self.backbone_first_n_layers:
             return
-        self.transfer_model = Path(self.transfer_model).absolute()
-        assert self.transfer_model.exists(), f"Transfer model not found: {self.transfer_model}"
+        self.backbone_model_path = Path(self.backbone_model_path) / 'checkpoints'/'last.ckpt'
+        assert self.backbone_model_path.exists(), f"Transfer model not found: {self.backbone_model_path}"
         self_param_names = [param_name for param_name, _ in self.named_parameters()]
         source_model = torch.load(
-            self.transfer_model,
+            self.backbone_model_path,
             weights_only=False,
         )
         src_state_dict = source_model['state_dict']
@@ -334,15 +336,14 @@ class Model(_Base_Class, LightningModule):
                 src_state_dict.pop(param_name)
                 continue
             valid = False
-            for i in range(self.transfer_max_layer):
+            for i in range(self.backbone_first_n_layers):
                 if f'L{i:02d}_' in param_name:
                     valid = True
                     break
             if not valid:
                 src_state_dict.pop(param_name)
-        src_param_names = list(src_state_dict.keys())
         self.zprint(f'params to copy from src to self:')
-        for param_name in src_param_names:
+        for param_name in src_state_dict:
             self.zprint(f'  {param_name}')
             assert param_name in self_param_names, \
                 f"{param_name} in source model, but not in self model"
@@ -1565,10 +1566,12 @@ def main(
         lr_warmup_epochs: int = 10,
         lr_scheduler_patience: int = 100,
         monitor_metric = None,
-        # transfer learning
-        transfer_model: str|Path = None,
-        transfer_max_layer: int = None,
-        transfer_layer_lr_factor: float = 1e-3,
+        # transfer learning with backbone model
+        backbone_model_path: str|Path = None,
+        backbone_first_n_layers: int = None,
+        backbone_initial_ratio_lr: float = 1e-3,
+        backbone_unfreeze_at_epoch: int = 50,
+        backbone_warmup_rate: float = 2,
         # loggers
         log_freq: int = 100,
         use_wandb: bool = False,
@@ -1636,10 +1639,12 @@ def main(
         lr_warmup_epochs=lr_warmup_epochs,
         weight_decay=weight_decay,
         monitor_metric=monitor_metric,
-        # transfer
-        transfer_model=transfer_model,
-        transfer_max_layer=transfer_max_layer,
-        transfer_layer_lr_factor=transfer_layer_lr_factor,
+        # transfer learning with backbone model
+        backbone_model_path=backbone_model_path,
+        backbone_first_n_layers=backbone_first_n_layers,
+        backbone_initial_ratio_lr=backbone_initial_ratio_lr,
+        backbone_unfreeze_at_epoch=backbone_unfreeze_at_epoch,
+        backbone_warmup_rate=backbone_warmup_rate,
     )
 
     assert lit_model.world_size == world_size
@@ -1675,6 +1680,7 @@ def main(
             check_finite=True,
         ),
     ]
+
 
     ### loggers
     zprint("\u2B1C Creating loggers")
@@ -1754,8 +1760,8 @@ def main(
     assert trainer.is_global_zero == is_global_zero
     assert trainer.log_dir == tb_logger.log_dir
 
-    ckpt_path=(
-        experiment_dir/restart_trial_name/'checkpoints/last.ckpt'
+    ckpt_path = (
+        experiment_dir / restart_trial_name / 'checkpoints/last.ckpt'
         if restart_trial_name
         else None
     )
@@ -1763,16 +1769,19 @@ def main(
     ### data
     if not skip_data:
         zprint("\u2B1C Creating data module")
-        if ckpt_path and False:
-            assert ckpt_path.exists(), f"Checkpoint does not exist: {ckpt_path}"
-            print(f"Loading data from checkpoint: {ckpt_path}")
-            lit_datamodule = Data.load_from_checkpoint(checkpoint_path=ckpt_path)
-            state_dict_file = experiment_dir/restart_trial_name/'state_dict.pt'
-            assert state_dict_file.exists(), f"State dict file does not exist: {state_dict_file}"
-            print(f"Loading state_dict from: {state_dict_file}")
-            state_dict = torch.load(state_dict_file, weights_only=False)
-            lit_datamodule.load_state_dict(state_dict)
+        if ckpt_path and False:  # do not reload datamodule when restarting.
+            pass
+            # assert ckpt_path.exists(), f"Checkpoint does not exist: {ckpt_path}"
+            # print(f"Loading data from checkpoint: {ckpt_path}")
+            # lit_datamodule = Data.load_from_checkpoint(checkpoint_path=ckpt_path)
+            # state_dict_file = experiment_dir/restart_trial_name/'state_dict.pt'
+            # assert state_dict_file.exists(), f"State dict file does not exist: {state_dict_file}"
+            # print(f"Loading state_dict from: {state_dict_file}")
+            # state_dict = torch.load(state_dict_file, weights_only=False)
+            # lit_datamodule.load_state_dict(state_dict)
         else:
+            if ckpt_path:
+                assert seed is not None
             lit_datamodule = Data(
                 signal_window_size=signal_window_size,
                 log_dir=trainer.log_dir,
@@ -1816,7 +1825,11 @@ def main(
         zprint(f"W&B ID/version: {wandb_id}")
         wandb.finish()
 
-    return (trial_name, wandb_id)
+    return {
+        'trial_name': trial_name,
+        'trial_path': experiment_dir/trial_name,
+        'wandb_id': wandb_id,
+    }
 
 if __name__=='__main__':
     feature_model_layers = (
@@ -1825,7 +1838,6 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
     )
     main(
-        use_optimizer='adam',
         elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         max_elms=20,
