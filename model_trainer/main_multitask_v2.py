@@ -75,8 +75,8 @@ class _Base_Class:
 
 @dataclasses.dataclass(eq=False)
 class Model(_Base_Class, LightningModule):
-    elm_classifier: bool = True
-    conf_classifier: bool = False
+    # elm_classifier: bool = True
+    # conf_classifier: bool = False
     lr: float = 1e-3
     deepest_layer_lr_factor: float = 0.1
     lr_scheduler_patience: int = 100
@@ -113,7 +113,6 @@ class Model(_Base_Class, LightningModule):
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
 
         # feature space sub-model
-        # self.i_layer: int = 0
         self.feature_model: LightningModule = None
         self.feature_space_size: int = None
         self.make_feature_model()
@@ -132,9 +131,9 @@ class Model(_Base_Class, LightningModule):
 
         # create MLP configs
         self.task_configs = {}
-        for task in self.mlp_tasks:
+        for task, mlp_layers in self.mlp_tasks.items():
             self.task_configs[task] = {}
-            self.task_configs[task]['layers'] = self.mlp_tasks[task]
+            self.task_configs[task]['layers'] = mlp_layers
             if 'class' in task:
                 self.task_configs[task]['metrics'] = {
                         'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
@@ -627,9 +626,10 @@ class Model(_Base_Class, LightningModule):
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
     elm_data_file: str|Path = None
-    elm_classifier: bool = True
+    # elm_classifier: bool = True
     confinement_data_file: str|Path = None
-    conf_classifier: bool = False
+    # conf_classifier: bool = False
+    tasks: Sequence[str] = ('elm_class',)
     log_dir: str|Path = None
     max_elms: int = None
     batch_size: int|dict = 128
@@ -671,11 +671,9 @@ class Data(_Base_Class, LightningDataModule):
 
         self.trainer: Trainer = None
 
-        self.tasks = []
         self.state_items = []
 
-        if self.elm_classifier:
-            self.tasks.append('elm_class')
+        if 'elm_class' in self.tasks:
             self.elm_data_file = Path(self.elm_data_file).absolute()
             assert self.elm_data_file.exists(), f"ELM data file {self.elm_data_file} does not exist"
             self.global_shot_split: dict[str,np.ndarray] = {}
@@ -688,11 +686,9 @@ class Data(_Base_Class, LightningDataModule):
                 'global_shot_split',
             ])
 
-        if self.conf_classifier:
+        if 'conf_classifier' in self.tasks:
             self.confinement_data_file = Path(self.confinement_data_file).absolute()
             assert self.confinement_data_file.exists()
-            self.tasks.append('conf_classifier')
-
             self.global_confinement_shot_split: dict[str,Sequence] = {}
             self.confinement_raw_signal_mean: float = None
             self.confinement_raw_signal_stdev: float = None
@@ -721,9 +717,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def prepare_data(self):
         self.zprint("\u2B1C Prepare data (rank 0 only)")
-        if self.elm_classifier:
+        if 'elm_class' in self.tasks:
             self.prepare_elm_data()
-        if self.conf_classifier and not self.global_confinement_shot_split:
+        if 'conf_classifier' in self.tasks and not self.global_confinement_shot_split:
             self.prepare_global_confinement_data()
 
     def prepare_elm_data(self):
@@ -1545,15 +1541,15 @@ def main(
         wandb_id: str = None,
         signal_window_size: int = 256,
         # model
-        elm_classifier: bool = True,
-        conf_classifier: bool = False,
+        # elm_classifier: bool = True,
+        # conf_classifier: bool = False,
         no_bias: bool = False,
         batch_norm: bool = True,
+        dropout: float = 0.0,
         feature_model_layers: Sequence[dict[str, LightningModule]] = None,
         mlp_tasks: dict[str, Sequence] = None,
-        elm_mean_loss_factor = None,
-        conf_mean_loss_factor = None,
-        dropout: float = 0.0,
+        # elm_mean_loss_factor = None,
+        # conf_mean_loss_factor = None,
         # optimizer
         use_optimizer: str = 'adam',
         lr: float = 1e-3,
@@ -1617,11 +1613,11 @@ def main(
     ### model
     zprint("\u2B1C Creating model")
     lit_model = Model(
-        elm_classifier=elm_classifier,
-        conf_classifier=conf_classifier,
+        # elm_classifier=elm_classifier,
+        # conf_classifier=conf_classifier,
         signal_window_size=signal_window_size,
-        elm_loss_weight=elm_mean_loss_factor,
-        conf_loss_weight=conf_mean_loss_factor,
+        # elm_loss_weight=elm_mean_loss_factor,
+        # conf_loss_weight=conf_mean_loss_factor,
         no_bias=no_bias,
         batch_norm=batch_norm,
         feature_model_layers=feature_model_layers,
@@ -1781,8 +1777,9 @@ def main(
                 log_dir=trainer.log_dir,
                 elm_data_file=elm_data_file,
                 confinement_data_file=confinement_data_file,
-                elm_classifier=lit_model.elm_classifier,
-                conf_classifier=lit_model.conf_classifier,
+                # elm_classifier=lit_model.elm_classifier,
+                # conf_classifier=lit_model.conf_classifier,
+                tasks=lit_model.task_names,
                 max_elms=max_elms,
                 batch_size=batch_size,
                 fraction_test=fraction_test,
@@ -1830,9 +1827,18 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
+        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
+    mlp_tasks={
+        # 'elm_class': [None,16,1],
+        'conf_classifier': [None, 16,4],
+    }
     main(
         elm_data_file=ml_data.small_data_100,
+        confinement_data_file='/Users/drsmith/Documents/repos/bes-ml-data/ml_data/bes_signals_175490.hdf5',
         feature_model_layers=feature_model_layers,
+        mlp_tasks=mlp_tasks,
         max_elms=20,
+        # skip_train=True,
     )

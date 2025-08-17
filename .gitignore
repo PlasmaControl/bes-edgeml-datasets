@@ -4,6 +4,7 @@ data/
 figures*/
 experiment*/
 .vscode/
+.pytest_cache/
 
 *.py[cod]
 *.out
