@@ -61,14 +61,14 @@ def test_conf_classifier():
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
-        'elm_class': [None,16,1],
+        # 'elm_class': [None,16,1],
         'conf_classifier': [None, 16,4],
     }
     main(
         elm_data_file=ml_data.small_data_100,
-        confinement_data_file='/Users/drsmith/Documents/repos/bes-ml-data/ml_data/bes_signals_175490.hdf5',
+        confinement_data_file='/global/homes/d/drsmith/project-ml/data-archive/confinement_data.20240112.hdf5',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=20,
-        skip_train=True,
+        # skip_train=True,
     )

@@ -6,6 +6,8 @@ import os
 import time
 import re
 
+import lightning
+import lightning.pytorch
 import numpy as np
 import scipy.signal
 import sklearn.metrics
@@ -102,6 +104,7 @@ class Model(_Base_Class, LightningModule):
         super().__post_init__()
         super(_Base_Class, self).__init__()
         self.save_hyperparameters()
+        self.trainer: lightning.pytorch.Trainer = None
 
         if self.is_global_zero:
             print_fields(self)
@@ -688,7 +691,7 @@ class Data(_Base_Class, LightningDataModule):
 
         if 'conf_classifier' in self.tasks:
             self.confinement_data_file = Path(self.confinement_data_file).absolute()
-            assert self.confinement_data_file.exists()
+            assert self.confinement_data_file.exists(), f"Confinement data file {self.confinement_data_file} does not exist"
             self.global_confinement_shot_split: dict[str,Sequence] = {}
             self.confinement_raw_signal_mean: float = None
             self.confinement_raw_signal_stdev: float = None
@@ -907,14 +910,14 @@ class Data(_Base_Class, LightningDataModule):
 
         sub_stages = ['train', 'validation'] if stage == 'fit' else [stage]
 
-        if self.elm_classifier:
+        if 'elm_class' in self.tasks:
             t_tmp = time.time()
             for sub_stage in sub_stages:
                 self.setup_elm_data_for_rank(sub_stage)
             self.zprint(f"  ELM data setup time: {time.time()-t_tmp:0.1f} s")
         self.barrier()
 
-        if self.conf_classifier:
+        if 'conf_classifier' in self.tasks:
             t_tmp = time.time()
             self.zprint("**** Confinement data setup")
             for sub_stage in sub_stages:
@@ -1392,9 +1395,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def train_dataloader(self) -> CombinedLoader:
         loaders = {}
-        if self.elm_classifier:
+        if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_elm_dataloaders('train')
-        if self.conf_classifier:
+        if 'conf_classifier' in self.tasks:
             loaders['conf_classifier'] = self._conf_train_val_test_dataloaders('train')
         combined_loader = CombinedLoader(
             iterables=loaders,
@@ -1405,9 +1408,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def val_dataloader(self) -> CombinedLoader:
         loaders = {}
-        if self.elm_classifier:
+        if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_elm_dataloaders('validation')
-        if self.conf_classifier:
+        if 'conf_classifier' in self.tasks:
             loaders['conf_classifier'] = self._conf_train_val_test_dataloaders('validation')
         combined_loader = CombinedLoader(
             iterables=loaders,
@@ -1418,9 +1421,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def test_dataloader(self) -> CombinedLoader:
         loaders = {}
-        if self.elm_classifier:
+        if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_elm_dataloaders('test')
-        if self.conf_classifier:
+        if 'conf_classifier' in self.tasks:
             loaders['conf_classifier'] = self._conf_train_val_test_dataloaders('test')
         combined_loader = CombinedLoader(
             iterables=loaders,
@@ -1592,7 +1595,7 @@ def main(
         max_shots_per_class: int = None,
         max_confinement_event_length: int = None,
         seed: int = 42,
-) -> tuple:
+) -> dict:
 
     ### SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
@@ -1836,7 +1839,7 @@ if __name__=='__main__':
     }
     main(
         elm_data_file=ml_data.small_data_100,
-        confinement_data_file='/Users/drsmith/Documents/repos/bes-ml-data/ml_data/bes_signals_175490.hdf5',
+        confinement_data_file='/global/homes/d/drsmith/project-ml/data-archive/confinement_data.20240112.hdf5',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=20,
