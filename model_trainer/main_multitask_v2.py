@@ -96,9 +96,9 @@ class Model(_Base_Class, LightningModule):
     mlp_tasks: dict[str, Sequence] = None
     backbone_model_path: str|Path = None
     backbone_first_n_layers: int = None
-    backbone_unfreeze_at_epoch: int = 50
-    backbone_initial_ratio_lr: float = 1e-3
-    backbone_warmup_rate: float = 2
+    # backbone_unfreeze_at_epoch: int = 50
+    # backbone_initial_ratio_lr: float = 1e-3
+    # backbone_warmup_rate: float = 2
 
     def __post_init__(self):
 
@@ -185,7 +185,7 @@ class Model(_Base_Class, LightningModule):
 
         self.initialize_parameters()
         if self.backbone_model_path and self.backbone_first_n_layers:
-            self.transfer_layers()
+            self.backbone_transfer_learning()
 
     def make_feature_model(self) -> None:
         self.zprint("Feature space sub-model")
@@ -320,7 +320,7 @@ class Model(_Base_Class, LightningModule):
             self.zprint(f"  Task {task_name} output shape: {task_output.shape}")
             self.zprint(f"  Task {task_name} output mean {task_output.mean():.4f} stdev {task_output.std():.4f} min/max {task_output.min():.3f}/{task_output.max():.3f}")
 
-    def transfer_layers(self) -> None:
+    def backbone_transfer_learning(self) -> None:
         if not self.is_global_zero or not self.backbone_model_path or not self.backbone_first_n_layers:
             return
         self.backbone_model_path = Path(self.backbone_model_path) / 'checkpoints'/'last.ckpt'
@@ -335,12 +335,8 @@ class Model(_Base_Class, LightningModule):
             if not param_name.endswith(('bias', 'weight')):
                 src_state_dict.pop(param_name)
                 continue
-            valid = False
-            for i in range(self.backbone_first_n_layers):
-                if f'L{i:02d}_' in param_name:
-                    valid = True
-                    break
-            if not valid:
+            i_layer = int(re.findall(r'L(\d+)_', param_name)[0])
+            if i_layer >= self.backbone_first_n_layers:
                 src_state_dict.pop(param_name)
         self.zprint(f'params to copy from src to self:')
         for param_name in src_state_dict:
@@ -351,6 +347,24 @@ class Model(_Base_Class, LightningModule):
             state_dict=src_state_dict, 
             strict=False,
         )
+        def flatten_modules(module: torch.nn.Module):
+            for name, submodule in module.named_children():
+                if len(list(submodule.children())) == 0:
+                    yield name, submodule
+                else:
+                    self.zprint(f"Traversing into {name}")
+                    yield from flatten_modules(submodule)
+        module_dict = dict(flatten_modules(self))
+        self.backbone = torch.nn.Sequential()
+        for module_name, module in module_dict.items():
+            if self.param_count(module)==0: continue
+            res = re.findall(r'L(\d+)_', module_name)
+            if not res: continue
+            assert len(res) < 2
+            i_layer = int(res[0])
+            if i_layer < self.backbone_first_n_layers:
+                self.zprint(f"Adding module {module_name} to backbone")
+                self.backbone.add_module(module_name, module)
         # print('missing from src:', missing)
         # print('unexpected in src:', unexpected)
         # # for self_mod_name, self_mod in self.named_modules():
@@ -403,13 +417,10 @@ class Model(_Base_Class, LightningModule):
     def make_parameter_list(self) -> list[dict]:
         parameter_list = []
         n_feature_layers = 0
-        for layer_name, layer in self.named_modules():
+        for layer_name, _ in self.named_modules():
             if not layer_name.endswith(('Conv','FC')):
                 continue
-            for params in layer.parameters():
-                if params.requires_grad:
-                    n_feature_layers += 1
-                    break
+            n_feature_layers += 1
         lrs_for_feature_layers = np.logspace(
             np.log10(self.lr * self.deepest_layer_lr_factor),
             np.log10(self.lr),
@@ -1571,7 +1582,7 @@ def main(
         backbone_first_n_layers: int = None,
         backbone_initial_ratio_lr: float = 1e-3,
         backbone_unfreeze_at_epoch: int = 50,
-        backbone_warmup_rate: float = 2,
+        backbone_warmup_rate: float = 2.,
         # loggers
         log_freq: int = 100,
         use_wandb: bool = False,
@@ -1642,9 +1653,6 @@ def main(
         # transfer learning with backbone model
         backbone_model_path=backbone_model_path,
         backbone_first_n_layers=backbone_first_n_layers,
-        backbone_initial_ratio_lr=backbone_initial_ratio_lr,
-        backbone_unfreeze_at_epoch=backbone_unfreeze_at_epoch,
-        backbone_warmup_rate=backbone_warmup_rate,
     )
 
     assert lit_model.world_size == world_size
@@ -1680,7 +1688,13 @@ def main(
             check_finite=True,
         ),
     ]
-
+    if backbone_model_path and backbone_first_n_layers:
+        backbone_scheduler = BackboneFinetuning(
+            lambda_func=lambda lr: lr * backbone_warmup_rate,
+            unfreeze_backbone_at_epoch=backbone_unfreeze_at_epoch,
+            backbone_initial_ratio_lr=backbone_initial_ratio_lr,
+        )
+        callbacks.append(backbone_scheduler)
 
     ### loggers
     zprint("\u2B1C Creating loggers")
