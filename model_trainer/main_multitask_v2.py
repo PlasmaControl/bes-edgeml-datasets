@@ -58,7 +58,6 @@ class _Base_Class:
         self.world_size = int(os.getenv("SLURM_NTASKS", default=1))
         self.world_rank = int(os.getenv("SLURM_PROCID", default=0))
         self.is_global_zero = self.world_rank == 0
-        # print(f'World rank/size: {self.world_rank}/{self.world_size}')
 
         if self.world_rank > 0:
             assert self.world_size > 1
@@ -96,9 +95,6 @@ class Model(_Base_Class, LightningModule):
     mlp_tasks: dict[str, Sequence] = None
     backbone_model_path: str|Path = None
     backbone_first_n_layers: int = None
-    # backbone_unfreeze_at_epoch: int = 50
-    # backbone_initial_ratio_lr: float = 1e-3
-    # backbone_warmup_rate: float = 2
 
     def __post_init__(self):
 
@@ -690,10 +686,6 @@ class Data(_Base_Class, LightningDataModule):
             self.elm_datasets: dict[str,torch.utils.data.Dataset] = {}
             self.state_items.extend([
                 'global_shot_split',
-                # 'global_elm_split',
-                # 'elm_raw_signal_mean',
-                # 'elm_raw_signal_stdev',
-                # 'time_to_elm_quantiles',
             ])
 
         if self.conf_classifier:
@@ -726,8 +718,6 @@ class Data(_Base_Class, LightningDataModule):
             self.save_hyperparameters("seed")
         self.rng = np.random.default_rng(self.seed)
         self.zprint(f"Using random number generator with seed {self.seed}")
-
-        # self.old_batch_size: int = 0
 
     def prepare_data(self):
         self.zprint("\u2B1C Prepare data (rank 0 only)")
@@ -1446,11 +1436,6 @@ class Data(_Base_Class, LightningDataModule):
     def predict_dataloader(self) -> None:
         pass
 
-    # def get_state_dict(self) -> dict:
-    #     state_dict = {item: getattr(self, item) for item in self.state_items}
-    #     self.zprint(f"  State dict keys: {list(state_dict.keys())}")
-    #     return state_dict
-
     def load_state_dict(self, state: dict) -> None:
         self.zprint(f"  Loading state dict keys: {self.state_items}")
         for item in self.state_items:
@@ -1662,11 +1647,6 @@ def main(
 
     zprint("\u2B1C Model Summary:")
     zprint(ModelSummary(lit_model, max_depth=-1))
-
-    # lit_model.save_hyperparameters({
-    #     'gradient_clip_val': gradient_clip_val, 
-    #     'gradient_clip_algorithm': gradient_clip_algorithm, 
-    # })
 
     ### callbacks
     zprint("\u2B1C Creating callbacks")
