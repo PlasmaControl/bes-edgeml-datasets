@@ -658,12 +658,13 @@ class Data(_Base_Class, LightningDataModule):
         'z_avg': None,
         'delz_avg': None
     }
-    max_shots_per_class: int = None
+    # max_shots_per_class: int = None
     # test_only: bool = False
     n_rows: int = 8
     n_cols: int = 8
     # mask_sigma_outliers: float = None  # remove signal windows with abs(standardized_signals) > n_sigma
     max_confinement_event_length: int = None
+    confinement_dataset_factor: float = None
 
     def __post_init__(self):
         super().__post_init__()
@@ -693,11 +694,11 @@ class Data(_Base_Class, LightningDataModule):
         if 'conf_classifier' in self.tasks:
             self.confinement_data_file = Path(self.confinement_data_file).absolute()
             assert self.confinement_data_file.exists(), f"Confinement data file {self.confinement_data_file} does not exist"
-            self.global_confinement_shot_split: dict[str,Sequence] = {}
+            self.global_stage_to_shot: dict[str,Sequence] = {}
             self.confinement_raw_signal_mean: float = None
             self.confinement_raw_signal_stdev: float = None
             self.state_items.extend([
-                'global_confinement_shot_split',
+                'global_stage_to_shot',
                 'confinement_raw_signal_mean',
                 'confinement_raw_signal_stdev',
             ])
@@ -723,7 +724,7 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint("\u2B1C Prepare data (rank 0 only)")
         if 'elm_class' in self.tasks:
             self.prepare_elm_data()
-        if 'conf_classifier' in self.tasks and not self.global_confinement_shot_split:
+        if 'conf_classifier' in self.tasks and not self.global_stage_to_shot:
             self.prepare_confinement_data()
 
     def prepare_elm_data(self):
@@ -907,13 +908,14 @@ class Data(_Base_Class, LightningDataModule):
         if self.bad_confinement_shots is None:
             self.bad_confinement_shots = ()  # Initialize to empty list if None
         check_bounds = lambda value, bounds: bounds[0] <= value <= bounds[1] if bounds else True
-        global_shot_to_events: dict[int,list] = {}
-        global_class_to_shots: list[list] = [[] for _ in range(self.num_classes)]
-        global_class_duration: list[int] = [0] * self.num_classes
-        global_class_to_events: list[int] = [0] * self.num_classes
         r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
         missing_inboard = bad_inboard = 0
         with h5py.File(self.confinement_data_file) as root:
+            global_shot_to_events: dict[int,list] = {}
+            global_class_to_shots: list[list] = [[] for _ in range(self.num_classes)]
+            global_class_duration: list[int] = [0] * self.num_classes
+            global_class_event_count: list[int] = [0] * self.num_classes
+            global_class_signal_window_count: list[int] = [0] * self.num_classes
             for shot_key in root:
                 if int(shot_key) in self.bad_confinement_shots:
                     continue
@@ -951,13 +953,13 @@ class Data(_Base_Class, LightningDataModule):
                     assert event['labels'][0] == event['labels'][-1]
                     assert event['signals'].shape[0] == 64
                     assert event['labels'][0] < self.num_classes
-                    label = event['labels'][0].item()
-                    duration: int = event['labels'].size
-                    if duration < self.signal_window_size:
+                    class_label = event['labels'][0].item()
+                    event_length: int = event['labels'].size
+                    if event_length < self.signal_window_size:
                         continue
                     if self.max_confinement_event_length:
-                        duration = min(duration, self.max_confinement_event_length)
-                    valid_t0 = np.zeros(duration, dtype=int)
+                        event_length = min(event_length, self.max_confinement_event_length)
+                    valid_t0 = np.zeros(event_length, dtype=int)
                     valid_t0[self.signal_window_size-1::self.signal_window_size//8] = 1
                     valid_t0_indices = np.arange(valid_t0.size, dtype=int)
                     valid_t0_indices = valid_t0_indices[valid_t0 == 1]
@@ -966,105 +968,231 @@ class Data(_Base_Class, LightningDataModule):
                         'shot': int(shot_key),
                         'event': int(event_key),
                         'shot_event_key': f"{shot_key}/{event_key}",
-                        'label': label,
-                        'duration': duration,
+                        'class_label': class_label,
+                        'event_length': event_length,
                         'sw_count': n_signal_windows,
                     })
-                    global_class_to_shots[label].append(int(shot_key))
-                    global_class_duration[label] += duration
-                    global_class_to_events[label] += 1
+                    global_class_to_shots[class_label].append(int(shot_key))
+                    global_class_duration[class_label] += event_length
+                    global_class_event_count[class_label] += 1
+                    global_class_signal_window_count[class_label] += n_signal_windows
                 if not events:
                     continue
                 global_shot_to_events[int(shot_key)] = events
         global_class_to_shots = [list(set(item)) for item in global_class_to_shots]
-        # BES location exclusions
-        self.zprint("    Confinement data exclusions")
+        # exclusions
+        self.zprint("    Global data exclusions")
         self.zprint(f"      missing inboard shot exclusions: {missing_inboard}")
         self.zprint(f"      bad inboard shot exclusions: {bad_inboard}")
         self.zprint(f"      r_avg shot exclusions: {r_avg_exclusions}")
         self.zprint(f"      z_avg shot exclusions: {z_avg_exclusions}")
         self.zprint(f"      delz_avg shot exclusions: {delz_avg_exclusions}")
-        # data read
-        self.zprint("    Data file summary (after shot exclusions)")
+        # data summary
+        self.zprint("    Global data summary (after shot exclusions)")
         self.zprint(f"      Shots: {len(global_shot_to_events)}")
         for i in range(self.num_classes):
-            self.zprint(f"        Class {i}:  shots {len(global_class_to_shots[i])}  events {global_class_to_events[i]}  duration {global_class_duration[i]:,d}")
+            line =  f"      Class {i}:  shots {len(global_class_to_shots[i])}  "
+            line += f"events {global_class_event_count[i]}  "
+            line += f"duration {global_class_duration[i]:,d}  "
+            line += f"n_sig_win {global_class_signal_window_count[i]:,d}  "
+            line += f"n_batches {global_class_signal_window_count[i]//self.batch_size:,d}"
+            self.zprint(line)
+        # randomly assign shots to train/val/test
+        self.zprint("    Global shot split into train/val/test")
+        stages = ['train','validation','test']
+        self.global_stage_to_shot = {st:[] for st in stages}
+        p_train = 1. - self.fraction_validation - self.fraction_test
+        for shot in global_shot_to_events:
+            choice = self.rng.choice(
+                3, p=(p_train, self.fraction_validation, self.fraction_test)
+            )
+            self.global_stage_to_shot[stages[choice]].append(shot)
+        for stage in stages:
+            self.rng.shuffle(self.global_stage_to_shot[stage])
+            shots = self.global_stage_to_shot[stage]
+            if len(shots) <= 6:
+                self.zprint(f"      Stage {stage.upper()}  n_shots: {len(shots)}  shots: {shots}")
+            else:
+                self.zprint(f"      Stage {stage.upper()}  n_shots: {len(shots)}  shots: {shots[:6]}")
+        # create stage to class to shot mapping
+        self.zprint("    Global stage to class to shot mapping")
+        self.stage_to_class_to_shot_mapping: dict[str, dict[int, list]] = \
+            {st:{i:[] for i in range(self.num_classes)} for st in stages}
+        for st in stages:
+            if len(self.global_stage_to_shot[st])==0: continue
+            self.zprint(f"      Stage {st.upper()}")
+            for i in range(self.num_classes):
+                for shot in self.global_stage_to_shot[st]:
+                    if shot in global_class_to_shots[i]:
+                        self.stage_to_class_to_shot_mapping[st][i].append(shot)
+                shots = self.stage_to_class_to_shot_mapping[st][i]
+                if len(shots) <= 6:
+                    self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots}")
+                else:
+                    self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots[:6]}")
+        # scale stage and class shotlists by a dataset factor
+        if self.confinement_dataset_factor:
+            self.zprint("    Reduced dataset stage to class to shot mapping")
+            for st in self.stage_to_class_to_shot_mapping:
+                if len(self.global_stage_to_shot[st])==0: continue
+                self.zprint(f"      Stage {st.upper()}")
+                for i in range(self.num_classes):
+                    n_shots = int(self.confinement_dataset_factor *
+                                  len(self.stage_to_class_to_shot_mapping[st][i]))
+                    if n_shots==0: n_shots = 1
+                    self.stage_to_class_to_shot_mapping[st][i] = \
+                        self.stage_to_class_to_shot_mapping[st][i][:n_shots]
+                    shots = self.stage_to_class_to_shot_mapping[st][i]
+                    if len(shots) <= 6:
+                        self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots}")
+                    else:
+                        self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots[:6]}")
+        # shuffle shots in each class
+        # self.zprint("    Shuffling shots in each class")
+        # for i in range(self.num_classes):
+        #     self.rng.shuffle(global_class_to_shots[i])
+        #     if len(global_class_to_shots[i]) <= 7:
+        #         self.zprint(f"      Class {i} shots: {global_class_to_shots[i]}")
+        #     else:
+        #         self.zprint(f"      Class {i} shots: {global_class_to_shots[i][:7]}")
+        # split classes into train/val/test
+        # for i in range(self.num_classes):
+        #     n_test_shots = int(self.fraction_test * len(global_class_to_shots[i]))
+        #     n_validation_shots = int(self.fraction_validation * len(global_class_to_shots[i]))
+        #     test_shots, val_shots, train_shots = \
+        #         np.split(global_class_to_shots[i], [n_test_shots, n_test_shots+n_validation_shots])
+        #     self.global_stage_to_class_to_shot['test'][i] = test_shots
+        #     self.global_stage_to_class_to_shot['validation'][i] = val_shots
+        #     self.global_stage_to_class_to_shot['train'][i] = train_shots
+        # for stage in stages:
+        #     self.zprint(f"    Stage {stage.upper()}")
+        #     for i in range(self.num_classes):
+        #         self.zprint(f"      Class {i} n_shots: {len(self.global_stage_to_class_to_shot[stage][i])}")
+
+        # self.global_stage_to_shot = {st:[] for st in ['train','validation','test']}
+        # for i in range(self.num_classes):
+        #     self.global_stage_to_shot['train'].append(train_shots)
+        #     self.global_stage_to_shot['validation'].append(val_shots)
+        #     self.global_stage_to_shot['test'].append(test_shots)
+        
         # Forced shots
-        forced_test_shots_data = {}
-        forced_validation_shots_data = {}
-        if self.force_test_shots:
-            for shot_number in self.force_test_shots:
-                forced_test_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
-        if self.force_validation_shots:
-            for shot_number in self.force_validation_shots:
-                forced_validation_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
-        if self.max_shots_per_class is not None:
-            for i_class in range(len(global_class_to_shots)-1, -1, -1):
-                class_shots = global_class_to_shots[i_class]
-                if len(class_shots) > self.max_shots_per_class:
-                    # down-select shots for each class
-                    global_class_to_shots[i_class] = self.rng.choice(
-                        a=class_shots, 
-                        size=self.max_shots_per_class, 
-                        replace=False,
-                    ).tolist()
-            global_shot_to_events = {shot: global_shot_to_events[shot] for shots in global_class_to_shots for shot in shots}
-        # self.zprint("    Data summary after forced shots and max shots per class")
+        # forced_test_shots_data = {}
+        # forced_validation_shots_data = {}
+        # if self.force_test_shots:
+        #     for shot_number in self.force_test_shots:
+        #         forced_test_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
+        # if self.force_validation_shots:
+        #     for shot_number in self.force_validation_shots:
+        #         forced_validation_shots_data[shot_number] = global_shot_to_events.pop(shot_number)
+        # limit shots per class
+        # if self.max_shots_per_class:
+        #     self.zprint(f"    Limiting classes to {self.max_shots_per_class} shots (approx)")
+        #     for i in range(self.num_classes):
+        #         if len(global_class_to_shots[i]) > self.max_shots_per_class:
+        #             global_class_to_shots[i] = global_class_to_shots[i][:self.max_shots_per_class]
+            # for i_class in range(len(global_class_to_shots)-1, -1, -1):
+            #     class_shots = global_class_to_shots[i_class]
+            #     if len(class_shots) > self.max_shots_per_class:
+            #         # down-select shots for each class
+            #         global_class_to_shots[i_class] = self.rng.choice(
+            #             a=class_shots, 
+            #             size=self.max_shots_per_class, 
+            #             replace=False,
+            #         ).tolist()
+            # updated_shot_list = set([shot for shots in global_class_to_shots for shot in shots])
+            # global_shot_to_events = {shot: global_shot_to_events[shot] for shot in updated_shot_list}
+        # redo shot/event data
+        # with h5py.File(self.confinement_data_file) as root:
+        #     global_class_to_shots: list[list] = [[] for _ in range(self.num_classes)]
+        #     global_class_duration: list[int] = [0] * self.num_classes
+        #     global_class_event_count: list[int] = [0] * self.num_classes
+        #     global_class_signal_window_count: list[int] = [0] * self.num_classes
+        #     for shot in global_shot_to_events:
+        #         shot_key: str = f"{shot}"
+        #         events: list[dict] = []
+        #         for event_key in root[shot_key]:
+        #             event = root[shot_key][event_key]
+        #             class_label = event['labels'][0].item()
+        #             event_length: int = event['labels'].size
+        #             if event_length < self.signal_window_size:
+        #                 continue
+        #             if self.max_confinement_event_length:
+        #                 event_length = min(event_length, self.max_confinement_event_length)
+        #             valid_t0 = np.zeros(event_length, dtype=int)
+        #             valid_t0[self.signal_window_size-1::self.signal_window_size//8] = 1
+        #             valid_t0_indices = np.arange(valid_t0.size, dtype=int)
+        #             valid_t0_indices = valid_t0_indices[valid_t0 == 1]
+        #             n_signal_windows = len(valid_t0_indices)
+        #             events.append({
+        #                 'shot': int(shot_key),
+        #                 'event': int(event_key),
+        #                 'shot_event_key': f"{shot_key}/{event_key}",
+        #                 'class_label': class_label,
+        #                 'event_length': event_length,
+        #                 'sw_count': n_signal_windows,
+        #             })
+        #             global_class_to_shots[class_label].append(int(shot_key))
+        #             global_class_duration[class_label] += event_length
+        #             global_class_event_count[class_label] += 1
+        #             global_class_signal_window_count[class_label] += n_signal_windows
+        # global_class_to_shots = [list(set(item)) for item in global_class_to_shots]
+        # # data read
+        # self.zprint("    Restricted data summary")
         # self.zprint(f"      Shots: {len(global_shot_to_events)}")
         # for i in range(self.num_classes):
-        #     self.zprint(f"        Class {i}:  shots {len(global_class_to_shots[i])}")
+        #     self.zprint(f"        Class {i}: shots {len(global_class_to_shots[i])} events {global_class_event_count[i]} duration {global_class_duration[i]:,d} n_sig_win {global_class_signal_window_count[i]:,d}")
 
-        # split global data into train, val, test
-        shot_numbers = list(global_shot_to_events.keys())
-        self.global_confinement_shot_split = {st:[] for st in ['train','validation','test']}
-        good_split = False
-        while good_split == False:
-            self.rng.shuffle(shot_numbers)
-            good_split = True
-            self.global_confinement_shot_split['train'], _test_val_shots = train_test_split(
-                shot_numbers, 
-                test_size=self.fraction_test + self.fraction_validation, 
-                random_state=self.rng.integers(0, 2**32-1),
-            )
-            if self.fraction_test:
-                self.global_confinement_shot_split['test'], self.global_confinement_shot_split['validation'] = train_test_split(
-                    _test_val_shots,
-                    test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
-                    random_state=self.rng.integers(0, 2**32-1),
-                )
-            else:
-                self.global_confinement_shot_split['validation'] = _test_val_shots
-                self.global_confinement_shot_split['test'] = []
+        # # split global data into train, val, test
+        # shot_numbers = list(global_shot_to_events.keys())
+        # self.global_stage_to_shot = {st:[] for st in ['train','validation','test']}
+        # good_split = False
+        # while good_split == False:
+        #     self.rng.shuffle(shot_numbers)
+        #     good_split = True
+        #     self.global_stage_to_shot['train'], _test_val_shots = train_test_split(
+        #         shot_numbers, 
+        #         test_size=self.fraction_test + self.fraction_validation, 
+        #         random_state=self.rng.integers(0, 2**32-1),
+        #     )
+        #     if self.fraction_test:
+        #         self.global_stage_to_shot['test'], self.global_stage_to_shot['validation'] = train_test_split(
+        #             _test_val_shots,
+        #             test_size=self.fraction_validation/(self.fraction_test + self.fraction_validation),
+        #             random_state=self.rng.integers(0, 2**32-1),
+        #         )
+        #     else:
+        #         self.global_stage_to_shot['validation'] = _test_val_shots
+        #         self.global_stage_to_shot['test'] = []
 
-            if forced_test_shots_data or forced_validation_shots_data:
-                global_shot_to_events.update(forced_validation_shots_data)
-                global_shot_to_events.update(forced_test_shots_data)
-                self.global_confinement_shot_split['validation'].extend(list(forced_validation_shots_data.keys()))
-                self.global_confinement_shot_split['test'].extend(list(forced_test_shots_data.keys()))
+            # if forced_test_shots_data or forced_validation_shots_data:
+            #     global_shot_to_events.update(forced_validation_shots_data)
+            #     global_shot_to_events.update(forced_test_shots_data)
+            #     self.global_confinement_shot_split['validation'].extend(list(forced_validation_shots_data.keys()))
+            #     self.global_confinement_shot_split['test'].extend(list(forced_test_shots_data.keys()))
 
-            self.global_confinement_shot_split['predict'] = self.global_confinement_shot_split['test']
+            # self.global_stage_to_shot['predict'] = self.global_stage_to_shot['test']
 
             # map events to stages
             self.zprint("    Final data for computation")
-            for st in self.global_confinement_shot_split:
-                self.global_stage_to_events[st] = [event for shot in self.global_confinement_shot_split[st] for event in global_shot_to_events[shot]]
+            for st in self.global_stage_to_shot:
+                self.global_stage_to_events[st] = [event for shot in self.global_stage_to_shot[st] for event in global_shot_to_events[shot]]
                 # TODO limit number of events in stage-to-event mapping.
-                if len(self.global_confinement_shot_split[st]) == 0:
+                if len(self.global_stage_to_shot[st]) == 0:
                     self.zprint(f"      {st.capitalize()} data: 0 shots and 0 events")
                     continue
                 class_to_shots = [[] for _ in range(self.num_classes)]
                 class_to_events = [0] * self.num_classes
                 class_to_duration = [0] * self.num_classes
                 for event in self.global_stage_to_events[st]:
-                    class_to_shots[event['label']].append(event['shot'])
-                    class_to_events[event['label']] += 1
-                    class_to_duration[event['label']] += event['duration']
+                    class_to_shots[event['class_label']].append(event['shot'])
+                    class_to_events[event['class_label']] += 1
+                    class_to_duration[event['class_label']] += event['event_length']
                 class_to_shots = [list(set(l)) for l in class_to_shots]
                 if (0 in class_to_events) or good_split == False:
                     good_split = False
                     self.zprint("    Bad split, re-running")
                     continue
-                self.zprint(f"      {st.capitalize()} data: {len(self.global_confinement_shot_split[st])} shots and {len(self.global_stage_to_events[st])} events")
+                self.zprint(f"      {st.capitalize()} data: {len(self.global_stage_to_shot[st])} shots and {len(self.global_stage_to_events[st])} events")
                 for i in range(self.num_classes):
                     self.zprint(f"        Class {i}: {len(class_to_shots[i])} shots, {class_to_events[i]} events, {class_to_duration[i]:,d} timepoints")
                     assert len(class_to_shots[i]) > 0
@@ -1169,7 +1297,7 @@ class Data(_Base_Class, LightningDataModule):
         rankwise_events = rankwise_stage_event_split[self.trainer.global_rank]
         n_events = len(rankwise_events)
         # pre-allocate signal array
-        time_count = sum([event['duration'] for event in rankwise_events])
+        time_count = sum([event['event_length'] for event in rankwise_events])
         packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
         rankwise_events_2 = []
         start_index = 0
@@ -1180,12 +1308,12 @@ class Data(_Base_Class, LightningDataModule):
                     self.zprint(f"    Reading event {i:04d}/{n_events:04d}")
                 shot = event_data['shot']
                 event = event_data['event']
-                label = event_data['label']
-                duration = event_data['duration']
+                class_label = event_data['class_label']
+                duration = event_data['event_length']
                 sw_count = event_data['sw_count']
                 event_group = root[str(shot)][str(event)]
                 labels = np.array(event_group["labels"], dtype=int)
-                assert labels[0] == label and labels[-1] == label
+                assert labels[0] == class_label and labels[-1] == class_label
                 signals = np.array(event_group["signals"][:, :], dtype=np.float32)
                 assert signals.shape[0] == 64
                 assert labels.size == signals.shape[1]
@@ -1597,7 +1725,8 @@ def main(
         contrastive_learning: bool = False,
         min_pre_elm_time: float = None,
         fir_bp: Sequence[float] = (None, None),
-        max_shots_per_class: int = None,
+        # max_shots_per_class: int = None,
+        confinement_dataset_factor: float = None,
         max_confinement_event_length: int = None,
         seed: int = 42,
 ) -> dict:
@@ -1798,7 +1927,8 @@ def main(
                 contrastive_learning=contrastive_learning,
                 min_pre_elm_time=min_pre_elm_time,
                 fir_bp=fir_bp,
-                max_shots_per_class=max_shots_per_class,
+                # max_shots_per_class=max_shots_per_class,
+                confinement_dataset_factor=confinement_dataset_factor,
                 max_confinement_event_length=max_confinement_event_length,
                 seed=seed,
             )
@@ -1848,7 +1978,9 @@ if __name__=='__main__':
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=20,
-        max_shots_per_class=10,
+        # max_shots_per_class=15,
         fraction_validation=0.2,
+        max_confinement_event_length=int(5e4),
+        confinement_dataset_factor=0.3,
         # skip_train=True,
     )
