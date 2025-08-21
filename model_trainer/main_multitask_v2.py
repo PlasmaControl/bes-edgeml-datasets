@@ -479,7 +479,8 @@ class Model(_Base_Class, LightningModule):
         for task in model_outputs:
             task_outputs: torch.Tensor = model_outputs[task]
             metrics = self.task_metrics[task]
-            if task == 'elm_class' and dataloader_idx in [None, 0]:
+            # if task == 'elm_class' and dataloader_idx in [None, 0]:
+            if task == 'elm_class':
                 labels: torch.Tensor = batch[task][1][0.5] if isinstance(batch, dict) else batch[1][0.5]
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
@@ -500,7 +501,8 @@ class Model(_Base_Class, LightningModule):
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
-            elif task == 'conf_onehot' and dataloader_idx in [None, 1]:
+            # elif task == 'conf_onehot' and dataloader_idx in [None, 1]:
+            elif task == 'conf_onehot':
                 labels = batch[task][1] if isinstance(batch, dict) else batch[1]
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
@@ -755,7 +757,7 @@ class Data(_Base_Class, LightningDataModule):
                     self.zprint(f"    {stage.upper()} shots: {shotlist}")
                 else:
                     self.zprint(f"    {stage.upper()} shots: {shotlist[0:7]}")
-            for stage in ['train','validation','test']:
+            for stage in ['train','validation']:
                 assert stage in self.global_elm_data_shot_split and len(self.global_elm_data_shot_split[stage])>0
             # prepare ELMs for stages
             if self.max_elms:
@@ -2004,7 +2006,7 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
-        # 'elm_class': [None,16,1],
+        'elm_class': [None,16,1],
         'conf_onehot': [None,16,4],
     }
     main(
@@ -2014,7 +2016,6 @@ if __name__=='__main__':
         mlp_tasks=mlp_tasks,
         max_elms=20,
         fraction_validation=0.2,
-        # max_shots_per_class=15,
         max_confinement_event_length=int(20e3),
         confinement_dataset_factor=0.1,
         # skip_train=True,
