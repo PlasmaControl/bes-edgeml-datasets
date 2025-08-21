@@ -77,8 +77,6 @@ class _Base_Class:
 
 @dataclasses.dataclass(eq=False)
 class Model(_Base_Class, LightningModule):
-    # elm_classifier: bool = True
-    # conf_classifier: bool = False
     lr: float = 1e-3
     deepest_layer_lr_factor: float = 0.1
     lr_scheduler_patience: int = 100
@@ -129,8 +127,11 @@ class Model(_Base_Class, LightningModule):
         
         # set input layer size
         for task in self.mlp_tasks:
-            if not self.mlp_tasks[task][0]:
-                self.mlp_tasks[task][0] = self.feature_space_size
+            self.mlp_tasks[task][0] = self.feature_space_size
+            if 'class' in task:
+                assert self.mlp_tasks[task][-1] == 1
+            elif 'onehot' in task:
+                assert self.mlp_tasks[task][-1] > 1
 
         # create MLP configs
         self.task_configs = {}
@@ -146,6 +147,16 @@ class Model(_Base_Class, LightningModule):
                         'mean_stat': torch.mean,
                         'std_stat': torch.std,
                     }
+                self.task_configs[task]['monitor_metric'] = 'f1_score/val'
+            elif 'onehot' in task:
+                self.task_configs[task]['metrics'] = {
+                    'ce_loss': torch.nn.functional.cross_entropy,
+                    'f1_score': sklearn.metrics.f1_score,
+                    'precision_score': sklearn.metrics.precision_score,
+                    'recall_score': sklearn.metrics.recall_score,
+                    'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
+                    'std_stat': torch.std,
+                }
                 self.task_configs[task]['monitor_metric'] = 'f1_score/val'
 
         # make task sub-models
@@ -164,22 +175,6 @@ class Model(_Base_Class, LightningModule):
         self.save_hyperparameters({'monitor_metric': self.monitor_metric})
 
         self.zprint(f"Total model parameters: {self.param_count(self):,d}")
-
-        # # sub-model: Confinement mode multi-class classifier
-        # if self.conf_classifier:
-        #     task_name = 'conf_classifier'
-        #     self.zprint(f"Task {task_name}")
-        #     self.task_models[task_name] = self.make_mlp_classifier(n_out=4)
-        #     self.task_metrics[task_name] = {
-        #         'ce_loss': torch.nn.functional.cross_entropy,
-        #         'f1_score': sklearn.metrics.f1_score,
-        #         'precision_score': sklearn.metrics.precision_score,
-        #         'recall_score': sklearn.metrics.recall_score,
-        #         'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
-        #         'std_stat': torch.std,
-        #     }
-        #     if self.monitor_metric is None:
-        #         self.monitor_metric = f'{task_name}/f1_score/val'
 
         self.initialize_parameters()
         if self.backbone_model_path and self.backbone_first_n_layers:
@@ -505,7 +500,7 @@ class Model(_Base_Class, LightningModule):
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
-            elif task == 'conf_classifier' and dataloader_idx in [None, 1]:
+            elif task == 'conf_onehot' and dataloader_idx in [None, 1]:
                 labels = batch[task][1] if isinstance(batch, dict) else batch[1]
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
@@ -632,9 +627,7 @@ class Model(_Base_Class, LightningModule):
 @dataclasses.dataclass(eq=False)
 class Data(_Base_Class, LightningDataModule):
     elm_data_file: str|Path = None
-    # elm_classifier: bool = True
     confinement_data_file: str|Path = None
-    # conf_classifier: bool = False
     tasks: Sequence[str] = ('elm_class',)
     log_dir: str|Path = None
     max_elms: int = None
@@ -698,7 +691,7 @@ class Data(_Base_Class, LightningDataModule):
             self.rankwise_signal_window_metadata: dict[str,list] = {}
             self.elm_datasets: dict[str,torch.utils.data.Dataset] = {}
 
-        if 'conf_classifier' in self.tasks:
+        if 'conf_onehot' in self.tasks:
             self.confinement_data_file = Path(self.confinement_data_file).absolute()
             assert self.confinement_data_file.exists(), f"Confinement data file {self.confinement_data_file} does not exist"
             self.global_conf_data_shot_split: dict[str,Sequence] = {}
@@ -728,11 +721,9 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint("\u2B1C Prepare data (rank 0 only)")
         if 'elm_class' in self.tasks:
             self.prepare_elm_data()
-        if 'conf_classifier' in self.tasks:
+        if 'conf_onehot' in self.tasks:
             self.prepare_confinement_data()
-        # valid state dict and save
-        for item in self.state_items:
-            assert getattr(self, item), f"State item {item} is not set"
+        # save state dict and
         self.save_state_dict()
 
     def prepare_elm_data(self):
@@ -1227,25 +1218,25 @@ class Data(_Base_Class, LightningDataModule):
     def setup(self, stage: str):
         # called on all ranks after "prepare_data()"
         self.zprint("\u2B1C " + f"Setup stage {stage} (all ranks)")
-
         assert stage in ['fit', 'test', 'predict'], f"Invalid stage: {stage}"
         assert self.is_global_zero == self.trainer.is_global_zero
-
         sub_stages = ['train', 'validation'] if stage == 'fit' else [stage]
-
         if 'elm_class' in self.tasks:
             t_tmp = time.time()
             for sub_stage in sub_stages:
                 self.setup_elm_data_for_rank(sub_stage)
             self.zprint(f"  ELM data setup time: {time.time()-t_tmp:0.1f} s")
         self.barrier()
-
-        if 'conf_classifier' in self.tasks:
+        if 'conf_onehot' in self.tasks:
             t_tmp = time.time()
             for sub_stage in sub_stages:
                 self.setup_confinement_data_for_rank(sub_stage)
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
         self.barrier()
+        # valid state dict and save
+        for item in self.state_items:
+            assert getattr(self, item), f"State item {item} is not set"
+        self.save_state_dict()
 
     def setup_elm_data_for_rank(self, sub_stage: str):
         self.rprint("  \u2B1C " + f"Setup ELM data for stage {sub_stage.upper()}")
@@ -1420,6 +1411,8 @@ class Data(_Base_Class, LightningDataModule):
             packaged_valid_t0_indices = packaged_valid_t0_indices[:length_limit]
 
         # stats
+        confinement_raw_signal_mean = None
+        confinement_raw_signal_stdev = None
         if self.is_global_zero:
             signal_min = np.inf
             signal_max = -np.inf
@@ -1445,8 +1438,7 @@ class Data(_Base_Class, LightningDataModule):
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
             exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
             self.zprint(f"    Signal stats (after FIR, if used): mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} min/max {signal_min:.3f}/{signal_max:.3f}")
-            if sub_stage == 'train' and not confinement_raw_signal_mean:
-                self.zprint(f"    Using {sub_stage.upper()} for standarizing mean and stdev")
+            if sub_stage == 'train':
                 confinement_raw_signal_mean = mean.astype(np.float32)
                 confinement_raw_signal_stdev = stdev.astype(np.float32)
                 self.save_hyperparameters({
@@ -1582,8 +1574,8 @@ class Data(_Base_Class, LightningDataModule):
         loaders = {}
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_elm_dataloaders('train')
-        if 'conf_classifier' in self.tasks:
-            loaders['conf_classifier'] = self.get_confinement_dataloaders('train')
+        if 'conf_onehot' in self.tasks:
+            loaders['conf_onehot'] = self.get_confinement_dataloaders('train')
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='max_size_cycle',
@@ -1595,8 +1587,8 @@ class Data(_Base_Class, LightningDataModule):
         loaders = {}
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_elm_dataloaders('validation')
-        if 'conf_classifier' in self.tasks:
-            loaders['conf_classifier'] = self.get_confinement_dataloaders('validation')
+        if 'conf_onehot' in self.tasks:
+            loaders['conf_onehot'] = self.get_confinement_dataloaders('validation')
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='sequential',
@@ -1608,8 +1600,8 @@ class Data(_Base_Class, LightningDataModule):
         loaders = {}
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_elm_dataloaders('test')
-        if 'conf_classifier' in self.tasks:
-            loaders['conf_classifier'] = self.get_confinement_dataloaders('test')
+        if 'conf_onehot' in self.tasks:
+            loaders['conf_onehot'] = self.get_confinement_dataloaders('test')
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='sequential',
@@ -1729,8 +1721,6 @@ def main(
         wandb_id: str = None,
         signal_window_size: int = 256,
         # model
-        # elm_classifier: bool = True,
-        # conf_classifier: bool = False,
         no_bias: bool = False,
         batch_norm: bool = True,
         dropout: float = 0.0,
@@ -1802,11 +1792,7 @@ def main(
     ### model
     zprint("\u2B1C Creating model")
     lit_model = Model(
-        # elm_classifier=elm_classifier,
-        # conf_classifier=conf_classifier,
         signal_window_size=signal_window_size,
-        # elm_loss_weight=elm_mean_loss_factor,
-        # conf_loss_weight=conf_mean_loss_factor,
         no_bias=no_bias,
         batch_norm=batch_norm,
         feature_model_layers=feature_model_layers,
@@ -1966,8 +1952,6 @@ def main(
                 log_dir=trainer.log_dir,
                 elm_data_file=elm_data_file,
                 confinement_data_file=confinement_data_file,
-                # elm_classifier=lit_model.elm_classifier,
-                # conf_classifier=lit_model.conf_classifier,
                 tasks=lit_model.task_names,
                 max_elms=max_elms,
                 batch_size=batch_size,
@@ -1979,7 +1963,6 @@ def main(
                 contrastive_learning=contrastive_learning,
                 min_pre_elm_time=min_pre_elm_time,
                 fir_bp=fir_bp,
-                # max_shots_per_class=max_shots_per_class,
                 confinement_dataset_factor=confinement_dataset_factor,
                 max_confinement_event_length=max_confinement_event_length,
                 seed=seed,
@@ -2022,7 +2005,7 @@ if __name__=='__main__':
     )
     mlp_tasks={
         # 'elm_class': [None,16,1],
-        'conf_classifier': [None,16,4],
+        'conf_onehot': [None,16,4],
     }
     main(
         elm_data_file=ml_data.small_data_100,
