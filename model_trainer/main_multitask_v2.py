@@ -444,29 +444,29 @@ class Model(_Base_Class, LightningModule):
         return parameter_list
 
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
-        if batch_idx % 20==0:
-            t = time.time()
+        # if batch_idx % 20==0:
+        #     t = time.time()
         output = self.update_step(
             batch, 
             batch_idx, 
             stage='train',
             dataloader_idx=dataloader_idx,
         )
-        if batch_idx % 20==0:
-            self.zprint(f"    Time for train batch {batch_idx} (dl {dataloader_idx}): {time.time() - t:.2f} s")
+        # if batch_idx % 20==0:
+        #     self.zprint(f"    Time for train batch {batch_idx} (dl {dataloader_idx}): {time.time() - t:.2f} s")
         return output
 
     def validation_step(self, batch, batch_idx, dataloader_idx=None) -> None:
-        if batch_idx % 20==0:
-            t = time.time()
+        # if batch_idx % 20==0:
+        #     t = time.time()
         self.update_step(
             batch, 
             batch_idx, 
             stage='val',
             dataloader_idx=dataloader_idx,
         )
-        if batch_idx % 20==0:
-            self.zprint(f"    Time for val batch {batch_idx} (dl {dataloader_idx}): {time.time() - t:.2f} s")
+        # if batch_idx % 20==0:
+        #     self.zprint(f"    Time for val batch {batch_idx} (dl {dataloader_idx}): {time.time() - t:.2f} s")
 
     def test_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         self.update_step(
@@ -531,8 +531,8 @@ class Model(_Base_Class, LightningModule):
                             zero_division=0,
                             average='macro',
                         )
-                        if self.current_epoch<10:
-                            metric_value /= 10
+                        # if self.current_epoch<10:
+                        #     metric_value /= 10
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
@@ -1247,8 +1247,8 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
         self.barrier()
         # valid state dict and save
-        for item in self.state_items:
-            assert getattr(self, item), f"State item {item} is not set"
+        # for item in self.state_items:
+        #     assert getattr(self, item), f"State item {item} is not set"
         self.save_state_dict()
 
     def setup_elm_data_for_rank(self, sub_stage: str):
@@ -2026,14 +2026,16 @@ if __name__=='__main__':
         experiment_name='experiment_v8',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=80,
-        max_epochs=20,
+        max_elms=40,
+        # max_epochs=20,
+        lr=1e-2,
         lr_warmup_epochs=4,
         fraction_validation=0.2,
         num_workers=8,
         max_confinement_event_length=int(15e3),
-        confinement_dataset_factor=0.2,
+        confinement_dataset_factor=0.1,
         monitor_metric='sum_loss/train',
-        fir_bp=(8,250),
-        use_wandb=True,
+        fir_bp=(None, 200),
+        # use_wandb=True,
+        # skip_train=True,
     )

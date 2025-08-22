@@ -12,7 +12,7 @@
 #SBATCH --time=30
 #SBATCH --qos=debug
 
-###SBATCH --signal=SIGTERM@1200
+#SBATCH --signal=SIGTERM@300
 
 #SBATCH --array=1-2
 
@@ -71,13 +71,14 @@ if __name__=='__main__':
         experiment_name='experiment_v8',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=80,
+        max_elms=60,
         max_epochs=20,
+        lr=1e-2,
         lr_warmup_epochs=4,
         fraction_validation=0.2,
         num_workers=8,
-        max_confinement_event_length=int(15e3),
-        confinement_dataset_factor=0.2,
+        max_confinement_event_length=int(10e3),
+        confinement_dataset_factor=0.1,
         monitor_metric='sum_loss/train',
         fir_bp=(None, 200),
         use_wandb=True,
