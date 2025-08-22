@@ -476,12 +476,16 @@ class Model(_Base_Class, LightningModule):
     ) -> torch.Tensor:
         sum_loss = torch.Tensor([0.0])
         model_outputs = self(batch)
+        if stage=='val':
+            pass
         for task in model_outputs:
             task_outputs: torch.Tensor = model_outputs[task]
             metrics = self.task_metrics[task]
-            # if task == 'elm_class' and dataloader_idx in [None, 0]:
-            if task == 'elm_class':
+            if task == 'elm_class' and dataloader_idx in [None, 0]:
+            # if task == 'elm_class':
                 labels: torch.Tensor = batch[task][1][0.5] if isinstance(batch, dict) else batch[1][0.5]
+                if stage=='val':
+                    pass
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
@@ -501,9 +505,11 @@ class Model(_Base_Class, LightningModule):
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
-            # elif task == 'conf_onehot' and dataloader_idx in [None, 1]:
-            elif task == 'conf_onehot':
+            elif task == 'conf_onehot' and dataloader_idx in [None, 1]:
+            # elif task == 'conf_onehot':
                 labels = batch[task][1] if isinstance(batch, dict) else batch[1]
+                if stage=='val':
+                    pass
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
@@ -529,10 +535,12 @@ class Model(_Base_Class, LightningModule):
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
-            else:
-                raise ValueError
+            # else:
+            #     raise ValueError
 
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
+        if stage=='val':
+            pass
         return sum_loss
 
     def forward(
@@ -603,7 +611,13 @@ class Model(_Base_Class, LightningModule):
             line += f"  lr {self.current_max_lr:.1e}"
             line += f" bs {self.current_batch_size}"
             line += f" tr/val loss {logged_metrics['sum_loss/train']:.3f}/"
-            line += f"{logged_metrics['sum_loss/val']:.3f}"
+            sum_loss_val = (
+                logged_metrics['sum_loss/val']
+                if 'sum_loss/val' in logged_metrics
+                else 
+                logged_metrics['sum_loss/val/dataloader_idx_0']+logged_metrics['sum_loss/val/dataloader_idx_1']
+            )
+            line += f"{sum_loss_val:.3f}"
             line += f" ep/gl steps {epoch_steps:,d}/{self.global_step:,d}"
             line += f" ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}" 
             print(line)
@@ -2018,5 +2032,6 @@ if __name__=='__main__':
         fraction_validation=0.2,
         max_confinement_event_length=int(20e3),
         confinement_dataset_factor=0.1,
+        monitor_metric='sum_loss/train',
         # skip_train=True,
     )
