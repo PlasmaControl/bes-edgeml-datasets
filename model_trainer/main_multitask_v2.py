@@ -476,16 +476,11 @@ class Model(_Base_Class, LightningModule):
     ) -> torch.Tensor:
         sum_loss = torch.Tensor([0.0])
         model_outputs = self(batch)
-        if stage=='val':
-            pass
         for task in model_outputs:
             task_outputs: torch.Tensor = model_outputs[task]
             metrics = self.task_metrics[task]
             if task == 'elm_class' and dataloader_idx in [None, 0]:
-            # if task == 'elm_class':
                 labels: torch.Tensor = batch[task][1][0.5] if isinstance(batch, dict) else batch[1][0.5]
-                if stage=='val':
-                    pass
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
@@ -506,10 +501,7 @@ class Model(_Base_Class, LightningModule):
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
             elif task == 'conf_onehot' and dataloader_idx in [None, 1]:
-            # elif task == 'conf_onehot':
                 labels = batch[task][1] if isinstance(batch, dict) else batch[1]
-                if stage=='val':
-                    pass
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
@@ -535,12 +527,8 @@ class Model(_Base_Class, LightningModule):
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
-            # else:
-            #     raise ValueError
 
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
-        if stage=='val':
-            pass
         return sum_loss
 
     def forward(
