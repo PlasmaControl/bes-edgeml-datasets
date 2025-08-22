@@ -444,20 +444,29 @@ class Model(_Base_Class, LightningModule):
         return parameter_list
 
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
-        return self.update_step(
+        if batch_idx % 20==0:
+            t = time.time()
+        output = self.update_step(
             batch, 
             batch_idx, 
             stage='train',
             dataloader_idx=dataloader_idx,
         )
+        if batch_idx % 20==0:
+            self.zprint(f"    Time for train batch {batch_idx} (dl {dataloader_idx}): {time.time() - t:.2f} s")
+        return output
 
     def validation_step(self, batch, batch_idx, dataloader_idx=None) -> None:
+        if batch_idx % 20==0:
+            t = time.time()
         self.update_step(
             batch, 
             batch_idx, 
             stage='val',
             dataloader_idx=dataloader_idx,
         )
+        if batch_idx % 20==0:
+            self.zprint(f"    Time for val batch {batch_idx} (dl {dataloader_idx}): {time.time() - t:.2f} s")
 
     def test_step(self, batch, batch_idx, dataloader_idx=0) -> None:
         self.update_step(
@@ -1083,13 +1092,13 @@ class Data(_Base_Class, LightningDataModule):
                 class_to_duration[event['class_label']] += event['event_length']
                 class_to_sigwins[event['class_label']] += event['sw_count']
             class_to_shots = [list(set(l)) for l in class_to_shots]
-            self.zprint(f"      {st.capitalize()}")
+            self.zprint(f"      {st.capitalize()}  Total sig wins: {sum(class_to_sigwins):,d}")
             for i in range(self.num_classes):
                 line =  f"        Class {i}:  shots {len(class_to_shots[i])}  "
                 line += f"events {class_to_events[i]}  "
                 line += f"duration {class_to_duration[i]:,d}  "
-                line += f"n_sig_win {class_to_sigwins[i]:,d}  "
-                line += f"n_batches {class_to_sigwins[i]//self.batch_size:,d}"
+                line += f"n_sig_win {class_to_sigwins[i]:,d}"
+                # line += f"n_batches {class_to_sigwins[i]//self.batch_size:,d}"
                 self.zprint(line)
 
         # shuffle shots in each class
@@ -2004,22 +2013,27 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
-        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
-        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+        # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+        # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
-        'elm_class': [None,16,1],
-        'conf_onehot': [None,16,4],
+        'elm_class': [None,32,1],
+        'conf_onehot': [None,32,4],
     }
     main(
-        elm_data_file=ml_data.small_data_100,
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
+        experiment_name='experiment_v8',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=20,
+        max_elms=80,
+        max_epochs=20,
+        lr_warmup_epochs=4,
         fraction_validation=0.2,
-        max_confinement_event_length=int(20e3),
-        confinement_dataset_factor=0.1,
+        num_workers=8,
+        max_confinement_event_length=int(15e3),
+        confinement_dataset_factor=0.2,
         monitor_metric='sum_loss/train',
-        # skip_train=True,
+        fir_bp=(8,250),
+        use_wandb=True,
     )
