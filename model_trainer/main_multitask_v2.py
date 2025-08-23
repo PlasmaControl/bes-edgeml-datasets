@@ -890,16 +890,16 @@ class Data(_Base_Class, LightningDataModule):
                     # contrastive learning
                     if self.contrastive_learning:
                         self.zprint(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.time_to_elm_quantile_min:.2f} and {self.time_to_elm_quantile_max:.2f}-1.0")
-                        for i in np.arange(len(self.elm_signal_window_metadata)-1, -1, -1, dtype=int):
-                            if (self.elm_signal_window_metadata[i]['time_to_elm'] > time_to_elm_min) and \
-                                (self.elm_signal_window_metadata[i]['time_to_elm'] < time_to_elm_max):
-                                self.elm_signal_window_metadata.pop(i)
+                        for i in np.arange(len(elm_signal_window_metadata)-1, -1, -1, dtype=int):
+                            if (elm_signal_window_metadata[i]['time_to_elm'] > time_to_elm_min) and \
+                                (elm_signal_window_metadata[i]['time_to_elm'] < time_to_elm_max):
+                                elm_signal_window_metadata.pop(i)
                     else:
                         self.zprint(f"  Restricting time-to-ELM labels to quantile range: {self.time_to_elm_quantile_min:.2f}-{self.time_to_elm_quantile_max:.2f}")
-                        for i in np.arange(len(self.elm_signal_window_metadata)-1, -1, -1, dtype=int):
-                            if (self.elm_signal_window_metadata[i]['time_to_elm'] < time_to_elm_min) or \
-                                (self.elm_signal_window_metadata[i]['time_to_elm'] > time_to_elm_max):
-                                self.elm_signal_window_metadata.pop(i)
+                        for i in np.arange(len(elm_signal_window_metadata)-1, -1, -1, dtype=int):
+                            if (elm_signal_window_metadata[i]['time_to_elm'] < time_to_elm_min) or \
+                                (elm_signal_window_metadata[i]['time_to_elm'] > time_to_elm_max):
+                                elm_signal_window_metadata.pop(i)
 
                 # balance signal windows across world_size
                 remainder = len(elm_signal_window_metadata) % self.trainer.world_size
@@ -998,7 +998,7 @@ class Data(_Base_Class, LightningDataModule):
                 # loop over events in shot
                 events: list[dict] = []
                 for event_key in root[shot_key]:
-                    event = root[shot_key][event_key]
+                    event: dict[str,np.ndarray] = root[shot_key][event_key]
                     if 'labels' not in event:
                         continue
                     assert event['labels'].size == event['signals'].shape[1]
@@ -1007,11 +1007,9 @@ class Data(_Base_Class, LightningDataModule):
                     assert event['labels'][0] < self.num_classes
                     class_label = event['labels'][0].item()
                     event_length: int = event['labels'].size
-                    if event_length < self.signal_window_size:
+                    if event['labels'].size < self.signal_window_size:
                         continue
-                    if self.max_confinement_event_length:
-                        event_length = min(event_length, self.max_confinement_event_length)
-                    valid_t0 = np.zeros(event_length, dtype=int)
+                    valid_t0 = np.zeros(event['labels'].size, dtype=int)
                     valid_t0[self.signal_window_size-1::self.signal_window_size//8] = 1
                     valid_t0_indices = np.arange(valid_t0.size, dtype=int)
                     valid_t0_indices = valid_t0_indices[valid_t0 == 1]
@@ -1120,13 +1118,13 @@ class Data(_Base_Class, LightningDataModule):
                 continue
             class_to_shots = [[] for _ in range(self.num_classes)]
             class_to_events = [0] * self.num_classes
-            class_to_duration = [0] * self.num_classes
-            class_to_sigwins = [0] * self.num_classes
+            class_to_duration: list[int] = [0] * self.num_classes
+            class_to_sigwins: list[int] = [0] * self.num_classes
             for event in self.stage_to_events_mapping[st]:
                 class_to_shots[event['class_label']].append(event['shot'])
                 class_to_events[event['class_label']] += 1
-                class_to_duration[event['class_label']] += event['event_length']
-                class_to_sigwins[event['class_label']] += event['sw_count']
+                class_to_duration[event['class_label']] += int(event['event_length'])
+                class_to_sigwins[event['class_label']] += int(event['sw_count'])
             class_to_shots = [list(set(l)) for l in class_to_shots]
             self.zprint(f"      {st.capitalize()}  Total sig wins: {sum(class_to_sigwins):,d}")
             for i in range(self.num_classes):
@@ -1926,21 +1924,21 @@ if __name__=='__main__':
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        # 'conf_onehot': [None,32,4],
+        'conf_onehot': [None,16,4],
     }
     main(
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        elm_data_file=ml_data.small_data_100,
-        # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        experiment_name='experiment_v8',
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # elm_data_file=ml_data.small_data_100,
+        confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
+        # experiment_name='experiment_v8',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=40,
         lr=1e-2,
         lr_warmup_epochs=4,
-        fraction_validation=0.2,
+        fraction_validation=0.15,
         num_workers=8,
-        max_confinement_event_length=int(15e3),
+        max_confinement_event_length=int(10e3),
         confinement_dataset_factor=0.1,
         monitor_metric='sum_loss/train',
         # fir_bp=(None, 200),
