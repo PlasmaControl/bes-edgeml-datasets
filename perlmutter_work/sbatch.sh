@@ -89,11 +89,6 @@ END
 echo Script:
 echo "${SCRIPT}"
 
-
-# SCRIPT=${PWD}/scenarios_sw128.py
-# echo Script: ${SCRIPT}
-# cat ${SCRIPT}
-
 JOB_DIR=${HOME}/scratch-ml
 echo Job directory: ${JOB_DIR}
 
@@ -102,7 +97,6 @@ echo Current directory: ${PWD}
 
 START_TIME=$(date +%s)
 srun --unbuffered python -c "${SCRIPT}"
-# srun --unbuffered python ${SCRIPT}
 EXIT_CODE=$?
 END_TIME=$(date +%s)
 echo Slurm elapsed time $(( (END_TIME - START_TIME)/60 )) min
