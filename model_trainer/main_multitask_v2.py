@@ -1011,7 +1011,7 @@ class Data(_Base_Class, LightningDataModule):
             line += f"events {global_class_event_count[i]}  "
             line += f"duration {global_class_duration[i]:,d}  "
             line += f"n_sig_win {global_class_signal_window_count[i]:,d}  "
-            line += f"n_batches {global_class_signal_window_count[i]//self.batch_size:,d}"
+            # line += f"n_batches {global_class_signal_window_count[i]//self.batch_size:,d}"
             self.zprint(line)
 
         # randomly assign shots to train/val/test
@@ -1550,7 +1550,7 @@ class Data(_Base_Class, LightningDataModule):
         return torch.utils.data.DataLoader(
             dataset=self.confinement_datasets[stage],
             sampler=sampler,
-            batch_size=self.batch_size//self.trainer.world_size,  # batch size per rank
+            batch_size=batch_size//self.trainer.world_size,  # batch size per rank
             num_workers=self.num_workers,
             drop_last=True if stage=='train' else False,
             prefetch_factor=2 if self.num_workers else None,
