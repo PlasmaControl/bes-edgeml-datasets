@@ -672,7 +672,7 @@ class Data(_Base_Class, LightningDataModule):
             self.state_items.extend([
                 'global_conf_data_shot_split',
             ])
-            self.stage_to_events_mapping: dict[str,list] = {}
+            self.stage_to_rank_to_event_mapping: dict[str,list[list]] = {}
             self.confinement_datasets: dict[str,torch.utils.data.Dataset] = {}
 
         for item in self.state_items:
@@ -1053,7 +1053,7 @@ class Data(_Base_Class, LightningDataModule):
         if self. global_conf_data_shot_split:
             self.zprint("    Using pre-loaded train/val/test shot split")
         else:
-            self.zprint("    Global stage to shot happing")
+            self.zprint("    Global stage to shot mapping")
             self.global_conf_data_shot_split = {st:[] for st in stages}
             p_train = 1. - self.fraction_validation - self.fraction_test
             for shot in global_shot_to_events:
@@ -1067,9 +1067,9 @@ class Data(_Base_Class, LightningDataModule):
         for stage in stages:
             shots = self.global_conf_data_shot_split[stage]
             if len(shots) <= 6:
-                self.zprint(f"      Stage {stage.upper()}  n_shots: {len(shots)}  shots: {shots}")
+                self.zprint(f"      {stage.capitalize()}  n_shots: {len(shots)}  shots: {shots}")
             else:
-                self.zprint(f"      Stage {stage.upper()}  n_shots: {len(shots)}  shots: {shots[:6]}")
+                self.zprint(f"      {stage.capitalize()}  n_shots: {len(shots)}  shots: {shots[:6]}")
 
         # create stage to class to shot mapping
         self.zprint("    Global stage to class to shot mapping")
@@ -1077,7 +1077,7 @@ class Data(_Base_Class, LightningDataModule):
             {st:{i:[] for i in range(self.num_classes)} for st in stages}
         for st in stages:
             if len(self.global_conf_data_shot_split[st])==0: continue
-            self.zprint(f"      Stage {st.upper()}")
+            self.zprint(f"      {st.capitalize()}")
             for i in range(self.num_classes):
                 for shot in self.global_conf_data_shot_split[st]:
                     if shot in global_class_to_shots[i]:
@@ -1089,38 +1089,39 @@ class Data(_Base_Class, LightningDataModule):
                     self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots[:6]}")
 
         # scale stage and class shotlists by a dataset factor
-        # if self.confinement_dataset_factor:
-        #     self.zprint("    Reduced dataset stage to class to shot mapping")
-        #     for st in stage_to_class_to_shot_mapping:
-        #         if len(self.global_conf_data_shot_split[st])==0: continue
-        #         self.zprint(f"      Stage {st.upper()}")
-        #         for i in range(self.num_classes):
-        #             n_shots = int(self.confinement_dataset_factor *
-        #                           len(stage_to_class_to_shot_mapping[st][i]))
-        #             if n_shots==0: n_shots = 1
-        #             stage_to_class_to_shot_mapping[st][i] = \
-        #                 stage_to_class_to_shot_mapping[st][i][:n_shots]
-        #             shots = stage_to_class_to_shot_mapping[st][i]
-        #             if len(shots) <= 6:
-        #                 self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots}")
-        #             else:
-        #                 self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots[:6]}")
+        if self.confinement_dataset_factor:
+            self.zprint("    Reduced dataset stage to class to shot mapping")
+            for st in stage_to_class_to_shot_mapping:
+                if len(self.global_conf_data_shot_split[st])==0: continue
+                self.zprint(f"      {st.capitalize()}")
+                for i in range(self.num_classes):
+                    n_shots = int(self.confinement_dataset_factor *
+                                  len(stage_to_class_to_shot_mapping[st][i]))
+                    if n_shots==0: n_shots = 1
+                    stage_to_class_to_shot_mapping[st][i] = \
+                        stage_to_class_to_shot_mapping[st][i][:n_shots]
+                    shots = stage_to_class_to_shot_mapping[st][i]
+                    if len(shots) <= 6:
+                        self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots}")
+                    else:
+                        self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots[:6]}")
 
         # stage to events mapping
-        self.zprint("    Global stage to class to event mapping")
+        self.zprint("    Reduced dataset stage to class to event mapping")
+        stage_to_event_mapping: dict[str,list] = {}
         for st in stage_to_class_to_shot_mapping:
-            self.stage_to_events_mapping[st] = []
+            stage_to_event_mapping[st] = []
             for i in stage_to_class_to_shot_mapping[st]:
                 shots = stage_to_class_to_shot_mapping[st][i]
                 events = [event for shot in shots for event in global_shot_to_events[shot]]
-                self.stage_to_events_mapping[st].extend(events)
-            if len(self.stage_to_events_mapping[st]) == 0:
+                stage_to_event_mapping[st].extend(events)
+            if len(stage_to_event_mapping[st]) == 0:
                 continue
             class_to_shots = [[] for _ in range(self.num_classes)]
             class_to_events = [0] * self.num_classes
             class_to_duration: list[int] = [0] * self.num_classes
             class_to_sigwins: list[int] = [0] * self.num_classes
-            for event in self.stage_to_events_mapping[st]:
+            for event in stage_to_event_mapping[st]:
                 class_to_shots[event['class_label']].append(event['shot'])
                 class_to_events[event['class_label']] += 1
                 class_to_duration[event['class_label']] += int(event['event_length'])
@@ -1135,7 +1136,32 @@ class Data(_Base_Class, LightningDataModule):
                 # line += f"n_batches {class_to_sigwins[i]//self.batch_size:,d}"
                 self.zprint(line)
 
-        # Forced shots
+        # sort events by largest to smallest sig win count
+        self.zprint(f"    Rankwise signal window counts (approx)")
+        for sub_stage in stages:
+            # short events longest to shortest
+            stage_to_event_mapping[sub_stage] = sorted(
+                stage_to_event_mapping[sub_stage],
+                key=lambda e: e['sw_count'],
+                reverse=True,
+            )
+            self.stage_to_rank_to_event_mapping[sub_stage] = [[] for _ in range(self.trainer.world_size)]
+            # assign events to ranks based upon the shortest cumulative time in each rank
+            rankwise_total_sw_counts = np.zeros(self.trainer.world_size, dtype=int)
+            for event in stage_to_event_mapping[sub_stage]:
+                argmin = np.argmin(rankwise_total_sw_counts)
+                self.stage_to_rank_to_event_mapping[sub_stage][argmin].append(event)
+                rankwise_total_sw_counts[argmin] += event['sw_count']
+            self.zprint(f"      {sub_stage.capitalize()}: {rankwise_total_sw_counts}")
+            # sort events shortest to longest for each rank
+            for i_rank in range(self.trainer.world_size):
+                self.stage_to_rank_to_event_mapping[sub_stage][i_rank] = sorted(
+                    self.stage_to_rank_to_event_mapping[sub_stage][i_rank],
+                    key=lambda e: e['sw_count'],
+                )
+
+
+        # Forced shots  
         # forced_test_shots_data = {}
         # forced_validation_shots_data = {}
         # if self.force_test_shots:
@@ -1215,46 +1241,24 @@ class Data(_Base_Class, LightningDataModule):
     def setup_confinement_data_for_rank(self, sub_stage: str):
         self.rprint("  \u2B1C " + f"Setup confinement data for stage {sub_stage.upper()}")
         t_tmp = time.time()
-        self.zprint(f"  {sub_stage.upper()}")
-        self.stage_to_events_mapping = self.broadcast(self.stage_to_events_mapping)
-        rankwise_event_list: list = None
-        if self.is_global_zero:
-            # sort events by largest to smallest sig win count
-            self.stage_to_events_mapping[sub_stage] = sorted(
-                self.stage_to_events_mapping[sub_stage],
-                key=lambda e: e['sw_count'],
-                reverse=True,
-            )
-            if self.trainer.world_size == 1:
-                rankwise_event_list = [self.stage_to_events_mapping[sub_stage],]
-            else:
-                # assign each event to the rank with the smallest sig win count
-                rankwise_event_list = [{'events':[], 'sw_count':0} for _ in range(self.trainer.world_size)]
-                for event in self.stage_to_events_mapping[sub_stage]:
-                    rankwise_event_list = sorted(
-                        rankwise_event_list,
-                        key=lambda e: e['sw_count'],
-                    )
-                    rankwise_event_list[0]['events'].append(event)
-                    rankwise_event_list[0]['sw_count'] += event['sw_count']
-                rankwise_event_sw_counts = [rd['sw_count'] for rd in rankwise_event_list]
-                self.zprint(f"    Rankwise signal window count (approx): {rankwise_event_sw_counts}")
-                rankwise_event_list = [re['events'] for re in rankwise_event_list]
-                for i_rank in range(self.trainer.world_size):
-                    rankwise_event_list[i_rank] = sorted(
-                        rankwise_event_list[i_rank],
-                        key=lambda e: e['sw_count'],
-                    )
-
+        self.zprint(f"  {sub_stage.capitalize()}")
         # global_stage_events = self.global_stage_to_events[sub_stage]
         # TODO move rankwise_stage_event_split to prepare_conf_data()
-        rankwise_event_list = self.broadcast(rankwise_event_list)
+        # rankwise_event_list = self.broadcast(rankwise_event_list)
+        self.stage_to_rank_to_event_mapping = self.broadcast(self.stage_to_rank_to_event_mapping)
 
         # package data for rank
-        rankwise_events = rankwise_event_list[self.trainer.global_rank]
+        rankwise_events = self.stage_to_rank_to_event_mapping[sub_stage][self.trainer.global_rank]
         n_events = len(rankwise_events)
         # pre-allocate signal array
-        time_count = sum([event['event_length'] for event in rankwise_events])
+        time_count = 0
+        if self.max_confinement_event_length:
+            self.zprint(f"    Max confinement event length: {self.max_confinement_event_length}")
+        for event in rankwise_events:
+            if self.max_confinement_event_length and event['event_length']>= self.max_confinement_event_length:
+                time_count += self.max_confinement_event_length
+            else:
+                time_count += event['event_length']
         packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
         rankwise_events_2 = []
         start_index = 0
@@ -1267,20 +1271,17 @@ class Data(_Base_Class, LightningDataModule):
                 shot = event_data['shot']
                 event = event_data['event']
                 class_label = event_data['class_label']
-                duration = event_data['event_length']
-                sw_count = event_data['sw_count']
                 event_group = root[str(shot)][str(event)]
                 labels = np.array(event_group["labels"], dtype=int)
                 assert labels[0] == class_label and labels[-1] == class_label
-                # if self.max_confinement_event_length and labels.size>self.max_confinement_event_length:
-                #     max_length = self.max_confinement_event_length
-                #     labels = labels[:max_length]
-                # else:
-                #     max_length = len(labels)
-                signals = np.array(event_group["signals"], dtype=np.float32)
+                if self.max_confinement_event_length and labels.size>self.max_confinement_event_length:
+                    max_length = self.max_confinement_event_length
+                    labels = labels[:max_length]
+                else:
+                    max_length = len(labels)
+                signals = np.array(event_group["signals"][:, :max_length], dtype=np.float32)
                 assert signals.shape[0] == 64
                 assert labels.size == signals.shape[1]
-                assert labels.size == duration
                 signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
                 valid_t0 = np.zeros(labels.size, dtype=int)
                 valid_t0[self.signal_window_size-1::self.signal_window_size//8] = 1
@@ -1289,7 +1290,6 @@ class Data(_Base_Class, LightningDataModule):
                 for i in valid_t0_indices:
                     assert i - self.signal_window_size + 1 >= 0  # start slice test
                     assert i+1 <= valid_t0.size  # end slice test
-                assert len(valid_t0_indices) == sw_count
                 # remove outliers in raw signals
                 if self.outlier_value:
                     for ii in valid_t0_indices:
@@ -1308,9 +1308,10 @@ class Data(_Base_Class, LightningDataModule):
                 event_2['labels'] = labels
                 event_2['valid_t0'] = valid_t0
                 rankwise_events_2.append(event_2)
-                count_of_valid_t0_indices += sum(valid_t0)
+                count_of_valid_t0_indices += np.sum(valid_t0)
 
         self.rprint(f"    Outlier count: {outlier_count}")
+        # packaged_signals = packaged_signals[:start_index, ...]
         assert start_index == packaged_signals.shape[0]
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in rankwise_events_2], axis=0)
         packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in rankwise_events_2], axis=0)
@@ -1403,7 +1404,7 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"    Standarizing signals with mean {self.signal_standardization_mean:.3f} and std {self.signal_standardization_stdev:.3f}")
         packaged_signals = (packaged_signals - self.signal_standardization_mean) / self.signal_standardization_stdev
 
-        self.zprint(f"    Valid t0 indices (per rank): {len(packaged_valid_t0_indices):,d}")
+        self.rprint(f"    Valid t0 indices (per rank): {len(packaged_valid_t0_indices):,d}")
         self.rprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.4f} GB")
         self.zprint(f"    {sub_stage.upper()} data time: {time.time()-t_tmp:.1f} s")
 
@@ -1946,8 +1947,8 @@ if __name__=='__main__':
         lr_warmup_epochs=4,
         fraction_validation=0.2,
         num_workers=8,
-        max_confinement_event_length=int(10e3),
-        confinement_dataset_factor=0.1,
+        max_confinement_event_length=int(20e3),
+        confinement_dataset_factor=0.2,
         monitor_metric='sum_loss/train',
         # fir_bp=(None, 200),
         # use_wandb=True,
