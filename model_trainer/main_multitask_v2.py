@@ -688,8 +688,8 @@ class Data(_Base_Class, LightningDataModule):
             self.seed = np.random.default_rng().integers(0, 2**32-1)
             self.zprint(f"Using random seed: {self.seed}")
             self.save_hyperparameters("seed")
-        self.rng = np.random.default_rng(self.seed)
         self.zprint(f"Using random number generator with seed {self.seed}")
+        self.rng = np.random.default_rng(self.seed)
 
     def prepare_data(self):
         self.zprint("\u2B1C Prepare data (rank 0 only)")
@@ -697,7 +697,6 @@ class Data(_Base_Class, LightningDataModule):
             self.prepare_elm_data()
         if 'conf_onehot' in self.tasks:
             self.prepare_confinement_data()
-        # save state dict and
         self.save_state_dict()
 
     def setup(self, stage: str):
@@ -771,7 +770,7 @@ class Data(_Base_Class, LightningDataModule):
                 # global ELMs for stage
                 if len(self.global_elm_data_shot_split[sub_stage]) == 0:
                     continue
-                self.zprint("\u2B1C " + f"Prepare ELM data for stage {sub_stage.upper()} (rank 0 only)")
+                self.zprint("\u2B1C " + f"Prepare ELM data for {sub_stage.upper()} (rank 0 only)")
                 elms_for_stage = [
                     i_elm for i_elm in datafile_elms
                     if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_elm_data_shot_split[sub_stage]
@@ -915,10 +914,10 @@ class Data(_Base_Class, LightningDataModule):
         self.save_hyperparameters({
             'elm_sw_count_by_stage': self.elm_sw_count_by_stage,
         })
-        self.zprint(f"  ELM data prepare time: {time.time()-t_tmp:0.1f} s")
+        self.zprint(f"ELM data prepare time: {time.time()-t_tmp:0.1f} s")
 
     def setup_elm_data_for_rank(self, sub_stage: str):
-        self.rprint("  \u2B1C " + f"Setup ELM data for stage {sub_stage.upper()}")
+        self.zprint("  \u2B1C " + f"Setup ELM data for stage {sub_stage.upper()}")
         # broadcast
         self.elm_signal_window_metadata = self.broadcast(self.elm_signal_window_metadata)
         self.signal_standardization_mean = self.broadcast(self.signal_standardization_mean)
@@ -948,6 +947,7 @@ class Data(_Base_Class, LightningDataModule):
         assert len(elms_to_signals) == len(elms_for_rank)
         signal_memory_size = sum([array.nbytes for array in elms_to_signals.values()])
         self.rprint(f"    Signal memory size: {signal_memory_size/(1024**3):.3f} GB")
+        self.barrier()
 
         # rank-wise datasets
         if sub_stage in ['train', 'validation', 'test']:
@@ -1248,9 +1248,8 @@ class Data(_Base_Class, LightningDataModule):
         return
 
     def setup_confinement_data_for_rank(self, sub_stage: str):
-        self.rprint("  \u2B1C " + f"Setup confinement data for stage {sub_stage.upper()}")
+        self.zprint("  \u2B1C " + f"Setup confinement data for stage {sub_stage.capitalize()}")
         t_tmp = time.time()
-        self.zprint(f"  {sub_stage.capitalize()}")
         # global_stage_events = self.global_stage_to_events[sub_stage]
         # TODO move rankwise_stage_event_split to prepare_conf_data()
         # rankwise_event_list = self.broadcast(rankwise_event_list)
@@ -1270,7 +1269,6 @@ class Data(_Base_Class, LightningDataModule):
             else:
                 time_count += event['event_length']
         packaged_signals = np.empty((time_count, self.n_rows, self.n_cols), dtype=np.float32)
-        self.rprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.4f} GB")
         rankwise_events_2 = []
         start_index = 0
         outlier_count = 0
@@ -1321,12 +1319,13 @@ class Data(_Base_Class, LightningDataModule):
                 rankwise_events_2.append(event_2)
                 count_of_valid_t0_indices += np.sum(valid_t0)
                 if self.elm_sw_count_by_stage:
-                    if count_of_valid_t0_indices > 2*self.elm_sw_count_by_stage[sub_stage]:
+                    if count_of_valid_t0_indices > 2*self.elm_sw_count_by_stage[sub_stage]//self.world_size:
                         self.zprint(f"    Stopping conf data read early to match ELM data size")
                         break
 
-        self.rprint(f"    Outlier count: {outlier_count}")
+        self.zprint(f"    Outlier count: {outlier_count}")
         packaged_signals = packaged_signals[:start_index, ...]
+        self.zprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.4f} GB")
         # assert start_index == packaged_signals.shape[0]
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in rankwise_events_2], axis=0)
         packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in rankwise_events_2], axis=0)
@@ -1367,16 +1366,16 @@ class Data(_Base_Class, LightningDataModule):
                 all_rank_count_valid_indices[i] = self.broadcast(count_valid_t0_indices, src=i)
             length_limit = min(all_rank_count_valid_indices)
             packaged_valid_t0_indices = packaged_valid_t0_indices[:length_limit]
-        self.rprint(f"    Valid t0 indices for rank: {len(packaged_valid_t0_indices):,d}")
+        self.zprint(f"    Valid t0 indices for each rank: {len(packaged_valid_t0_indices):,d}")
 
         # balance with ELM dataset, if applicable
         if self.elm_sw_count_by_stage:
-            self.zprint(f"    Balance confinement data with ELM data")
+            self.zprint(f"    Balancing confinement data with ELM data")
             elm_stage_sw_count = self.elm_sw_count_by_stage[sub_stage]
             elm_stage_rank_sw_count = elm_stage_sw_count // self.world_size
             if len(packaged_valid_t0_indices) > elm_stage_rank_sw_count:
                 packaged_valid_t0_indices = packaged_valid_t0_indices[:elm_stage_rank_sw_count]
-        self.rprint(f"    Final valid t0 indices for rank: {len(packaged_valid_t0_indices):,d}")
+        self.zprint(f"    Final valid t0 indices for each rank: {len(packaged_valid_t0_indices):,d}")
 
         self.conf_sw_count_by_stage[sub_stage] = self.world_size * len(packaged_valid_t0_indices)
 
@@ -1389,7 +1388,6 @@ class Data(_Base_Class, LightningDataModule):
             n_bins = 200
             cummulative_hist = np.zeros(n_bins, dtype=int)
             stat_interval = max(1, packaged_valid_t0_indices.size//int(2e3))
-            t_stat = time.time()
             stat_count = 0
             for i in packaged_valid_t0_indices[::stat_interval]:
                 stat_count += 1
@@ -1415,14 +1413,13 @@ class Data(_Base_Class, LightningDataModule):
                     'confinement_raw_signal_mean': confinement_raw_signal_mean.item(),
                     'confinement_raw_signal_stdev': confinement_raw_signal_stdev.item(),
                 })
-            self.zprint(f"    Stat time {time.time()-t_stat:.1f} s  ({stat_count:,d} samples)")
 
         confinement_raw_signal_mean = self.broadcast(confinement_raw_signal_mean)
         confinement_raw_signal_stdev = self.broadcast(confinement_raw_signal_stdev)
         self.signal_standardization_mean = self.broadcast(self.signal_standardization_mean)
         self.signal_standardization_stdev = self.broadcast(self.signal_standardization_stdev)
         if self.signal_standardization_mean and self.signal_standardization_stdev:
-            self.zprint(f"    Using ELM data mean/stdev for standardization")
+            self.zprint(f"    Using existing mean/stdev for standardization")
         else:
             self.zprint(f"    Using confinement data mean/stdev for standardization")
             self.signal_standardization_mean = confinement_raw_signal_mean
@@ -1590,7 +1587,8 @@ class Data(_Base_Class, LightningDataModule):
             state_dict_file.parent.mkdir(parents=True, exist_ok=True)
             self.zprint(f"  Saving state_dict: {state_dict_file}")
             state_dict = {item: getattr(self, item) for item in self.state_items}
-            self.zprint(f"    State dict keys: {list(state_dict.keys())}")
+            for key in state_dict:
+                self.zprint(f"    {key}")
             torch.save(state_dict, state_dict_file)
 
     def rprint(self, text: str = ''):
@@ -1750,8 +1748,7 @@ def main(
     is_global_zero = (world_rank == 0)
 
     def zprint(text):
-        if is_global_zero:
-            print(text)
+        if is_global_zero: print(text)
 
     ### model
     zprint("\u2B1C Creating model")
@@ -1970,13 +1967,13 @@ if __name__=='__main__':
         # experiment_name='experiment_v8',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=80,
+        max_elms=40,
         lr=1e-2,
-        max_epochs=6,
-        batch_size=256,
+        max_epochs=2,
+        batch_size=128,
         lr_warmup_epochs=4,
         fraction_validation=0.2,
-        num_workers=8,
+        num_workers=2,
         max_confinement_event_length=int(20e3),
         confinement_dataset_factor=0.2,
         monitor_metric='sum_loss/train',
