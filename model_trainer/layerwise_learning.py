@@ -44,7 +44,7 @@ if __name__=='__main__':
         lr=rng.choice([1e-2, 3e-2]),
         lr_warmup_epochs=15,
         deepest_layer_lr_factor=1.,
-        weight_decay=rng.choice([1e-2,1e-3,1e-4]),
+        weight_decay=rng.choice([1e-3,1e-4]),
         batch_size={0:64, 10:128, 30:256, 90:512},
         num_workers=8,
         gradient_clip_val=1,
