@@ -1255,6 +1255,7 @@ class Data(_Base_Class, LightningDataModule):
         # TODO move rankwise_stage_event_split to prepare_conf_data()
         # rankwise_event_list = self.broadcast(rankwise_event_list)
         self.stage_to_rank_to_event_mapping = self.broadcast(self.stage_to_rank_to_event_mapping)
+        self.elm_sw_count_by_stage = self.broadcast(self.elm_sw_count_by_stage)
 
         # package data for rank
         rankwise_events = self.stage_to_rank_to_event_mapping[sub_stage][self.world_rank]
@@ -1969,8 +1970,10 @@ if __name__=='__main__':
         # experiment_name='experiment_v8',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=40,
+        max_elms=80,
         lr=1e-2,
+        max_epochs=6,
+        batch_size=256,
         lr_warmup_epochs=4,
         fraction_validation=0.2,
         num_workers=8,
