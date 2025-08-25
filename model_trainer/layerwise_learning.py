@@ -9,7 +9,6 @@ if __name__=='__main__':
     rng = random.default_rng(seed=seed)
 
     fir_choices = (
-        (None, None),
         (8, None),
         (None, 200),
         (8, 200),
@@ -18,13 +17,13 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v09',
+        experiment_name='multi_256_v10',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=rng.choice([40, 60, 80]),
-        max_confinement_event_length=rng.choice([int(10e3), int(20e3), int(40e3)]),
-        confinement_dataset_factor=rng.choice([0.1, 0.2]),
+        max_elms=rng.choice([40, 80]),
+        max_confinement_event_length=int(30e3),
+        confinement_dataset_factor=0.3,
         fraction_validation=0.15,
         # model
         use_optimizer='adam',
@@ -45,6 +44,7 @@ if __name__=='__main__':
         lr=rng.choice([1e-2, 3e-2]),
         lr_warmup_epochs=15,
         deepest_layer_lr_factor=1.,
+        weight_decay=rng.choice([1e-2,1e-3,1e-4]),
         batch_size={0:64, 10:128, 30:256, 90:512},
         num_workers=8,
         gradient_clip_val=1,

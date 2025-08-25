@@ -7,6 +7,7 @@ def make_small_data_file(
         new_file: str|Path,
         existing_file: str|Path = '/home/smithdr/ml/elm_labeling_workflow/step_6_labeled_elm_data/elm_data_v1.hdf5',
         n_elms: int = 20,
+        max_elms_per_shot: int = 1,
 ):
     new_file = Path(new_file).absolute()
     existing_file = Path(existing_file).absolute()
@@ -25,7 +26,6 @@ def make_small_data_file(
         dest.require_group('elms')
         dest_elms_per_shot: dict[int,int] = {}
 
-        max_elms_per_shot = (n_elms-1) // 100 + 1
         print(f"  Max ELMs per shot: {max_elms_per_shot}")
         for elm in existing_elms:
             elm_key = f"{elm:06d}"
@@ -59,9 +59,24 @@ def make_small_data_file(
             
 
 if __name__=='__main__':
-    for n_elms in [20, 50, 100, 200, 500]:
+    for n_elms in [20, 50, 100]:
         make_small_data_file(
             new_file=f'small_data_{n_elms:d}.hdf5',
-            existing_file='/global/homes/d/drsmith/project-ml/data-archive/elm_data.20240502.hdf5',
+            existing_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
             n_elms=n_elms,
+            max_elms_per_shot=1,
         )
+    n_elms = 200
+    make_small_data_file(
+        new_file=f'small_data_{n_elms:d}.hdf5',
+        existing_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
+        n_elms=n_elms,
+        max_elms_per_shot=2,
+    )
+    n_elms = 500
+    make_small_data_file(
+        new_file=f'small_data_{n_elms:d}.hdf5',
+        existing_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
+        n_elms=n_elms,
+        max_elms_per_shot=4,
+    )
