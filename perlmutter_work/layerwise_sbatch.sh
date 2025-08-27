@@ -75,7 +75,7 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v11',
+        experiment_name='multi_256_v12',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',

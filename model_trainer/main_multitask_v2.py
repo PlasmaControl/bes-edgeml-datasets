@@ -314,7 +314,7 @@ class Model(_Base_Class, LightningModule):
             self.zprint(f"  Task {task_name} output mean {task_output.mean():.4f} stdev {task_output.std():.4f} min/max {task_output.min():.3f}/{task_output.max():.3f}")
 
     def backbone_transfer_learning(self) -> None:
-        if not self.is_global_zero or not self.backbone_model_path or not self.backbone_first_n_layers:
+        if not self.backbone_model_path or not self.backbone_first_n_layers:
             return
         self.backbone_model_path = Path(self.backbone_model_path) / 'checkpoints'/'last.ckpt'
         assert self.backbone_model_path.exists(), f"Transfer model not found: {self.backbone_model_path}"
@@ -488,6 +488,7 @@ class Model(_Base_Class, LightningModule):
                             input=task_outputs.reshape_as(labels),
                             target=labels.type_as(task_outputs),
                         )
+                        metric_value = torch.log(metric_value)
                         sum_loss = sum_loss + metric_value if sum_loss else metric_value
                         if self.elm_loss_weight:
                             mean_loss = self.elm_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
@@ -509,6 +510,7 @@ class Model(_Base_Class, LightningModule):
                             input=task_outputs,
                             target=labels.flatten(),
                         )
+                        metric_value = torch.log(metric_value)
                         sum_loss = sum_loss + metric_value if sum_loss else metric_value
                         if self.conf_loss_weight:
                             mean_loss = self.conf_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
