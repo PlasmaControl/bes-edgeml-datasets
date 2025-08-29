@@ -3,7 +3,7 @@ from numpy import random
 from model_trainer.main_multitask_v2 import main
 
 if __name__=='__main__':
-    i_array = int(os.getenv("SLURM_ARRAY_TASK_ID"))
+    i_array = int(os.getenv("SLURM_ARRAY_TASK_ID", 0))
     jobs = (
         ('r42002857_14_2025_08_25_11_30_57', (None, 200)),
         ('r42002857_45_2025_08_25_16_44_36', (None, 200)),
@@ -22,7 +22,7 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v11',
+        experiment_name='multi_256_v13',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
@@ -45,10 +45,10 @@ if __name__=='__main__':
         monitor_metric='sum_loss/train',
         fir_bp=fir_bp,
         # training
-        max_epochs=500,
+        max_epochs=20,
         log_freq=100,
         lr=1e-2,
-        lr_warmup_epochs=20,
+        lr_warmup_epochs=10,
         deepest_layer_lr_factor=0.1,
         lr_scheduler_patience=90,
         weight_decay=1e-4,
@@ -58,9 +58,9 @@ if __name__=='__main__':
         gradient_clip_algorithm='value',
         use_wandb=True,
         early_stopping_patience=200,
-        backbone_model_path=f'multi_256_v10/{job_id}',
-        backbone_first_n_layers = 3,
-        backbone_initial_ratio_lr = 0.01,
-        backbone_unfreeze_at_epoch = 50,
-        backbone_warmup_rate = 2,
+        # backbone_model_path=f'multi_256_v10/{job_id}',
+        # backbone_first_n_layers = 3,
+        # backbone_initial_ratio_lr = 0.01,
+        # backbone_unfreeze_at_epoch = 50,
+        # backbone_warmup_rate = 2,
     )

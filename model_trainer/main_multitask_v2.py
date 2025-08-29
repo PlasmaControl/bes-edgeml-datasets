@@ -163,12 +163,16 @@ class Model(_Base_Class, LightningModule):
         self.task_names = list(self.task_configs.keys())
         self.task_metrics: dict[str, dict] = {}
         self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
+        self.task_log_sigma_weights: torch.nn.ParameterDict = torch.nn.ParameterDict()
         for task_name, task_dict in self.task_configs.items():
             self.zprint(f'Task sub-model: {task_name}')
             task_layers: tuple[int] = task_dict['layers']
             task_metrics: dict = task_dict['metrics']
             self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
             self.task_metrics[task_name] = task_metrics.copy()
+            self.task_log_sigma_weights.update({
+                task_name: torch.nn.Parameter(torch.zeros(1, requires_grad=True))
+            })
             if self.monitor_metric is None:
                 # if not specified, use `monitor_metric` from first task
                 self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
@@ -427,6 +431,8 @@ class Model(_Base_Class, LightningModule):
             if 'BatchNorm' in param_name:
                 # default lr for BatchNorm
                 param_dict['lr'] = self.lr
+            elif 'task_log_sigma_weights' in param_name:
+                param_dict['lr'] = self.lr
             else:
                 # lr for Conv and FC layers
                 assert 'Conv' in param_name or 'FC' in param_name
@@ -488,11 +494,11 @@ class Model(_Base_Class, LightningModule):
                             input=task_outputs.reshape_as(labels),
                             target=labels.type_as(task_outputs),
                         )
-                        metric_value = torch.log(metric_value)
-                        sum_loss = sum_loss + metric_value if sum_loss else metric_value
-                        if self.elm_loss_weight:
-                            mean_loss = self.elm_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
-                            sum_loss = sum_loss + mean_loss
+                        metric_weighted = metric_value / (torch.exp(self.task_log_sigma_weights[task])) + self.task_log_sigma_weights[task]
+                        sum_loss = sum_loss + metric_weighted if sum_loss else metric_weighted
+                        # if self.elm_loss_weight:
+                        #     mean_loss = self.elm_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
+                        #     sum_loss = sum_loss + mean_loss
                     elif 'score' in metric_name:
                         metric_value = metric_function(
                             y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
@@ -510,11 +516,11 @@ class Model(_Base_Class, LightningModule):
                             input=task_outputs,
                             target=labels.flatten(),
                         )
-                        metric_value = torch.log(metric_value)
-                        sum_loss = sum_loss + metric_value if sum_loss else metric_value
-                        if self.conf_loss_weight:
-                            mean_loss = self.conf_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
-                            sum_loss = sum_loss + mean_loss
+                        metric_weighted = metric_value / (torch.exp(self.task_log_sigma_weights[task])) + self.task_log_sigma_weights[task]
+                        sum_loss = sum_loss + metric_weighted if sum_loss else metric_weighted
+                        # if self.conf_loss_weight:
+                        #     mean_loss = self.conf_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
+                        #     sum_loss = sum_loss + mean_loss
                     elif 'score' in metric_name:
                         metric_value = metric_function(
                             y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
