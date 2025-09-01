@@ -432,7 +432,7 @@ class Model(_Base_Class, LightningModule):
                 # default lr for BatchNorm
                 param_dict['lr'] = self.lr
             elif 'task_log_sigma_weights' in param_name:
-                param_dict['lr'] = self.lr
+                param_dict['lr'] = self.lr/1e-2
             else:
                 # lr for Conv and FC layers
                 assert 'Conv' in param_name or 'FC' in param_name

@@ -9,12 +9,12 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --time=90
+#SBATCH --time=60
 #SBATCH --qos=regular
 
 #SBATCH --signal=SIGTERM@200
 
-#SBATCH --array=1-80%6
+#SBATCH --array=1-80%8
 
 module --redirect list
 which python
@@ -67,21 +67,23 @@ if __name__=='__main__':
         (8, 200),
     )
 
-    mlp_choices = (
-        [None,],
-        [None, 16],
-        [None, 32],
-    )
-    mlp_layers = mlp_choices[rng.choice(len(mlp_choices))]
+    # mlp_choices = (
+    #     [None,],
+    #     [None, 16],
+    #     [None, 32],
+    # )
+    # mlp_layers = mlp_choices[rng.choice(len(mlp_choices))]
+    mlp_layers = [None, 32]
 
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v14',
+        experiment_name='multi_256_v15',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=rng.choice([40, 60]),
+        # max_elms=rng.choice([40, 60]),
+        max_elms=80,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.3,
         fraction_validation=0.15,
@@ -96,7 +98,7 @@ if __name__=='__main__':
             'elm_class': mlp_layers+[1,],
             'conf_onehot': mlp_layers+[4,],
         },
-        monitor_metric='sum_loss/train',
+        monitor_metric='elm_class/bce_loss/train',
         fir_bp=fir_choices[rng.choice(len(fir_choices))],
         # training
         max_epochs=500,
@@ -105,8 +107,8 @@ if __name__=='__main__':
         lr_warmup_epochs=20,
         lr_scheduler_patience=100,
         deepest_layer_lr_factor=1.,
-        weight_decay=1e-4,
-        batch_size={0:64, 10:128, 20:256, 80:512},
+        weight_decay=1e-5,
+        batch_size={0:128, 20:256, 80:512},
         num_workers=8,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',
