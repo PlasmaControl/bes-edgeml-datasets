@@ -25,7 +25,7 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v14',
+        experiment_name='multi_256_v15',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
@@ -49,13 +49,13 @@ if __name__=='__main__':
         fir_bp=fir_choices[rng.choice(len(fir_choices))],
         # training
         max_epochs=500,
-        log_freq=200,
+        log_freq=100,
         lr=1e-2,
-        lr_warmup_epochs=30,
+        lr_warmup_epochs=20,
         lr_scheduler_patience=100,
         deepest_layer_lr_factor=1.,
         weight_decay=1e-5,
-        batch_size={0:64, 10:128, 20:256, 80:512},
+        batch_size={0:128, 20:256, 80:512},
         num_workers=8,
         gradient_clip_val=1,
         gradient_clip_algorithm='value',

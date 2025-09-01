@@ -320,7 +320,7 @@ class Model(_Base_Class, LightningModule):
     def backbone_transfer_learning(self) -> None:
         if not self.backbone_model_path or not self.backbone_first_n_layers:
             return
-        self.backbone_model_path = Path(self.backbone_model_path) / 'checkpoints'/'last.ckpt'
+        self.backbone_model_path = next((Path(self.backbone_model_path) / 'checkpoints').glob('best-epoch-*.ckpt'))
         assert self.backbone_model_path.exists(), f"Transfer model not found: {self.backbone_model_path}"
         self_param_names = [param_name for param_name, _ in self.named_parameters()]
         source_model = torch.load(
