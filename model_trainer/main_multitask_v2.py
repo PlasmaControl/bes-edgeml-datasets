@@ -432,7 +432,7 @@ class Model(_Base_Class, LightningModule):
                 # default lr for BatchNorm
                 param_dict['lr'] = self.lr
             elif 'task_log_sigma_weights' in param_name:
-                param_dict['lr'] = self.lr/1e-2
+                param_dict['lr'] = self.lr * 1e-2
             else:
                 # lr for Conv and FC layers
                 assert 'Conv' in param_name or 'FC' in param_name
@@ -1810,9 +1810,10 @@ def main(
     ]
     if backbone_model_path and backbone_first_n_layers:
         backbone_scheduler = BackboneFinetuning(
-            lambda_func=lambda lr: lr * backbone_warmup_rate,
             unfreeze_backbone_at_epoch=backbone_unfreeze_at_epoch,
+            lambda_func=lambda lr: lr * backbone_warmup_rate,
             backbone_initial_ratio_lr=backbone_initial_ratio_lr,
+            initial_denom_lr=1,
         )
         callbacks.append(backbone_scheduler)
 
