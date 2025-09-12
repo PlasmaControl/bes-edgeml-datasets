@@ -78,10 +78,10 @@ class _Base_Class:
 @dataclasses.dataclass(eq=False)
 class Model(_Base_Class, LightningModule):
     lr: float = 1e-3
-    deepest_layer_lr_factor: float = 0.1
+    deepest_layer_lr_factor: float = 1.
     lr_scheduler_patience: int = 100
     lr_scheduler_threshold: float = 1e-3
-    lr_warmup_epochs: int = 10
+    lr_warmup_epochs: int = 2
     weight_decay: float = 1e-6
     leaky_relu_slope: float = 2e-2
     monitor_metric: str = None
@@ -164,6 +164,7 @@ class Model(_Base_Class, LightningModule):
         self.task_metrics: dict[str, dict] = {}
         self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
         self.task_log_sigma_weights: torch.nn.ParameterDict = torch.nn.ParameterDict()
+        self.is_multitask = len(self.task_configs) > 1
         for task_name, task_dict in self.task_configs.items():
             self.zprint(f'Task sub-model: {task_name}')
             task_layers: tuple[int] = task_dict['layers']
@@ -171,7 +172,7 @@ class Model(_Base_Class, LightningModule):
             self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
             self.task_metrics[task_name] = task_metrics.copy()
             self.task_log_sigma_weights.update({
-                task_name: torch.nn.Parameter(torch.zeros(1, requires_grad=True))
+                task_name: torch.nn.Parameter(torch.zeros(1, requires_grad=False))
             })
             if self.monitor_metric is None:
                 # if not specified, use `monitor_metric` from first task
@@ -378,7 +379,9 @@ class Model(_Base_Class, LightningModule):
         self.zprint(f"  Reduce on plateau threshold {self.lr_scheduler_threshold:.1e} and patience {self.lr_scheduler_patience:d}")
 
         optim_kwargs = {
-            'params': self.make_parameter_list(),
+            # 'params': self.make_parameter_list(),
+            # 'params': self.named_parameters(),
+            'params': filter(lambda p: p.requires_grad, self.parameters()),
             'lr': self.lr,
             'weight_decay': self.weight_decay,
         }
@@ -407,47 +410,47 @@ class Model(_Base_Class, LightningModule):
             [optimizer],
             [
                 {'scheduler': plateau_scheduler, 'monitor': self.monitor_metric},
-                warmup_scheduler, 
+                {'scheduler': warmup_scheduler}, 
             ],
         )
 
-    def make_parameter_list(self) -> list[dict]:
-        parameter_list = []
-        n_feature_layers = 0
-        for layer_name, _ in self.named_modules():
-            if not layer_name.endswith(('Conv','FC')):
-                continue
-            n_feature_layers += 1
-        lrs_for_feature_layers = np.logspace(
-            np.log10(self.lr * self.deepest_layer_lr_factor),
-            np.log10(self.lr),
-            n_feature_layers,
-        )
-        for param_name, params in self.named_parameters():
-            param_dict = {}
-            # no weight_decay for biases
-            if 'bias' in param_name:
-                param_dict['weight_decay'] = 0.
-            if 'BatchNorm' in param_name:
-                # default lr for BatchNorm
-                param_dict['lr'] = self.lr
-            elif 'task_log_sigma_weights' in param_name:
-                param_dict['lr'] = self.lr * 1e-2
-            else:
-                # lr for Conv and FC layers
-                assert 'Conv' in param_name or 'FC' in param_name
-                assert param_name.endswith(('weight','bias'))
-                i_layer = int(re.findall(r'L(\d+)_', param_name)[0])
-                if param_name.endswith('weight'):
-                    param_dict['lr'] = lrs_for_feature_layers[i_layer]
-                else:              
-                    param_dict['lr'] = lrs_for_feature_layers[i_layer]/10
-            optimizer_params = ''.join([f'  {key} {value:.1e}' for key, value in param_dict.items()])
-            self.zprint(f"  {param_name}: {optimizer_params}")
-            param_dict['params'] = params
-            parameter_list.append(param_dict)
+    # def make_parameter_list(self) -> list[dict]:
+    #     parameter_list = []
+    #     n_feature_layers = 0
+    #     for layer_name, _ in self.named_modules():
+    #         if not layer_name.endswith(('Conv','FC')):
+    #             continue
+    #         n_feature_layers += 1
+    #     lrs_for_feature_layers = np.logspace(
+    #         np.log10(self.lr * self.deepest_layer_lr_factor),
+    #         np.log10(self.lr),
+    #         n_feature_layers,
+    #     )
+    #     for param_name, params in self.named_parameters():
+    #         param_dict = {}
+    #         # no weight_decay for biases
+    #         if 'bias' in param_name:
+    #             param_dict['weight_decay'] = 0.
+    #         if 'BatchNorm' in param_name:
+    #             # default lr for BatchNorm
+    #             param_dict['lr'] = self.lr
+    #         elif 'task_log_sigma_weights' in param_name:
+    #             param_dict['lr'] = self.lr * 1e-2
+    #         else:
+    #             # lr for Conv and FC layers
+    #             assert 'Conv' in param_name or 'FC' in param_name
+    #             assert param_name.endswith(('weight','bias'))
+    #             i_layer = int(re.findall(r'L(\d+)_', param_name)[0])
+    #             if param_name.endswith('weight'):
+    #                 param_dict['lr'] = lrs_for_feature_layers[i_layer]
+    #             else:              
+    #                 param_dict['lr'] = lrs_for_feature_layers[i_layer]/10
+    #         optimizer_params = ''.join([f'  {key} {value:.1e}' for key, value in param_dict.items()])
+    #         self.zprint(f"  {param_name}: {optimizer_params}")
+    #         param_dict['params'] = params
+    #         parameter_list.append(param_dict)
 
-        return parameter_list
+    #     return parameter_list
 
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
         output = self.update_step(
@@ -493,12 +496,13 @@ class Model(_Base_Class, LightningModule):
                         metric_value = metric_function(
                             input=task_outputs.reshape_as(labels),
                             target=labels.type_as(task_outputs),
+                        )                        
+                        metric_weighted = (
+                            metric_value / (torch.exp(self.task_log_sigma_weights[task])) + self.task_log_sigma_weights[task]
+                            if self.is_multitask
+                            else metric_value
                         )
-                        metric_weighted = metric_value / (torch.exp(self.task_log_sigma_weights[task])) + self.task_log_sigma_weights[task]
                         sum_loss = sum_loss + metric_weighted if sum_loss else metric_weighted
-                        # if self.elm_loss_weight:
-                        #     mean_loss = self.elm_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
-                        #     sum_loss = sum_loss + mean_loss
                     elif 'score' in metric_name:
                         metric_value = metric_function(
                             y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
@@ -516,11 +520,12 @@ class Model(_Base_Class, LightningModule):
                             input=task_outputs,
                             target=labels.flatten(),
                         )
-                        metric_weighted = metric_value / (torch.exp(self.task_log_sigma_weights[task])) + self.task_log_sigma_weights[task]
+                        metric_weighted = (
+                            metric_value / (torch.exp(self.task_log_sigma_weights[task])) + self.task_log_sigma_weights[task]
+                            if self.is_multitask
+                            else metric_value
+                        )
                         sum_loss = sum_loss + metric_weighted if sum_loss else metric_weighted
-                        # if self.conf_loss_weight:
-                        #     mean_loss = self.conf_loss_weight * task_outputs.mean().pow(2).sqrt() / task_outputs.std()
-                        #     sum_loss = sum_loss + mean_loss
                     elif 'score' in metric_name:
                         metric_value = metric_function(
                             y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
@@ -560,11 +565,27 @@ class Model(_Base_Class, LightningModule):
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
-        self.current_max_lr = np.max(self.trainer.lr_scheduler_configs[-1].scheduler.get_last_lr())
         train_dataloader: CombinedLoader = self.trainer.train_dataloader
         for dl in train_dataloader.values():
             self.current_batch_size = dl.batch_size * self.trainer.world_size
             break
+        lrs = np.array([
+            param_group['lr']
+            for optimizer in self.trainer.optimizers
+            for param_group in optimizer.param_groups
+        ])
+        self.current_max_lr = lrs.max()
+        self.current_min_lr = lrs.min()
+        self.n_frozen_layers = 0
+        for mod_name, module in self.named_modules():
+            for param_name, param in module.named_parameters(recurse=False):
+                if not param.requires_grad:
+                    # self.zprint(f"  Frozen {mod_name}.{param_name}")
+                    self.n_frozen_layers += 1
+                    break
+        if self.is_multitask and self.current_epoch==10:
+            for param in self.task_log_sigma_weights.parameters():
+                param.requires_grad = True
 
     def on_train_epoch_end(self):
         if self.is_global_zero and self.global_step > 0:
@@ -572,9 +593,9 @@ class Model(_Base_Class, LightningModule):
             global_time = time.time() - self.t_fit_start
             epoch_steps = self.global_step-self.s_train_epoch_start
             logged_metrics = self.trainer.logged_metrics
-            line =  f"Ep {self.current_epoch+1:03d}"
-            line += f"  lr {self.current_max_lr:.1e}"
-            line += f" bs {self.current_batch_size}"
+            line =  f"Ep {self.current_epoch:03d}"
+            line += f"  bs {self.current_batch_size}"
+            line += f" min/max lr {self.current_min_lr:.1e}/{self.current_max_lr:.1e}"
             line += f" tr/val loss {logged_metrics['sum_loss/train']:.3f}/"
             sum_loss_val = (
                 logged_metrics['sum_loss/val']
@@ -585,6 +606,7 @@ class Model(_Base_Class, LightningModule):
             line += f"{sum_loss_val:.3f}"
             line += f" ep/gl steps {epoch_steps:,d}/{self.global_step:,d}"
             line += f" ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}" 
+            line += f" n_frozen: {self.n_frozen_layers}" 
             print(line)
 
     def on_fit_end(self) -> None:
@@ -1703,14 +1725,14 @@ def main(
         use_optimizer: str = 'adam',
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
-        deepest_layer_lr_factor: float = 0.1,
-        lr_warmup_epochs: int = 10,
+        deepest_layer_lr_factor: float = 1.0,
+        lr_warmup_epochs: int = 2,
         lr_scheduler_patience: int = 100,
         monitor_metric = None,
         # transfer learning with backbone model
         backbone_model_path: str|Path = None,
         backbone_first_n_layers: int = None,
-        backbone_initial_ratio_lr: float = 1e-3,
+        backbone_initial_lr: float = 1e-3,
         backbone_unfreeze_at_epoch: int = 50,
         backbone_warmup_rate: float = 2.,
         # loggers
@@ -1811,9 +1833,12 @@ def main(
     if backbone_model_path and backbone_first_n_layers:
         backbone_scheduler = BackboneFinetuning(
             unfreeze_backbone_at_epoch=backbone_unfreeze_at_epoch,
-            lambda_func=lambda lr: lr * backbone_warmup_rate,
-            backbone_initial_ratio_lr=backbone_initial_ratio_lr,
+            lambda_func=lambda _: backbone_warmup_rate,
+            # backbone_initial_ratio_lr=backbone_initial_ratio_lr,
+            backbone_initial_lr=backbone_initial_lr,
             initial_denom_lr=1,
+            train_bn=False,
+            # verbose=True,
         )
         callbacks.append(backbone_scheduler)
 
@@ -1886,7 +1911,7 @@ def main(
         ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
         use_distributed_sampler=False,
-        num_sanity_val_steps=0,
+        num_sanity_val_steps=2,
         reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs,
     )
 
@@ -1963,30 +1988,31 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
-        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        'conf_onehot': [None,16,4],
+        # 'conf_onehot': [None,16,4],
     }
     main(
-        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        # elm_data_file=ml_data.small_data_100,
-        confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        # experiment_name='experiment_v8',
+        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        elm_data_file=ml_data.small_data_100,
+        # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=40,
+        max_elms=30,
+        max_epochs=12,
         lr=1e-2,
-        max_epochs=2,
+        lr_warmup_epochs=3,
         batch_size=128,
-        lr_warmup_epochs=4,
         fraction_validation=0.2,
         num_workers=2,
         max_confinement_event_length=int(20e3),
         confinement_dataset_factor=0.2,
-        monitor_metric='sum_loss/train',
-        # fir_bp=(None, 200),
         # use_wandb=True,
-        # skip_train=True,
+        monitor_metric='sum_loss/train',
+        backbone_model_path='experiment_default/r2025_09_12_14_40_59',
+        backbone_unfreeze_at_epoch=5,
+        backbone_first_n_layers=3,
+        backbone_initial_lr=1e-3,
+        backbone_warmup_rate=2,
     )
