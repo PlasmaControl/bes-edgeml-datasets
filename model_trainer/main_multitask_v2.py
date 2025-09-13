@@ -606,7 +606,8 @@ class Model(_Base_Class, LightningModule):
             line += f"{sum_loss_val:.3f}"
             line += f" ep/gl steps {epoch_steps:,d}/{self.global_step:,d}"
             line += f" ep/gl time (min): {epoch_time/60:.1f}/{global_time/60:.1f}" 
-            line += f" n_frozen: {self.n_frozen_layers}" 
+            if self.n_frozen_layers:
+                line += f" n_frozen: {self.n_frozen_layers}" 
             print(line)
 
     def on_fit_end(self) -> None:
