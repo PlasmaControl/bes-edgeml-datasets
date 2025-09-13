@@ -9,12 +9,12 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --time=30
-#SBATCH --qos=debug
+#SBATCH --time=45
+#SBATCH --qos=regular
 
 #SBATCH --signal=SIGTERM@300
 
-#SBATCH --array=1-2
+#SBATCH --array=0-99%8
 
 module --redirect list
 which python
@@ -51,37 +51,58 @@ rand=${RANDOM}
 echo Random number: ${rand}
 
 SCRIPT=$(cat << END
+import os
+from numpy import random
 from model_trainer.main_multitask_v2 import main
 
 if __name__=='__main__':
-    feature_model_layers = (
-        {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
-        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
-        {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
-        # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
-        # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+    seed = os.environ.get('rand', None)
+    if seed is not None: seed = int(seed)
+    print(f'RNG seed: {seed}')
+    rng = random.default_rng(seed=seed)
+
+    fir_choices = (
+        (8, None),
+        (12, None),
+        (None, 100),
+        (None, 200),
     )
-    mlp_tasks={
-        'elm_class': [None,32,1],
-        'conf_onehot': [None,32,4],
-    }
+
     main(
-        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # scenario
+        signal_window_size=256,
+        experiment_name='multi_256_v16',
+        # data
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        experiment_name='experiment_v8',
-        feature_model_layers=feature_model_layers,
-        mlp_tasks=mlp_tasks,
-        max_elms=60,
-        max_epochs=20,
-        lr=1e-2,
-        lr_warmup_epochs=4,
-        fraction_validation=0.2,
+        max_elms=80,
+        max_confinement_event_length=int(30e3),
+        confinement_dataset_factor=0.3,
+        fraction_validation=0.15,
         num_workers=8,
-        max_confinement_event_length=int(10e3),
-        confinement_dataset_factor=0.1,
+        # model
+        use_optimizer='adam',
+        feature_model_layers = (
+            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
+            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+            {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
+        ),
+        mlp_tasks={
+            'elm_class': [None, 32, 1],
+            'conf_onehot': [None, 32, 4],
+        },
         monitor_metric='sum_loss/train',
-        fir_bp=(None, 200),
+        fir_bp=fir_choices[rng.choice(len(fir_choices))],
+        unfreeze_uncertainty_epoch=20,
+        # training
+        max_epochs=500,
+        lr=1e-2,
+        lr_warmup_epochs=10,
+        lr_scheduler_patience=100,
+        weight_decay=1e-5,
+        batch_size={0:128, 20:256, 80:512},
         use_wandb=True,
+        early_stopping_patience=200,
     )
 END
 )

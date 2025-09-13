@@ -34,13 +34,14 @@ if __name__=='__main__':
         signal_window_size=256,
         experiment_name='multi_256_v16',
         # data
-        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         # max_elms=rng.choice([40, 60]),
         max_elms=80,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.3,
         fraction_validation=0.15,
+        num_workers=8,
         # model
         use_optimizer='adam',
         feature_model_layers = (

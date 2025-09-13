@@ -93,6 +93,7 @@ class Model(_Base_Class, LightningModule):
     dropout: float = 0.0
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
     mlp_tasks: dict[str, Sequence] = None
+    unfreeze_uncertainty_epoch: int = 12
     backbone_model_path: str|Path = None
     backbone_first_n_layers: int = None
 
@@ -163,7 +164,7 @@ class Model(_Base_Class, LightningModule):
         self.task_names = list(self.task_configs.keys())
         self.task_metrics: dict[str, dict] = {}
         self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
-        self.task_log_sigma_weights: torch.nn.ParameterDict = torch.nn.ParameterDict()
+        self.task_log_sigma: torch.nn.ParameterDict = torch.nn.ParameterDict()
         self.is_multitask = len(self.task_configs) > 1
         for task_name, task_dict in self.task_configs.items():
             self.zprint(f'Task sub-model: {task_name}')
@@ -171,9 +172,7 @@ class Model(_Base_Class, LightningModule):
             task_metrics: dict = task_dict['metrics']
             self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
             self.task_metrics[task_name] = task_metrics.copy()
-            self.task_log_sigma_weights.update({
-                task_name: torch.nn.Parameter(torch.zeros(1, requires_grad=False))
-            })
+            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.zeros(1))})
             if self.monitor_metric is None:
                 # if not specified, use `monitor_metric` from first task
                 self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
@@ -377,11 +376,33 @@ class Model(_Base_Class, LightningModule):
         self.zprint(f"  lr for deepest layer: {self.deepest_layer_lr_factor * self.lr:.1e}")
         self.zprint(f"  Warmup epochs: {self.lr_warmup_epochs}")
         self.zprint(f"  Reduce on plateau threshold {self.lr_scheduler_threshold:.1e} and patience {self.lr_scheduler_patience:d}")
+        self.zprint(f"  Unfreeze uncertainty epoch: {self.unfreeze_uncertainty_epoch:d}")
+
+        # for mod_name, module in self.named_modules():
+        #     self.zprint(f"Module {mod_name}")
+        #     for param_name, param in module.named_parameters(recurse=False):
+        #         self.zprint(f"  Param {param_name}")
+        # for param_name, param in self.named_parameters():
+        #     self.zprint(f"Parameter {param_name} requires_grad={param.requires_grad}")
+
+        params_weights = {
+            'params': [param for param_name, param in self.named_parameters() if 'weight' in param_name and param.requires_grad],
+        }
+        params_biases = {
+            'params': [param for param_name, param in self.named_parameters() if 'bias' in param_name and param.requires_grad],
+            'weight_decay': 0.,
+        }
+        params_sigmas = {
+            'params': [param for param_name, param in self.named_parameters() if 'sigma' in param_name and param.requires_grad],
+            'lr': self.lr * 1e-2,
+            'weight_decay': 0.,
+        }
 
         optim_kwargs = {
             # 'params': self.make_parameter_list(),
             # 'params': self.named_parameters(),
-            'params': filter(lambda p: p.requires_grad, self.parameters()),
+            # 'params': filter(lambda p: p[1].requires_grad and 'sigma' not in p[0], self.named_parameters()),
+            'params': [params_weights, params_biases, params_sigmas],
             'lr': self.lr,
             'weight_decay': self.weight_decay,
         }
@@ -434,7 +455,7 @@ class Model(_Base_Class, LightningModule):
     #         if 'BatchNorm' in param_name:
     #             # default lr for BatchNorm
     #             param_dict['lr'] = self.lr
-    #         elif 'task_log_sigma_weights' in param_name:
+    #         elif 'task_log_sigma' in param_name:
     #             param_dict['lr'] = self.lr * 1e-2
     #         else:
     #             # lr for Conv and FC layers
@@ -498,7 +519,7 @@ class Model(_Base_Class, LightningModule):
                             target=labels.type_as(task_outputs),
                         )                        
                         metric_weighted = (
-                            metric_value / (torch.exp(self.task_log_sigma_weights[task])) + self.task_log_sigma_weights[task]
+                            metric_value / (torch.exp(self.task_log_sigma[task])) + self.task_log_sigma[task]
                             if self.is_multitask
                             else metric_value
                         )
@@ -521,7 +542,7 @@ class Model(_Base_Class, LightningModule):
                             target=labels.flatten(),
                         )
                         metric_weighted = (
-                            metric_value / (torch.exp(self.task_log_sigma_weights[task])) + self.task_log_sigma_weights[task]
+                            metric_value / (torch.exp(self.task_log_sigma[task])) + self.task_log_sigma[task]
                             if self.is_multitask
                             else metric_value
                         )
@@ -560,6 +581,8 @@ class Model(_Base_Class, LightningModule):
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
+        for param in self.task_log_sigma.parameters():
+            param.requires_grad = False
         self.zprint(f"**** Fit start with max epochs {self.trainer.max_epochs} ****")
 
     def on_train_epoch_start(self):
@@ -578,14 +601,18 @@ class Model(_Base_Class, LightningModule):
         self.current_min_lr = lrs.min()
         self.n_frozen_layers = 0
         for mod_name, module in self.named_modules():
+            if 'task_log_sigma' in mod_name: continue
             for param_name, param in module.named_parameters(recurse=False):
+                if 'task_log_sigma' in param_name: continue
                 if not param.requires_grad:
                     # self.zprint(f"  Frozen {mod_name}.{param_name}")
                     self.n_frozen_layers += 1
                     break
-        if self.is_multitask and self.current_epoch==10:
-            for param in self.task_log_sigma_weights.parameters():
+        if self.is_multitask and self.current_epoch==self.unfreeze_uncertainty_epoch:
+            self.zprint(f"  Unfreezing task uncertainty parameters")
+            for param in self.task_log_sigma.parameters():
                 param.requires_grad = True
+        # self.zprint([(val.data, val.requires_grad) for val in self.task_log_sigma.values()])
 
     def on_train_epoch_end(self):
         if self.is_global_zero and self.global_step > 0:
@@ -595,7 +622,7 @@ class Model(_Base_Class, LightningModule):
             logged_metrics = self.trainer.logged_metrics
             line =  f"Ep {self.current_epoch:03d}"
             line += f"  bs {self.current_batch_size}"
-            line += f" min/max lr {self.current_min_lr:.1e}/{self.current_max_lr:.1e}"
+            line += f" max lr {self.current_max_lr:.1e}"
             line += f" tr/val loss {logged_metrics['sum_loss/train']:.3f}/"
             sum_loss_val = (
                 logged_metrics['sum_loss/val']
@@ -1722,6 +1749,7 @@ def main(
         dropout: float = 0.0,
         feature_model_layers: Sequence[dict[str, LightningModule]] = None,
         mlp_tasks: dict[str, Sequence] = None,
+        unfreeze_uncertainty_epoch: int = 12,
         # optimizer
         use_optimizer: str = 'adam',
         lr: float = 1e-3,
@@ -1798,6 +1826,7 @@ def main(
         lr_warmup_epochs=lr_warmup_epochs,
         weight_decay=weight_decay,
         monitor_metric=monitor_metric,
+        unfreeze_uncertainty_epoch=unfreeze_uncertainty_epoch,
         # transfer learning with backbone model
         backbone_model_path=backbone_model_path,
         backbone_first_n_layers=backbone_first_n_layers,
@@ -1992,18 +2021,19 @@ if __name__=='__main__':
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        # 'conf_onehot': [None,16,4],
+        'conf_onehot': [None,16,4],
     }
     main(
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        elm_data_file=ml_data.small_data_100,
-        # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
+        confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=30,
         max_epochs=12,
         lr=1e-2,
         lr_warmup_epochs=3,
+        unfreeze_uncertainty_epoch=6,
         batch_size=128,
         fraction_validation=0.2,
         num_workers=2,
@@ -2011,8 +2041,8 @@ if __name__=='__main__':
         confinement_dataset_factor=0.2,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
-        backbone_model_path='experiment_default/r2025_09_12_14_40_59',
-        backbone_unfreeze_at_epoch=5,
+        backbone_model_path='experiment_default/r2025_09_13_12_13_37',
+        backbone_unfreeze_at_epoch=9,
         backbone_first_n_layers=3,
         backbone_initial_lr=1e-3,
         backbone_warmup_rate=2,
