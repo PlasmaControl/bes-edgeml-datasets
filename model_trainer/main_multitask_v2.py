@@ -1937,7 +1937,8 @@ def main(
         precision = precision,
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
-            static_graph=True,
+            static_graph=False,
+            find_unused_parameters=True,
         ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
         use_distributed_sampler=False,
