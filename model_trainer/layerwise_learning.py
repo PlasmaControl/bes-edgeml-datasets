@@ -46,7 +46,6 @@ if __name__=='__main__':
         lr=1e-2,
         lr_warmup_epochs=10,
         lr_scheduler_patience=100,
-        weight_decay=1e-5,
         batch_size={0:128, 20:256, 80:512},
         use_wandb=True,
         early_stopping_patience=200,

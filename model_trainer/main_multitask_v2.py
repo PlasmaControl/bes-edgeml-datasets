@@ -645,7 +645,14 @@ class Model(_Base_Class, LightningModule):
     def on_train_epoch_end(self):
         if self.is_multitask:
             for logger in self.loggers:
-                logger.log_metrics(metrics=self.task_log_sigma, step=self.global_step)
+                logger.log_metrics(
+                    # metrics=self.task_log_sigma, 
+                    metrics={
+                        f'task_log_sigma/{task}': self.task_log_sigma[task].data.item()
+                        for task in self.task_names
+                    },
+                    step=self.global_step,
+                )
         if self.is_global_zero and self.global_step > 0:
             epoch_time = time.time() - self.t_train_epoch_start
             global_time = time.time() - self.t_fit_start
@@ -1971,8 +1978,9 @@ def main(
         precision = precision,
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
-            static_graph=False,
-            find_unused_parameters=True,
+            static_graph=True,
+            # static_graph=False,
+            # find_unused_parameters=True,
         ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
         use_distributed_sampler=False,
@@ -2056,12 +2064,12 @@ if __name__=='__main__':
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        # 'conf_onehot': [None,16,4],
+        'conf_onehot': [None,16,4],
     }
     main(
-        # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        elm_data_file=ml_data.small_data_100,
+        confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=30,
