@@ -9,12 +9,11 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --time=30
-#SBATCH --qos=debug
-
 #SBATCH --signal=SIGTERM@300
 
-###SBATCH --array=0-99%8
+#SBATCH --time=45
+#SBATCH --qos=regular
+#SBATCH --array=0-99%8
 
 module --redirect list
 which python
@@ -47,7 +46,7 @@ echo UNIQUE_IDENTIFIER: ${UNIQUE_IDENTIFIER}
 
 export WANDB__SERVICE_WAIT=500
 
-rand=${RANDOM}
+export rand=${RANDOM}
 echo Random number: ${rand}
 
 SCRIPT=$(cat << END
@@ -71,7 +70,7 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        #### experiment_name='multi_256_v16',
+        experiment_name='multi_256_v16',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
@@ -93,11 +92,11 @@ if __name__=='__main__':
         },
         monitor_metric='sum_loss/train',
         fir_bp=fir_choices[rng.choice(len(fir_choices))],
-        unfreeze_uncertainty_epoch=10, #### 20,
+        unfreeze_uncertainty_epoch=20,
         # training
-        max_epochs=20, #### 500,
+        max_epochs=500,
         lr=1e-2,
-        lr_warmup_epochs=5, #### 10,
+        lr_warmup_epochs=10,
         lr_scheduler_patience=100,
         batch_size={0:128, 20:256, 80:512},
         use_wandb=True,
