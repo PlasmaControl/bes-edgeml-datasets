@@ -82,7 +82,7 @@ class Model(_Base_Class, LightningModule):
     lr_scheduler_patience: int = 100
     lr_scheduler_threshold: float = 1e-3
     lr_warmup_epochs: int = 2
-    weight_decay: float = 1e-6
+    weight_decay: float = 1e-4
     leaky_relu_slope: float = 2e-2
     monitor_metric: str = None
     use_optimizer: str = 'adam'
@@ -125,22 +125,27 @@ class Model(_Base_Class, LightningModule):
             self.mlp_tasks = {
                 'elm_class': [self.feature_space_size, 16, 1],
             }
-        
+
+        self.task_names = list(self.mlp_tasks.keys())
+        for task_name in self.task_names:
+            assert task_name in ['elm_class', 'conf_onehot'], f"Unknown task {task_name}"
+        self.is_multitask = len(self.task_names) > 1
+
         # set input layer size
-        for task in self.mlp_tasks:
-            self.mlp_tasks[task][0] = self.feature_space_size
-            if 'class' in task:
-                assert self.mlp_tasks[task][-1] == 1
-            elif 'onehot' in task:
-                assert self.mlp_tasks[task][-1] > 1
+        for task_name in self.task_names:
+            self.mlp_tasks[task_name][0] = self.feature_space_size
+            if 'class' in task_name:
+                assert self.mlp_tasks[task_name][-1] == 1
+            elif 'onehot' in task_name:
+                assert self.mlp_tasks[task_name][-1] > 1
 
         # create MLP configs
         self.task_configs = {}
-        for task, mlp_layers in self.mlp_tasks.items():
-            self.task_configs[task] = {}
-            self.task_configs[task]['layers'] = mlp_layers
-            if 'class' in task:
-                self.task_configs[task]['metrics'] = {
+        for task_name in self.task_names:
+            self.task_configs[task_name] = {}
+            self.task_configs[task_name]['layers'] = self.mlp_tasks[task_name]
+            if 'class' in task_name:
+                self.task_configs[task_name]['metrics'] = {
                         'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
                         'f1_score': sklearn.metrics.f1_score,
                         'precision_score': sklearn.metrics.precision_score,
@@ -148,9 +153,9 @@ class Model(_Base_Class, LightningModule):
                         'mean_stat': torch.mean,
                         'std_stat': torch.std,
                     }
-                self.task_configs[task]['monitor_metric'] = 'f1_score/val'
-            elif 'onehot' in task:
-                self.task_configs[task]['metrics'] = {
+                self.task_configs[task_name]['monitor_metric'] = 'f1_score/val'
+            elif 'onehot' in task_name:
+                self.task_configs[task_name]['metrics'] = {
                     'ce_loss': torch.nn.functional.cross_entropy,
                     'f1_score': sklearn.metrics.f1_score,
                     'precision_score': sklearn.metrics.precision_score,
@@ -158,21 +163,20 @@ class Model(_Base_Class, LightningModule):
                     'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
                     'std_stat': torch.std,
                 }
-                self.task_configs[task]['monitor_metric'] = 'f1_score/val'
+                self.task_configs[task_name]['monitor_metric'] = 'f1_score/val'
 
         # make task sub-models
-        self.task_names = list(self.task_configs.keys())
         self.task_metrics: dict[str, dict] = {}
         self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
         self.task_log_sigma: torch.nn.ParameterDict = torch.nn.ParameterDict()
-        self.is_multitask = len(self.task_configs) > 1
-        for task_name, task_dict in self.task_configs.items():
+        for task_name in self.task_names:
+            task_dict = self.task_configs[task_name]
             self.zprint(f'Task sub-model: {task_name}')
             task_layers: tuple[int] = task_dict['layers']
             task_metrics: dict = task_dict['metrics']
             self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
             self.task_metrics[task_name] = task_metrics.copy()
-            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.zeros(1))})
+            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.zeros(1), requires_grad=False)})
             if self.monitor_metric is None:
                 # if not specified, use `monitor_metric` from first task
                 self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
@@ -378,31 +382,44 @@ class Model(_Base_Class, LightningModule):
         self.zprint(f"  Reduce on plateau threshold {self.lr_scheduler_threshold:.1e} and patience {self.lr_scheduler_patience:d}")
         self.zprint(f"  Unfreeze uncertainty epoch: {self.unfreeze_uncertainty_epoch:d}")
 
-        # for mod_name, module in self.named_modules():
-        #     self.zprint(f"Module {mod_name}")
-        #     for param_name, param in module.named_parameters(recurse=False):
-        #         self.zprint(f"  Param {param_name}")
-        # for param_name, param in self.named_parameters():
-        #     self.zprint(f"Parameter {param_name} requires_grad={param.requires_grad}")
+        params_weights = {'params': []}
+        params_biases = {'params': []}
+        params_batchnorms = {'params': []}
 
-        params_weights = {
-            'params': [param for param_name, param in self.named_parameters() if 'weight' in param_name and param.requires_grad],
-        }
-        params_biases = {
-            'params': [param for param_name, param in self.named_parameters() if 'bias' in param_name and param.requires_grad],
-            'weight_decay': 0.,
-        }
-        params_sigmas = {
-            'params': [param for param_name, param in self.named_parameters() if 'sigma' in param_name and param.requires_grad],
-            'lr': self.lr * 1e-2,
-            'weight_decay': 0.,
-        }
+        for pname, p in self.named_parameters():
+            if not p.requires_grad:
+                continue
+            if 'BatchNorm' in pname:
+                params_batchnorms['params'].append(p)
+            elif 'sigma' in pname:
+                continue
+            elif 'bias' in pname:
+                params_biases['params'].append(p)
+            elif 'weight' in pname:
+                params_weights['params'].append(p)
+            else:
+                raise ValueError(f"Unknown parameter name {pname}")
+        params_biases['weight_decay'] = 0.
+        params_batchnorms['lr'] = self.lr / 10
+        params_batchnorms['weight_decay'] = 0.
+        # params_sigmas['lr'] = self.lr / 10
+        # params_sigmas['weight_decay'] = 0.
+
+        # params_weights = {
+        #     'params': [param for param_name, param in self.named_parameters() if 'weight' in param_name and param.requires_grad],
+        # }
+        # params_biases = {
+        #     'params': [param for param_name, param in self.named_parameters() if 'bias' in param_name and param.requires_grad],
+        #     'weight_decay': 0.,
+        # }
+        # params_sigmas = {
+        #     'params': [param for param_name, param in self.named_parameters() if 'sigma' in param_name and param.requires_grad],
+        #     'lr': self.lr * 1e-2,
+        #     'weight_decay': 0.,
+        # }
 
         optim_kwargs = {
-            # 'params': self.make_parameter_list(),
-            # 'params': self.named_parameters(),
-            # 'params': filter(lambda p: p[1].requires_grad and 'sigma' not in p[0], self.named_parameters()),
-            'params': [params_weights, params_biases, params_sigmas],
+            'params': [params_weights, params_biases, params_batchnorms],
             'lr': self.lr,
             'weight_decay': self.weight_decay,
         }
@@ -569,21 +586,21 @@ class Model(_Base_Class, LightningModule):
             batch: dict|list, 
     ) -> dict[str, torch.Tensor]:
         results = {}
-        for task_name, task_model in self.task_models.items():
+        for task_name in self.task_names:
             x = (
                 batch[task_name][0]
                 if isinstance(batch, dict) 
                 else batch[0]
             )
             features = self.feature_model(x)
-            results[task_name] = task_model(features)
+            results[task_name] = self.task_models[task_name](features)
         return results
 
     def on_fit_start(self):
         self.t_fit_start = time.time()
-        for param in self.task_log_sigma.parameters():
-            param.requires_grad = False
         self.zprint(f"**** Fit start with max epochs {self.trainer.max_epochs} ****")
+        # for param in self.task_log_sigma.parameters():
+        #     param.requires_grad = False
 
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
@@ -609,12 +626,26 @@ class Model(_Base_Class, LightningModule):
                     self.n_frozen_layers += 1
                     break
         if self.is_multitask and self.current_epoch==self.unfreeze_uncertainty_epoch:
-            self.zprint(f"  Unfreezing task uncertainty parameters")
-            for param in self.task_log_sigma.parameters():
-                param.requires_grad = True
-        # self.zprint([(val.data, val.requires_grad) for val in self.task_log_sigma.values()])
+            self.zprint(f"  Unfreezing task uncertainty parameters and adding to optimizer")
+            # for param in self.task_log_sigma.parameters():
+            #     param.requires_grad = True
+            self.task_log_sigma.requires_grad_(True)
+            params_sigmas = {
+                'params': list(self.task_log_sigma.values()),
+                'lr': self.lr * 1e-2,
+                'weight_decay': 0.,
+            }
+            optimizers = self.optimizers()
+            if isinstance(optimizers, list):
+                for optimizer in optimizers:
+                    optimizer.add_param_group(params_sigmas)
+            else:
+                optimizers.add_param_group(params_sigmas)
 
     def on_train_epoch_end(self):
+        if self.is_multitask:
+            for logger in self.loggers:
+                logger.log_metrics(metrics=self.task_log_sigma, step=self.global_step)
         if self.is_global_zero and self.global_step > 0:
             epoch_time = time.time() - self.t_train_epoch_start
             global_time = time.time() - self.t_fit_start
@@ -703,6 +734,9 @@ class Data(_Base_Class, LightningDataModule):
         self.trainer: Trainer = None
 
         self.state_items = []
+
+        for task_name in self.tasks:
+            assert task_name in ['elm_class', 'conf_onehot'], f"Unknown task {task_name}"
 
         self.signal_standardization_mean: float = None
         self.signal_standardization_stdev: float = None
@@ -2022,29 +2056,29 @@ if __name__=='__main__':
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        'conf_onehot': [None,16,4],
+        # 'conf_onehot': [None,16,4],
     }
     main(
-        confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        # elm_data_file=ml_data.small_data_100,
+        # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
+        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=30,
-        max_epochs=12,
+        max_epochs=10,
         lr=1e-2,
         lr_warmup_epochs=3,
-        unfreeze_uncertainty_epoch=6,
+        unfreeze_uncertainty_epoch=5,
         batch_size=128,
         fraction_validation=0.2,
         num_workers=2,
         max_confinement_event_length=int(20e3),
         confinement_dataset_factor=0.2,
-        # use_wandb=True,
+        use_wandb=True,
         monitor_metric='sum_loss/train',
-        backbone_model_path='experiment_default/r2025_09_13_12_13_37',
-        backbone_unfreeze_at_epoch=9,
-        backbone_first_n_layers=3,
-        backbone_initial_lr=1e-3,
-        backbone_warmup_rate=2,
+        # backbone_model_path='experiment_default/r2025_09_13_12_13_37',
+        # backbone_unfreeze_at_epoch=9,
+        # backbone_first_n_layers=3,
+        # backbone_initial_lr=1e-3,
+        # backbone_warmup_rate=2,
     )
