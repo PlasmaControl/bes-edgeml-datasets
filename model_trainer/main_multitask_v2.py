@@ -176,7 +176,8 @@ class Model(_Base_Class, LightningModule):
             task_metrics: dict = task_dict['metrics']
             self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
             self.task_metrics[task_name] = task_metrics.copy()
-            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.zeros(1), requires_grad=False)})
+            sigma_value = -1 ## if task_name == 'elm_class' else -3
+            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.zeros(sigma_value), requires_grad=False)})
             if self.monitor_metric is None:
                 # if not specified, use `monitor_metric` from first task
                 self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
@@ -399,9 +400,9 @@ class Model(_Base_Class, LightningModule):
                 params_weights['params'].append(p)
             else:
                 raise ValueError(f"Unknown parameter name {pname}")
-        params_biases['weight_decay'] = 0.
-        params_batchnorms['lr'] = self.lr / 10
-        params_batchnorms['weight_decay'] = 0.
+        # params_biases['weight_decay'] = 0.
+        params_batchnorms['lr'] = self.lr * 1e-2
+        # params_batchnorms['weight_decay'] = 0.
         # params_sigmas['lr'] = self.lr / 10
         # params_sigmas['weight_decay'] = 0.
 
@@ -627,12 +628,10 @@ class Model(_Base_Class, LightningModule):
                     break
         if self.is_multitask and self.current_epoch==self.unfreeze_uncertainty_epoch:
             self.zprint(f"  Unfreezing task uncertainty parameters and adding to optimizer")
-            # for param in self.task_log_sigma.parameters():
-            #     param.requires_grad = True
             self.task_log_sigma.requires_grad_(True)
             params_sigmas = {
                 'params': list(self.task_log_sigma.values()),
-                'lr': self.lr * 1e-2,
+                # 'lr': self.lr / 10,
                 'weight_decay': 0.,
             }
             optimizers = self.optimizers()

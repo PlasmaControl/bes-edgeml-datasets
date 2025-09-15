@@ -1,12 +1,8 @@
-import os
 from numpy import random
 from model_trainer.main_multitask_v2 import main
 
 if __name__=='__main__':
-    seed = os.environ.get('rand', None)
-    if seed is not None: seed = int(seed)
-    print(f'RNG seed: {seed}')
-    rng = random.default_rng(seed=seed)
+    rng = random.default_rng()
 
     fir_choices = (
         (8, None),
@@ -40,12 +36,13 @@ if __name__=='__main__':
         },
         monitor_metric='sum_loss/train',
         fir_bp=fir_choices[rng.choice(len(fir_choices))],
-        unfreeze_uncertainty_epoch=20,
+        unfreeze_uncertainty_epoch=10,
         # training
         max_epochs=500,
-        lr=1e-2,
+        lr=rng.choice([3e-3, 1e-2]),
         lr_warmup_epochs=10,
         lr_scheduler_patience=100,
+        weight_decay=rng.choice([1e-5, 1e-4, 1e-3]),
         batch_size={0:128, 20:256, 80:512},
         use_wandb=True,
         early_stopping_patience=200,
