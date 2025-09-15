@@ -630,7 +630,7 @@ class Model(_Base_Class, LightningModule):
             self.task_log_sigma.requires_grad_(True)
             params_sigmas = {
                 'params': list(self.task_log_sigma.values()),
-                # 'lr': self.lr / 10,
+                'lr': self.lr / 10,
                 'weight_decay': 0.,
             }
             optimizers = self.optimizers()
