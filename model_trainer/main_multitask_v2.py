@@ -176,8 +176,7 @@ class Model(_Base_Class, LightningModule):
             task_metrics: dict = task_dict['metrics']
             self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
             self.task_metrics[task_name] = task_metrics.copy()
-            sigma_value = -1 ## if task_name == 'elm_class' else -3
-            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.zeros(sigma_value), requires_grad=False)})
+            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.tensor([-1.]), requires_grad=False)})
             if self.monitor_metric is None:
                 # if not specified, use `monitor_metric` from first task
                 self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
