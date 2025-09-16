@@ -91,7 +91,7 @@ if __name__=='__main__':
         unfreeze_uncertainty_epoch=10,
         # training
         max_epochs=500,
-        lr=1e-2,
+        lr=rng.choice([3e-3, 1e-2]),
         lr_warmup_epochs=10,
         lr_scheduler_patience=100,
         weight_decay=rng.choice([1e-5, 1e-4, 1e-3]),

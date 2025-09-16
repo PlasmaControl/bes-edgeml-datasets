@@ -93,7 +93,7 @@ class Model(_Base_Class, LightningModule):
     dropout: float = 0.0
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
     mlp_tasks: dict[str, Sequence] = None
-    unfreeze_uncertainty_epoch: int = 12
+    unfreeze_uncertainty_epoch: int = -1
     backbone_model_path: str|Path = None
     backbone_first_n_layers: int = None
 
@@ -176,11 +176,12 @@ class Model(_Base_Class, LightningModule):
             task_metrics: dict = task_dict['metrics']
             self.task_models[task_name] = self.make_mlp_classifier(mlp_layers=task_layers)
             self.task_metrics[task_name] = task_metrics.copy()
-            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.tensor([-1.]), requires_grad=False)})
+            self.task_log_sigma.update({task_name: torch.nn.Parameter(torch.tensor([-1.]))})
             if self.monitor_metric is None:
                 # if not specified, use `monitor_metric` from first task
                 self.monitor_metric = f"{task_name}/{task_dict['monitor_metric']}"
         self.save_hyperparameters({'monitor_metric': self.monitor_metric})
+        self.task_log_sigma.requires_grad_ = True if self.unfreeze_uncertainty_epoch == -1 else False
 
         self.zprint(f"Total model parameters: {self.param_count(self):,d}")
 
@@ -385,6 +386,7 @@ class Model(_Base_Class, LightningModule):
         params_weights = {'params': []}
         params_biases = {'params': []}
         params_batchnorms = {'params': []}
+        params_sigmas = {'params': []}
 
         for pname, p in self.named_parameters():
             if not p.requires_grad:
@@ -392,7 +394,11 @@ class Model(_Base_Class, LightningModule):
             if 'BatchNorm' in pname:
                 params_batchnorms['params'].append(p)
             elif 'sigma' in pname:
-                continue
+                if self.unfreeze_uncertainty_epoch == -1:
+                    p.requires_grad_(True)
+                    params_sigmas['params'].append(p)
+                else:
+                    p.requires_grad_(False)
             elif 'bias' in pname:
                 params_biases['params'].append(p)
             elif 'weight' in pname:
@@ -400,10 +406,13 @@ class Model(_Base_Class, LightningModule):
             else:
                 raise ValueError(f"Unknown parameter name {pname}")
         # params_biases['weight_decay'] = 0.
-        params_batchnorms['lr'] = self.lr * 1e-2
+        params_batchnorms['lr'] = self.lr / 100
         # params_batchnorms['weight_decay'] = 0.
-        # params_sigmas['lr'] = self.lr / 10
-        # params_sigmas['weight_decay'] = 0.
+        if params_sigmas['params']:
+            params_sigmas['lr'] = self.lr / 100
+            params_sigmas['weight_decay'] = 0.
+        # else:
+        #     params_sigmas = {}
 
         # params_weights = {
         #     'params': [param for param_name, param in self.named_parameters() if 'weight' in param_name and param.requires_grad],
@@ -419,7 +428,8 @@ class Model(_Base_Class, LightningModule):
         # }
 
         optim_kwargs = {
-            'params': [params_weights, params_biases, params_batchnorms],
+            'params': [
+                params_weights, params_biases, params_batchnorms, params_sigmas],
             'lr': self.lr,
             'weight_decay': self.weight_decay,
         }
@@ -522,7 +532,8 @@ class Model(_Base_Class, LightningModule):
             dataloader_idx = None,
             stage: str = '', 
     ) -> torch.Tensor:
-        sum_loss = torch.Tensor([0.0])
+        sum_loss = torch.Tensor([0.])
+        prod_loss = torch.Tensor([0.])
         model_outputs = self(batch)
         for task in model_outputs:
             task_outputs: torch.Tensor = model_outputs[task]
@@ -534,7 +545,8 @@ class Model(_Base_Class, LightningModule):
                         metric_value = metric_function(
                             input=task_outputs.reshape_as(labels),
                             target=labels.type_as(task_outputs),
-                        )                        
+                        )
+                        prod_loss = prod_loss * metric_value if prod_loss else metric_value
                         metric_weighted = (
                             metric_value / (torch.exp(self.task_log_sigma[task])) + self.task_log_sigma[task]
                             if self.is_multitask
@@ -558,6 +570,7 @@ class Model(_Base_Class, LightningModule):
                             input=task_outputs,
                             target=labels.flatten(),
                         )
+                        prod_loss = prod_loss * metric_value if prod_loss else metric_value
                         metric_weighted = (
                             metric_value / (torch.exp(self.task_log_sigma[task])) + self.task_log_sigma[task]
                             if self.is_multitask
@@ -579,6 +592,7 @@ class Model(_Base_Class, LightningModule):
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
 
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
+        self.log(f"prod_loss/{stage}", prod_loss, sync_dist=True)
         return sum_loss
 
     def forward(
@@ -1788,7 +1802,7 @@ def main(
         dropout: float = 0.0,
         feature_model_layers: Sequence[dict[str, LightningModule]] = None,
         mlp_tasks: dict[str, Sequence] = None,
-        unfreeze_uncertainty_epoch: int = 12,
+        unfreeze_uncertainty_epoch: int = -1,
         # optimizer
         use_optimizer: str = 'adam',
         lr: float = 1e-3,
@@ -2058,7 +2072,7 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
-        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+        # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
         'elm_class': [None,16,1],
@@ -2070,15 +2084,16 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=30,
-        max_epochs=10,
+        max_elms=40,
+        max_epochs=40,
         lr=1e-2,
-        lr_warmup_epochs=3,
-        unfreeze_uncertainty_epoch=5,
-        batch_size=128,
+        lr_warmup_epochs=5,
+        # unfreeze_uncertainty_epoch=5,
+        weight_decay=1e-4,
+        batch_size={0:64, 5:128, 10: 256},
         fraction_validation=0.2,
-        num_workers=2,
-        max_confinement_event_length=int(20e3),
+        num_workers=0,
+        max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.2,
         use_wandb=True,
         monitor_metric='sum_loss/train',
