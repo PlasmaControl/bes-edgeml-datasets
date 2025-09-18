@@ -5,6 +5,8 @@ from typing import OrderedDict, Sequence
 import os
 import time
 import re
+import traceback
+
 
 import lightning
 import lightning.pytorch
@@ -21,6 +23,9 @@ import torch.cuda
 import torch.optim
 import torch.optim.lr_scheduler
 import torch.utils.data
+import torch.multiprocessing as mp
+mp.set_start_method('spawn', force=True)
+
 
 from lightning.pytorch import Trainer, LightningModule, LightningDataModule
 from lightning.pytorch.strategies import DDPStrategy
@@ -1732,15 +1737,18 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
         return len(self.sw_list)
     
     def __getitem__(self, i: int) -> tuple:
-        sw_metadata = self.sw_list[i]
-        i_t0 = sw_metadata['i_t0']
-        time_to_elm = sw_metadata['time_to_elm']
-        elm_index = sw_metadata['elm_index']
-        signals = self.elms_to_signals_dict[elm_index]
-        signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
-        quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
-        return signal_window, quantile_binary_label, time_to_elm
-
+        try:
+            sw_metadata = self.sw_list[i]
+            i_t0 = sw_metadata['i_t0']
+            time_to_elm = sw_metadata['time_to_elm']
+            elm_index = sw_metadata['elm_index']
+            signals = self.elms_to_signals_dict[elm_index]
+            signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
+            quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
+            return signal_window, quantile_binary_label, time_to_elm
+        except Exception:
+            traceback.print_exc()
+            raise
 
 @dataclasses.dataclass(eq=False)
 class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
@@ -1772,22 +1780,26 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
         return self.sample_indices.numel()
     
     def __getitem__(self, i: int) -> tuple:
-        # Retrieve the index from sample_indices that is guaranteed to have enough previous data
-        i_t0 = self.sample_indices[i]
-        # Define the start index for the signal window to look backwards
-        start_index = i_t0 - self.signal_window_size + 1
-        # Retrieve the signal window from start_index to i_t0 (inclusive)
-        signal_window = self.signals[:, start_index:i_t0 + 1, :, :]
-        # The label is typically the current index in real-time scenarios
-        label = self.labels[i_t0: i_t0 + 1]
-        # Look up the correct confinement_mode_key based on i_t0
-        i_key = (self.window_start_indices <= i_t0).nonzero().max()
-        shot_event_key = self.shot_event_keys[i_key]
-        # Convert the key to an integer by removing non-numeric characters and converting to int
-        confinement_mode_id_int = int(shot_event_key.replace('/', ''))
-        # Convert to tensor
-        confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
-        return signal_window, label, confinement_mode_id_tensor
+        try:
+            # Retrieve the index from sample_indices that is guaranteed to have enough previous data
+            i_t0 = self.sample_indices[i]
+            # Define the start index for the signal window to look backwards
+            start_index = i_t0 - self.signal_window_size + 1
+            # Retrieve the signal window from start_index to i_t0 (inclusive)
+            signal_window = self.signals[:, start_index:i_t0 + 1, :, :]
+            # The label is typically the current index in real-time scenarios
+            label = self.labels[i_t0: i_t0 + 1]
+            # Look up the correct confinement_mode_key based on i_t0
+            i_key = (self.window_start_indices <= i_t0).nonzero().max()
+            shot_event_key = self.shot_event_keys[i_key]
+            # Convert the key to an integer by removing non-numeric characters and converting to int
+            confinement_mode_id_int = int(shot_event_key.replace('/', ''))
+            # Convert to tensor
+            confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
+            return signal_window, label, confinement_mode_id_tensor
+        except Exception:
+            traceback.print_exc()
+            raise
 
 
 def main(
@@ -1988,12 +2000,12 @@ def main(
         enable_progress_bar = False,
         enable_model_summary = False,
         precision = precision,
-        strategy = DDPStrategy(
-            gradient_as_bucket_view=True,
-            static_graph=True,
-            # static_graph=False,
-            # find_unused_parameters=True,
-        ) if world_size>1 else 'auto',
+        strategy = 'ddp' if world_size>1 else 'auto',
+        # strategy = DDPStrategy(
+        #     gradient_as_bucket_view=True,
+        #     static_graph=True,
+        #     start_method='forkserver',
+        # ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
         use_distributed_sampler=False,
         num_sanity_val_steps=2,
@@ -2092,7 +2104,7 @@ if __name__=='__main__':
         weight_decay=1e-4,
         batch_size={0:64, 5:128, 10: 256},
         fraction_validation=0.2,
-        num_workers=0,
+        num_workers=2,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.2,
         use_wandb=True,
