@@ -9,7 +9,7 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --signal=SIGTERM@300
+#SBATCH --signal=SIGTERM@180
 
 #SBATCH --time=30
 #SBATCH --qos=debug

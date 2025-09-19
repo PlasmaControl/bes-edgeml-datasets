@@ -539,6 +539,7 @@ class Model(_Base_Class, LightningModule):
     ) -> torch.Tensor:
         sum_loss = torch.Tensor([0.])
         prod_loss = torch.Tensor([0.])
+        sum_score = 0.
         model_outputs = self(batch)
         for task in model_outputs:
             task_outputs: torch.Tensor = model_outputs[task]
@@ -564,6 +565,8 @@ class Model(_Base_Class, LightningModule):
                             y_true=labels.detach().cpu(),
                             zero_division=0,
                         )
+                        if metric_name == 'f1_score':
+                            sum_score = sum_score + metric_value if sum_score else metric_value
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
@@ -592,12 +595,15 @@ class Model(_Base_Class, LightningModule):
                             zero_division=0,
                             average='macro',
                         )
+                        if metric_name == 'f1_score':
+                            sum_score = sum_score + metric_value if sum_score else metric_value
                     elif 'stat' in metric_name:
                         metric_value = metric_function(task_outputs).item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
 
         self.log(f"sum_loss/{stage}", sum_loss, sync_dist=True)
         self.log(f"prod_loss/{stage}", prod_loss, sync_dist=True)
+        self.log(f"sum_score/{stage}", sum_score, sync_dist=True)
         return sum_loss
 
     def forward(
@@ -645,19 +651,21 @@ class Model(_Base_Class, LightningModule):
                     self.n_frozen_layers += 1
                     break
         if self.is_multitask and self.current_epoch==self.unfreeze_uncertainty_epoch:
-            self.zprint(f"  Unfreezing task uncertainty parameters and adding to optimizer")
-            self.task_log_sigma.requires_grad_(True)
-            params_sigmas = {
-                'params': list(self.task_log_sigma.values()),
-                'lr': self.lr / 10,
-                'weight_decay': 0.,
-            }
-            optimizers = self.optimizers()
-            if isinstance(optimizers, list):
-                for optimizer in optimizers:
-                    optimizer.add_param_group(params_sigmas)
-            else:
-                optimizers.add_param_group(params_sigmas)
+            pass
+            # self.zprint(f"  Unfreezing task uncertainty parameters and adding to optimizer")
+            # for p in self.task_log_sigma.parameters():
+            #     p.requires_grad = True
+            # params_sigmas = {
+            #     'params': list(self.task_log_sigma.values()),
+            #     'lr': self.lr / 10,
+            #     'weight_decay': 0.,
+            # }
+            # optimizers = self.optimizers()
+            # if isinstance(optimizers, list):
+            #     for optimizer in optimizers:
+            #         optimizer.add_param_group(params_sigmas)
+            # else:
+            #     optimizers.add_param_group(params_sigmas)
 
     def on_train_epoch_end(self):
         if self.is_multitask:
@@ -1820,6 +1828,7 @@ def main(
         deepest_layer_lr_factor: float = 1.0,
         lr_warmup_epochs: int = 2,
         lr_scheduler_patience: int = 100,
+        lr_scheduler_threshold: float = 0.,
         monitor_metric = None,
         # transfer learning with backbone model
         backbone_model_path: str|Path = None,
@@ -1885,6 +1894,7 @@ def main(
         use_optimizer=use_optimizer,
         lr=lr,
         lr_scheduler_patience=lr_scheduler_patience,
+        lr_scheduler_threshold=lr_scheduler_threshold,
         deepest_layer_lr_factor=deepest_layer_lr_factor,
         lr_warmup_epochs=lr_warmup_epochs,
         weight_decay=weight_decay,
@@ -2092,12 +2102,12 @@ if __name__=='__main__':
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=40,
-        max_epochs=40,
+        max_epochs=10,
         lr=1e-2,
         lr_warmup_epochs=5,
-        unfreeze_uncertainty_epoch=5,
         weight_decay=1e-4,
-        batch_size={0:64, 5:128, 10: 256},
+        # batch_size={0:64, 5:128, 10: 256},
+        batch_size=128,
         fraction_validation=0.2,
         num_workers=2,
         max_confinement_event_length=int(30e3),

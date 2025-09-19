@@ -18,11 +18,11 @@ if __name__=='__main__':
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=80,
+        max_elms=rng.choice([60,80]),
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.3,
         fraction_validation=0.15,
-        num_workers=8,
+        num_workers=4,
         # model
         feature_model_layers = (
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
@@ -33,16 +33,16 @@ if __name__=='__main__':
             'elm_class': [None, 32, 1],
             'conf_onehot': [None, 32, 4],
         },
-        monitor_metric='sum_loss/train',
+        monitor_metric='sum_score/train',
         fir_bp=fir_choices[rng.choice(len(fir_choices))],
-        unfreeze_uncertainty_epoch=5,
         # training
         max_epochs=500,
         lr=rng.choice([3e-3, 1e-2]),
         lr_warmup_epochs=10,
-        lr_scheduler_patience=100,
+        lr_scheduler_patience=50,
+        lr_scheduler_threshold=1e-2,
         weight_decay=rng.choice([1e-5, 1e-4, 1e-3]),
-        batch_size={0:128, 20:256, 80:512},
+        batch_size=256,
         use_wandb=True,
         early_stopping_patience=200,
     )
