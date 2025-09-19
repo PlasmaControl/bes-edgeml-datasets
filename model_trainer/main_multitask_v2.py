@@ -1366,9 +1366,7 @@ class Data(_Base_Class, LightningDataModule):
     def setup_confinement_data_for_rank(self, sub_stage: str):
         self.zprint("  \u2B1C " + f"Setup confinement data for stage {sub_stage.capitalize()}")
         t_tmp = time.time()
-        # global_stage_events = self.global_stage_to_events[sub_stage]
         # TODO move rankwise_stage_event_split to prepare_conf_data()
-        # rankwise_event_list = self.broadcast(rankwise_event_list)
         self.stage_to_rank_to_event_mapping = self.broadcast(self.stage_to_rank_to_event_mapping)
         self.elm_sw_count_by_stage = self.broadcast(self.elm_sw_count_by_stage)
 
@@ -1929,11 +1927,9 @@ def main(
         backbone_scheduler = BackboneFinetuning(
             unfreeze_backbone_at_epoch=backbone_unfreeze_at_epoch,
             lambda_func=lambda _: backbone_warmup_rate,
-            # backbone_initial_ratio_lr=backbone_initial_ratio_lr,
             backbone_initial_lr=backbone_initial_lr,
             initial_denom_lr=1,
             train_bn=False,
-            # verbose=True,
         )
         callbacks.append(backbone_scheduler)
 
@@ -2000,12 +1996,11 @@ def main(
         enable_progress_bar = False,
         enable_model_summary = False,
         precision = precision,
-        strategy = 'ddp' if world_size>1 else 'auto',
-        # strategy = DDPStrategy(
-        #     gradient_as_bucket_view=True,
-        #     static_graph=True,
-        #     start_method='forkserver',
-        # ) if world_size>1 else 'auto',
+        # strategy = 'ddp' if world_size>1 else 'auto',
+        strategy = DDPStrategy(
+            gradient_as_bucket_view=True,
+            static_graph=True,
+        ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
         use_distributed_sampler=False,
         num_sanity_val_steps=2,
@@ -2100,7 +2095,7 @@ if __name__=='__main__':
         max_epochs=40,
         lr=1e-2,
         lr_warmup_epochs=5,
-        # unfreeze_uncertainty_epoch=5,
+        unfreeze_uncertainty_epoch=5,
         weight_decay=1e-4,
         batch_size={0:64, 5:128, 10: 256},
         fraction_validation=0.2,

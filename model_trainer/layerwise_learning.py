@@ -14,7 +14,7 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v16',
+        experiment_name='multi_256_v17',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
@@ -24,7 +24,6 @@ if __name__=='__main__':
         fraction_validation=0.15,
         num_workers=8,
         # model
-        use_optimizer='adam',
         feature_model_layers = (
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
             {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
@@ -36,7 +35,7 @@ if __name__=='__main__':
         },
         monitor_metric='sum_loss/train',
         fir_bp=fir_choices[rng.choice(len(fir_choices))],
-        unfreeze_uncertainty_epoch=10,
+        unfreeze_uncertainty_epoch=5,
         # training
         max_epochs=500,
         lr=rng.choice([3e-3, 1e-2]),
