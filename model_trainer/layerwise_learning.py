@@ -14,7 +14,7 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v17',
+        experiment_name='multi_256_v18',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
@@ -44,5 +44,5 @@ if __name__=='__main__':
         weight_decay=rng.choice([1e-5, 1e-4, 1e-3]),
         batch_size=256,
         use_wandb=True,
-        early_stopping_patience=200,
+        early_stopping_patience=125,
     )
