@@ -258,12 +258,12 @@ class Model(_Base_Class, LightningModule):
         n_feature_layers = len(self.feature_model_layers)
 
         for i_mlp_layer in range(n_mlp_layers-1):
-            # batch norm
             i_layer = n_feature_layers + i_mlp_layer
-            if self.batch_norm:
-                layer_name = f"L{i_layer:02d}_BatchNorm"
-                mlp_layer_dict[layer_name] = torch.nn.BatchNorm1d(mlp_layers[i_mlp_layer])
-                self.zprint(f'  {layer_name} (regularization)')
+            # # batch norm
+            # if self.batch_norm:
+            #     layer_name = f"L{i_layer:02d}_BatchNorm"
+            #     mlp_layer_dict[layer_name] = torch.nn.BatchNorm1d(mlp_layers[i_mlp_layer])
+            #     self.zprint(f'  {layer_name} (regularization)')
             # fully-connected layer
             layer_name = f"L{i_layer:02d}_FC"
             bias = (True and (self.no_bias==False)) if i_mlp_layer<n_mlp_layers-2 else False
