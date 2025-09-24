@@ -339,6 +339,9 @@ class Model(_Base_Class, LightningModule):
         )
         src_state_dict = source_model['state_dict']
         for param_name in list(src_state_dict.keys()):
+            if param_name.startswith('backbone'):
+                src_state_dict.pop(param_name)
+                continue
             if not param_name.endswith(('bias', 'weight')):
                 src_state_dict.pop(param_name)
                 continue
