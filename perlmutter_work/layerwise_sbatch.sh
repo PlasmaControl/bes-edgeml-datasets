@@ -11,9 +11,9 @@
 
 #SBATCH --signal=SIGTERM@180
 
-#SBATCH --time=30
-#SBATCH --qos=debug
-#SBATCH --array=0-4
+#SBATCH --time=45
+#SBATCH --qos=regular
+#SBATCH --array=0-77%8
 
 module --redirect list
 which python
