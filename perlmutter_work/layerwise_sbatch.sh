@@ -13,7 +13,7 @@
 
 #SBATCH --time=45
 #SBATCH --qos=regular
-#SBATCH --array=0-77%8
+#SBATCH --array=0-12%8
 
 module --redirect list
 which python
@@ -52,28 +52,19 @@ from model_trainer.main_multitask_v2 import main
 
 if __name__=='__main__':
     jobs = (
-        #
-        ('r43041913_0_2025_09_25_10_03_58', (None, 100), 90, 1e-4),
-        ('r43041898_1_2025_09_24_00_47_31', (None, 100), 90, 1e-4),
-        ('r43041901_2_2025_09_24_15_35_08', (12, None), 90, 1e-5),
-        # ('r42970915_1_2025_09_21_19_50_54', (None, 100), 60, 1e-5),
-        # ('r42970920_6_2025_09_21_22_46_24', (None, 200), 60, 1e-4),
-        # ('r42970967_1_2025_09_22_04_52_37', (None, 100), 60, 1e-5),
-        ('r43041912_6_2025_09_25_05_32_06', (None, 100), 90, 1e-4),
-        ('r43041913_7_2025_09_25_11_10_26', (12, None), 90, 1e-5),
-        ('r43041913_8_2025_09_25_12_26_10', (None, 100), 90, 1e-4),
-        ('r43041912_9_2025_09_25_06_30_23', (None, 100), 90, 1e-5),
-        #
-        ('r43041912_10_2025_09_25_07_08_03', (None, 200), 120, 1e-5),
-        # ('r42970967_8_2025_09_22_05_19_30', (None, 200), 80, 1e-5),
-        ('r43041912_12_2025_09_25_07_41_36', (None, 200), 120, 1e-5),
-        ('r43041898_13_2025_09_24_12_48_10', (None, 200), 120, 1e-5),
-        # ('r42970939_15_2025_09_22_04_09_45', (12, None), 80, 1e-5),
-        ('r43041898_15_2025_09_24_13_11_37', (None, 200), 120, 1e-5),
-        ('r43041912_16_2025_09_25_08_28_04', (None, 200), 120, 1e-5),
-        # ('r42970934_11_2025_09_22_02_17_51', (None, 100), 80, 1e-3),
-        # ('r42970915_10_2025_09_21_21_05_15', (12, None), 80, 1e-4),
-        ('r43041912_19_2025_09_25_08_54_03', (None, 200), 120, 1e-5),
+        ('r43143674_0_2025_09_26_09_07_59', (None, 100), 135, 1e-4),
+        ('r43143674_1_2025_09_26_09_08_05', (None, 100), 135, 1e-4),
+        ('r43143674_2_2025_09_26_09_09_51', (12, None), 135, 1e-5),
+        ('r43143674_3_2025_09_26_09_13_27', (None, 100), 135, 1e-4),
+        ('r43143674_4_2025_09_26_09_22_41', (12, None), 135, 1e-5),
+        ('r43143674_5_2025_09_26_09_27_14', (None, 100), 135, 1e-4),
+        ('r43143674_6_2025_09_26_09_27_21', (None, 100), 135, 1e-5),
+        ('r43143674_7_2025_09_26_09_27_26', (None, 200), 180, 1e-5),
+        ('r43143674_8_2025_09_26_09_40_01', (None, 200), 180, 1e-5),
+        ('r43143674_9_2025_09_26_09_51_31', (None, 200), 180, 1e-5),
+        ('r43143674_10_2025_09_26_09_52_40', (None, 200), 180, 1e-5),
+        ('r43143674_11_2025_09_26_09_59_54', (None, 200), 180, 1e-5),
+        ('r43143674_12_2025_09_26_10_05_51', (None, 200), 180, 1e-5),
     )
     i_array = int(os.getenv("SLURM_ARRAY_TASK_ID"))
     i_job = i_array % len(jobs)
@@ -85,13 +76,13 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v21',
+        experiment_name='multi_256_v22',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         max_elms=max_elms,
-        max_confinement_event_length=int(30e3),
-        confinement_dataset_factor=0.4,
+        max_confinement_event_length=int(40e3),
+        confinement_dataset_factor=0.5,
         fraction_validation=0.15,
         num_workers=4,
         # model
@@ -118,7 +109,7 @@ if __name__=='__main__':
         batch_size=512,
         use_wandb=True,
         early_stopping_patience=150,
-        backbone_model_path=f'multi_256_v20/{job_id}',
+        backbone_model_path=f'multi_256_v21/{job_id}',
         backbone_first_n_layers=100,
         backbone_unfreeze_at_epoch=0,
         backbone_initial_lr=3e-5,
