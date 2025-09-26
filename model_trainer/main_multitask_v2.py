@@ -86,7 +86,7 @@ class Model(_Base_Class, LightningModule):
     deepest_layer_lr_factor: float = 1.
     lr_scheduler_patience: int = 100
     lr_scheduler_threshold: float = 1e-3
-    lr_warmup_epochs: int = 2
+    lr_warmup_epochs: int = 0
     weight_decay: float = 1e-4
     leaky_relu_slope: float = 2e-2
     monitor_metric: str = None
@@ -457,18 +457,30 @@ class Model(_Base_Class, LightningModule):
             mode='min' if 'loss' in self.monitor_metric else 'max',
             min_lr=1e-6,
         )
-        warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
-            optimizer=optimizer,
-            start_factor=0.05,
-            total_iters=self.lr_warmup_epochs,
-        )
-        return (
-            [optimizer],
-            [
-                {'scheduler': plateau_scheduler, 'monitor': self.monitor_metric},
-                {'scheduler': warmup_scheduler}, 
-            ],
-        )
+        schedulers = [
+            {'scheduler': plateau_scheduler, 'monitor': self.monitor_metric},
+        ]
+        if self.lr_warmup_epochs:
+            warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+                optimizer=optimizer,
+                start_factor=0.05,
+                total_iters=self.lr_warmup_epochs,
+            )
+            schedulers.append({'scheduler': warmup_scheduler})
+        return ( [optimizer], schedulers, )
+
+        # warmup_scheduler = torch.optim.lr_scheduler.LinearLR(
+        #     optimizer=optimizer,
+        #     start_factor=0.05,
+        #     total_iters=self.lr_warmup_epochs,
+        # )
+        # return (
+        #     [optimizer],
+        #     [
+        #         {'scheduler': plateau_scheduler, 'monitor': self.monitor_metric},
+        #         {'scheduler': warmup_scheduler}, 
+        #     ],
+        # )
 
     # def make_parameter_list(self) -> list[dict]:
     #     parameter_list = []
@@ -1829,7 +1841,7 @@ def main(
         lr: float = 1e-3,
         weight_decay: float = 1e-4,
         deepest_layer_lr_factor: float = 1.0,
-        lr_warmup_epochs: int = 2,
+        lr_warmup_epochs: int = 0,
         lr_scheduler_patience: int = 100,
         lr_scheduler_threshold: float = 0.,
         monitor_metric = None,
