@@ -706,6 +706,31 @@ class Model(_Base_Class, LightningModule):
         delt = time.time() - self.t_fit_start
         self.rprint(f"Fit time: {delt/60:0.1f} min")
 
+    def on_predict_start(self) -> None:
+        self.predict_outputs: list[list] = []
+
+    def predict_step(self, batch, batch_idx, dataloader_idx=0) -> bool:
+        signals, labels, class_labels, shot, elm_index, t0 = batch
+        results = {}  # self(signals)
+        if batch_idx == 0:
+            self.predict_outputs.append([])
+            assert dataloader_idx == len(self.predict_outputs)-1
+        prediction_outputs = {
+            # 'labels': labels.numpy(force=True),
+            # 'signals': signals.numpy(force=True),
+            # 'class_labels': class_labels.numpy(force=True),
+            # 'shot': shot,
+            # 'elm_index': elm_index,
+            # 't0': t0,
+        }
+        for result_key, result_value in results.items():
+            prediction_outputs[result_key] = result_value.numpy(force=True)
+        self.predict_outputs[dataloader_idx].append(prediction_outputs)
+        return True
+
+    def on_predict_end(self) -> None:
+        pass
+
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
         self.log_dict(norms, on_step=True)
@@ -838,7 +863,7 @@ class Data(_Base_Class, LightningDataModule):
             for sub_stage in sub_stages:
                 self.setup_elm_data_for_rank(sub_stage)
             self.zprint(f"  ELM data setup time: {time.time()-t_tmp:0.1f} s")
-        self.barrier()
+            self.barrier()
         if 'conf_onehot' in self.tasks:
             t_tmp = time.time()
             for sub_stage in sub_stages:
@@ -847,8 +872,8 @@ class Data(_Base_Class, LightningDataModule):
                 'conf_sw_count_by_stage': self.conf_sw_count_by_stage,
             })
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
-        self.barrier()
-        if not ('TESTING' in stage):
+            self.barrier()
+        if 'FIT' in stage:
             self.save_state_dict()
 
     def prepare_elm_data(self):
@@ -900,20 +925,20 @@ class Data(_Base_Class, LightningDataModule):
                     or sub_stage in self.elm_signal_window_metadata:
                     continue
                 self.zprint("\u2B1C " + f"Prepare ELM data for {sub_stage.upper()} (rank 0 only)")
-                elms_for_stage = [
+                global_elms_for_stage = [
                     i_elm for i_elm in datafile_elms
                     if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_elm_data_shot_split[sub_stage]
                 ]
                 # shuffles ELMs in stage
-                self.rng.shuffle(elms_for_stage)
+                self.rng.shuffle(global_elms_for_stage)
                 # limit max ELMs in stage
                 if self.max_elms:
-                    elms_for_stage = elms_for_stage[:n_elms[sub_stage]]
-                self.zprint(f"  {sub_stage.upper()} ELM count: {len(elms_for_stage):,d}")
-                if len(elms_for_stage) <= 7:
-                    self.zprint(f"  {sub_stage.upper()} ELM IDs: {elms_for_stage}")
+                    global_elms_for_stage = global_elms_for_stage[:n_elms[sub_stage]]
+                self.zprint(f"  {sub_stage.upper()} ELM count: {len(global_elms_for_stage):,d}")
+                if len(global_elms_for_stage) <= 7:
+                    self.zprint(f"  {sub_stage.upper()} ELM IDs: {global_elms_for_stage}")
                 else:
-                    self.zprint(f"  {sub_stage.upper()} ELM IDs: {elms_for_stage[0:7]}")
+                    self.zprint(f"  {sub_stage.upper()} ELM IDs: {global_elms_for_stage[0:7]}")
                 last_stat_elm_index: int = -1
                 skipped_short_pre_elm_time: int = 0
                 outliers: int = 0
@@ -924,9 +949,9 @@ class Data(_Base_Class, LightningDataModule):
                 signal_max = np.array(-np.inf)
                 cummulative_hist = np.zeros(n_bins, dtype=int)
                 # get signal window metadata for global ELMs in stage
-                for i_elm, elm_index in enumerate(elms_for_stage):
+                for i_elm, elm_index in enumerate(global_elms_for_stage):
                     if i_elm%100 == 0:
-                        self.zprint(f"    Reading ELM event {i_elm:04d}/{len(elms_for_stage):04d}")
+                        self.zprint(f"    Reading ELM event {i_elm:04d}/{len(global_elms_for_stage):04d}")
                     elm_event: h5py.Group = root['elms'][f"{elm_index:06d}"]
                     shot = int(elm_event.attrs['shot'])
                     assert elm_event["bes_signals"].shape[0] == 64
