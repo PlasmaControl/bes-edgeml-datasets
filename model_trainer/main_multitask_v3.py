@@ -1085,11 +1085,19 @@ class Data(_Base_Class, LightningDataModule):
         sw_per_rank = len(sw_for_stage) // self.trainer.world_size
         sw_for_rank = sw_for_stage[self.trainer.global_rank*sw_per_rank:(self.trainer.global_rank+1)*sw_per_rank]
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
-        elms_to_signals: dict[int,torch.Tensor] = {}
+        elms_to_signals_map: dict[int, torch.Tensor] = {}
+        elms_to_time_map: dict[int, torch.Tensor] = {}
+        elms_to_preelm_start_map: dict[int, float] = {}
         with h5py.File(self.elm_data_file) as root:
             for elm_index in elms_for_rank:
                 elm_group: h5py.Group = root['elms'][f"{elm_index:06d}"]
+                bes_time = np.array(elm_group["bes_time"], dtype=np.float32)  # (<time>)
                 signals = np.array(elm_group["bes_signals"], dtype=np.float32)  # (64, <time>)
+                assert signals.shape[1] == bes_time.size
+                t_start: float = elm_group.attrs['t_start']
+                t_stop: float = elm_group.attrs['t_stop']
+                elms_to_time_map[elm_index] = torch.from_numpy(bes_time - t_stop)
+                elms_to_preelm_start_map[elm_index] = t_start - t_stop
                 if self.b_coeffs is not None:
                     signals = np.array(
                         scipy.signal.lfilter(x=signals, a=self.a_coeffs, b=self.b_coeffs),
@@ -1097,11 +1105,11 @@ class Data(_Base_Class, LightningDataModule):
                     )
                 signals = np.transpose(signals).reshape(1, -1, 8, 8)  # reshape to (time, pol, rad)
                 # FIR first (if used), then normalize
-                elms_to_signals[elm_index] = torch.from_numpy(
+                elms_to_signals_map[elm_index] = torch.from_numpy(
                     (signals - self.signal_standardization_mean) / self.signal_standardization_stdev
                 )
-        assert len(elms_to_signals) == len(elms_for_rank)
-        signal_memory_size = sum([array.nbytes for array in elms_to_signals.values()])
+        assert len(elms_to_signals_map) == len(elms_for_rank)
+        signal_memory_size = sum([array.nbytes for array in elms_to_signals_map.values()])
         self.rprint(f"    Signal memory size: {signal_memory_size/(1024**3):.3f} GB")
         self.barrier()
 
@@ -1111,15 +1119,21 @@ class Data(_Base_Class, LightningDataModule):
                 signal_window_size=self.signal_window_size,
                 time_to_elm_quantiles=self.time_to_elm_quantiles,
                 sw_list=sw_for_rank,
-                elms_to_signals_dict=elms_to_signals,
+                elms_to_signals_dict=elms_to_signals_map,
             )
-        elif sub_stage == 'predict':
-            self.elm_datasets[sub_stage] = ELM_Predict_Dataset(
-                signal_window_size=self.signal_window_size,
-                time_to_elm_quantiles=self.time_to_elm_quantiles,
-                sw_list=sw_for_rank,
-                elms_to_signals_dict=elms_to_signals,
-            )
+        if sub_stage == 'predict':
+            dataset_list: list[ELM_Predict_Dataset] = []
+            for i_elm in elms_to_signals_map:
+                dataset_list.append(
+                    ELM_Predict_Dataset(
+                        signal_window_size=self.signal_window_size,
+                        time_to_elm_quantiles=self.time_to_elm_quantiles,
+                        signals=elms_to_signals_map[i_elm],
+                        time=elms_to_time_map[i_elm],
+                        preelm_start=elms_to_preelm_start_map[i_elm],
+                    )
+                )
+            self.elm_datasets[sub_stage] = dataset_list
 
     def prepare_confinement_data(self):
         self.zprint("\u2B1C Prepare confinement data (rank 0 only)")
@@ -1606,9 +1620,9 @@ class Data(_Base_Class, LightningDataModule):
         elif sub_stage == 'predict':
             pass
 
-    def get_elm_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
+    def get_dataloader_from_dataset(self, stage: str, dataset: torch.utils.data.Dataset) -> torch.utils.data.DataLoader:
         sampler = torch.utils.data.DistributedSampler(
-            dataset=self.elm_datasets[stage],
+            dataset=dataset,
             num_replicas=1,
             rank=0,
             shuffle=True if stage=='train' else False,
@@ -1627,7 +1641,7 @@ class Data(_Base_Class, LightningDataModule):
                     break
         assert batch_size > 0
         return torch.utils.data.DataLoader(
-            dataset=self.elm_datasets[stage],
+            dataset=dataset,
             sampler=sampler,
             batch_size=batch_size//self.trainer.world_size,  # batch size per rank
             num_workers=self.num_workers,
@@ -1696,7 +1710,7 @@ class Data(_Base_Class, LightningDataModule):
     def train_dataloader(self) -> CombinedLoader:
         loaders = {}
         if 'elm_class' in self.tasks:
-            loaders['elm_class'] = self.get_elm_dataloaders('train')
+            loaders['elm_class'] = self.get_dataloader_from_dataset('train', self.elm_datasets['train'])
         if 'conf_onehot' in self.tasks:
             loaders['conf_onehot'] = self.get_confinement_dataloaders('train')
         combined_loader: CombinedLoader = CombinedLoader(
@@ -1709,7 +1723,7 @@ class Data(_Base_Class, LightningDataModule):
     def val_dataloader(self) -> CombinedLoader:
         loaders = {}
         if 'elm_class' in self.tasks:
-            loaders['elm_class'] = self.get_elm_dataloaders('validation')
+            loaders['elm_class'] = self.get_dataloader_from_dataset('validation', self.elm_datasets['validation'])
         if 'conf_onehot' in self.tasks:
             loaders['conf_onehot'] = self.get_confinement_dataloaders('validation')
         combined_loader: CombinedLoader = CombinedLoader(
@@ -1722,7 +1736,7 @@ class Data(_Base_Class, LightningDataModule):
     def test_dataloader(self) -> CombinedLoader:
         loaders = {}
         if 'elm_class' in self.tasks:
-            loaders['elm_class'] = self.get_elm_dataloaders('test')
+            loaders['elm_class'] = self.get_dataloader_from_dataset('test', self.elm_datasets['test'])
         if 'conf_onehot' in self.tasks:
             loaders['conf_onehot'] = self.get_confinement_dataloaders('test')
         combined_loader: CombinedLoader = CombinedLoader(
@@ -1733,11 +1747,11 @@ class Data(_Base_Class, LightningDataModule):
         return combined_loader
 
     def predict_dataloader(self) -> None:
-        loaders = {}
+        loaders = []
         if 'elm_class' in self.tasks:
-            loaders['elm_class'] = self.get_elm_dataloaders('predict')
+            loaders.extend([self.get_dataloader_from_dataset('predict', dataset) for dataset in self.elm_datasets['predict']])
         if 'conf_onehot' in self.tasks:
-            loaders['conf_onehot'] = self.get_confinement_dataloaders('predict')
+            loaders.extend([loader for loader in self.get_confinement_dataloaders('predict')])
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='sequential',
@@ -1802,22 +1816,23 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
 @dataclasses.dataclass(eq=False)
 class ELM_Predict_Dataset(torch.utils.data.Dataset):
     signal_window_size: int = 0
-    sw_list: list = None # global signal window data mapping to dataset index
-    elms_to_signals_dict: dict[int,torch.Tensor] = None # rank-wise signals (map to ELM indices)
+    signals: torch.Tensor = None # rank-wise signals (map to ELM indices)
+    time: torch.Tensor = None # rank-wise signals (map to ELM indices)
+    preelm_start: float = None # rank-wise signals (map to ELM indices)
     time_to_elm_quantiles: dict[float, float] = None
 
     def __post_init__(self):
         super().__init__()
 
     def __len__(self) -> int:
-        return len(self.sw_list)
+        return len(self.signals)
     
     def __getitem__(self, i: int) -> tuple:
         sw_metadata = self.sw_list[i]
         i_t0 = sw_metadata['i_t0']
         time_to_elm = sw_metadata['time_to_elm']
         elm_index = sw_metadata['elm_index']
-        signals = self.elms_to_signals_dict[elm_index]
+        signals = self.signals[elm_index]
         signal_window = signals[..., i_t0 : i_t0 + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(time_to_elm<=qval) for q, qval in self.time_to_elm_quantiles.items()}
         return signal_window, quantile_binary_label, time_to_elm
@@ -2176,7 +2191,7 @@ if __name__=='__main__':
         batch_size=128,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=2,
+        num_workers=0,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.2,
         # use_wandb=True,
