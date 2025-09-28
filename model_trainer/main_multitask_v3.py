@@ -539,20 +539,17 @@ class Model(_Base_Class, LightningModule):
         features = self.feature_model(signals)
         task = self.trainer.datamodule.loader_tasks[dataloader_idx]
         task_outputs = self.task_models[task](features)
-        results = {}  # self(signals)
         if batch_idx == 0:
-            self.predict_outputs.append([])
-            assert dataloader_idx == len(self.predict_outputs)-1
+            assert dataloader_idx not in self.predict_outputs
+            self.predict_outputs[dataloader_idx] = []
         prediction_outputs = {
-            # 'labels': labels.numpy(force=True),
-            # 'signals': signals.numpy(force=True),
-            # 'class_labels': class_labels.numpy(force=True),
-            # 'shot': shot,
-            # 'elm_index': elm_index,
-            # 't0': t0,
+            'outputs': task_outputs.numpy(force=True),
+            'labels': labels.numpy(force=True),
+            'times': times.numpy(force=True),
+            'batch_idx': batch_idx,
         }
-        for result_key, result_value in results.items():
-            prediction_outputs[result_key] = result_value.numpy(force=True)
+        # for result_key, result_value in task_outputs.items():
+        #     prediction_outputs[result_key] = result_value.numpy(force=True)
         self.predict_outputs[dataloader_idx].append(prediction_outputs)
         return True
 
@@ -731,10 +728,15 @@ class Model(_Base_Class, LightningModule):
         self.rprint(f"Fit time: {delt/60:0.1f} min")
 
     def on_predict_start(self) -> None:
-        self.predict_outputs: list[list] = []
+        self.predict_outputs: dict[int,list] = {}
 
     def on_predict_end(self) -> None:
-        pass
+        for i_dl, batch_list in self.predict_outputs.items():
+            task = self.trainer.datamodule.loader_tasks[i_dl]
+            outputs = np.concatenate([batch['outputs'] for batch in batch_list], axis=0)
+            labels = np.concatenate([batch['labels'] for batch in batch_list], axis=0)
+            times = np.concatenate([batch['times'] for batch in batch_list], axis=0)
+            continue
 
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
@@ -1091,7 +1093,7 @@ class Data(_Base_Class, LightningDataModule):
         sw_for_rank = sw_for_stage[self.trainer.global_rank*sw_per_rank:(self.trainer.global_rank+1)*sw_per_rank]
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
         elms_to_signals_map: dict[int, torch.Tensor] = {}
-        elms_to_time_map: dict[int, torch.Tensor] = {}
+        elms_to_time_map: dict[int, np.ndarray] = {}
         elms_to_interelm_map: dict[int, tuple[float,float]] = {}
         elms_to_shot_map: dict[int, int] = {}
         with h5py.File(self.elm_data_file) as root:
@@ -1103,7 +1105,7 @@ class Data(_Base_Class, LightningDataModule):
                 assert signals.shape[1] == bes_time.size
                 t_start: float = elm_group.attrs['t_start']
                 t_stop: float = elm_group.attrs['t_stop']
-                elms_to_time_map[elm_index] = torch.from_numpy(bes_time)
+                elms_to_time_map[elm_index] = bes_time
                 elms_to_interelm_map[elm_index] = (t_start, t_stop)
                 if self.b_coeffs is not None:
                     signals = np.array(
@@ -1825,7 +1827,7 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
 class ELM_Predict_Dataset(torch.utils.data.Dataset):
     signal_window_size: int = 0
     signals: torch.Tensor = None # rank-wise signals (map to ELM indices)
-    time: torch.Tensor = None # rank-wise signals (map to ELM indices)
+    time: np.ndarray = None # rank-wise signals (map to ELM indices)
     interelm_times: tuple[float,float] = None # rank-wise signals (map to ELM indices)
     time_to_elm_quantiles: dict[float, float] = None
     shot: int = None
@@ -1842,19 +1844,17 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         self.labels = np.zeros_like(self.time, dtype=int) * np.nan
         self.labels[self.i_start : self.i_predict] = 0
         self.labels[self.i_predict : self.i_stop+1] = 1
-        self.labels = torch.from_numpy(self.labels)
-        n_time = self.time.numel()
         i_sw_start = 0
         stride = self.signal_window_size // 8
         self.valid_t0 = []
         while True:
             i_sw_end = i_sw_start + self.signal_window_size - 1
-            if i_sw_end > n_time-1:
+            if i_sw_end > self.time.size-1:
                 break
             self.valid_t0.append(i_sw_start)
             i_sw_start += stride
         self.valid_t0 = np.array(self.valid_t0, dtype=int)
-        assert self.valid_t0[-1] + self.signal_window_size - 1 <= n_time-1
+        assert self.valid_t0[-1] + self.signal_window_size - 1 <= self.time.size - 1
 
     def __len__(self) -> int:
         return len(self.valid_t0)
@@ -2220,7 +2220,7 @@ if __name__=='__main__':
         batch_size=128,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=0,
+        num_workers=2,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.2,
         # use_wandb=True,
