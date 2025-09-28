@@ -1631,7 +1631,11 @@ class Data(_Base_Class, LightningDataModule):
         elif sub_stage == 'predict':
             pass
 
-    def get_dataloader_from_dataset(self, stage: str, dataset: torch.utils.data.Dataset) -> torch.utils.data.DataLoader:
+    def get_dataloader_from_dataset(
+            self, 
+            stage: str, 
+            dataset: torch.utils.data.Dataset,
+    ) -> torch.utils.data.DataLoader:
         sampler = torch.utils.data.DistributedSampler(
             dataset=dataset,
             num_replicas=1,
@@ -1662,9 +1666,13 @@ class Data(_Base_Class, LightningDataModule):
             persistent_workers=True if self.num_workers else False,
         )
 
-    def get_confinement_dataloaders(self, stage: str) -> torch.utils.data.DataLoader:
+    def get_confinement_dataloaders(
+            self, 
+            stage: str,
+            dataset: torch.utils.data.Dataset,
+    ) -> torch.utils.data.DataLoader:
         sampler = torch.utils.data.DistributedSampler(
-            dataset=self.confinement_datasets[stage],
+            dataset=dataset,
             num_replicas=1,
             rank=0,
             shuffle=True if stage=='train' else False,
@@ -1683,7 +1691,7 @@ class Data(_Base_Class, LightningDataModule):
                     break
         assert batch_size > 0
         return torch.utils.data.DataLoader(
-            dataset=self.confinement_datasets[stage],
+            dataset=dataset,
             sampler=sampler,
             batch_size=batch_size//self.trainer.world_size,  # batch size per rank
             num_workers=self.num_workers,
@@ -1723,7 +1731,7 @@ class Data(_Base_Class, LightningDataModule):
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_dataloader_from_dataset('train', self.elm_datasets['train'])
         if 'conf_onehot' in self.tasks:
-            loaders['conf_onehot'] = self.get_confinement_dataloaders('train')
+            loaders['conf_onehot'] = self.get_confinement_dataloaders('train', self.confinement_datasets['train'])
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='max_size_cycle',
@@ -1736,7 +1744,7 @@ class Data(_Base_Class, LightningDataModule):
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_dataloader_from_dataset('validation', self.elm_datasets['validation'])
         if 'conf_onehot' in self.tasks:
-            loaders['conf_onehot'] = self.get_confinement_dataloaders('validation')
+            loaders['conf_onehot'] = self.get_confinement_dataloaders('validation', self.confinement_datasets['validation'])
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='sequential',
@@ -1749,7 +1757,7 @@ class Data(_Base_Class, LightningDataModule):
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_dataloader_from_dataset('test', self.elm_datasets['test'])
         if 'conf_onehot' in self.tasks:
-            loaders['conf_onehot'] = self.get_confinement_dataloaders('test')
+            loaders['conf_onehot'] = self.get_confinement_dataloaders('test', self.confinement_datasets['test'])
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='sequential',
