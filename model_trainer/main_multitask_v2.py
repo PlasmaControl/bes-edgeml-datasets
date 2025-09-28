@@ -1968,7 +1968,7 @@ def main(
     elif trial_name is None:
         datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
-        trial_name = f"r{slurm_identifier}_{datetime_str}" if slurm_identifier else f"r{datetime_str}"
+        trial_name = f"r{slurm_identifier}" if slurm_identifier else f"r{datetime_str}"
     zprint(f"Trial name: {trial_name}")
     zprint(f"Trial path: {experiment_dir/trial_name}")
     tb_logger = TensorBoardLogger(
