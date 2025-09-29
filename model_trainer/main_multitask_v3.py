@@ -11,6 +11,7 @@ import traceback
 import numpy as np
 import matplotlib.pyplot as plt
 import scipy.signal
+import scipy.signal.windows
 import scipy.special
 import sklearn.metrics
 from sklearn.model_selection import train_test_split 
@@ -732,11 +733,15 @@ class Model(_Base_Class, LightningModule):
     def on_predict_end(self) -> None:
         plt.ioff()
         plt.figure()
+        n_boxcar = 8
+        boxcar_window = scipy.signal.windows.boxcar(n_boxcar) / n_boxcar
+        lambda_smooth = lambda x: np.convolve(x, boxcar_window, mode='valid')
         for i_dl, batch_list in self.predict_outputs.items():
             task = self.trainer.datamodule.loader_tasks[i_dl]
             dataset = self.trainer.predict_dataloaders[i_dl].dataset
             outputs = np.concatenate([batch['outputs'] for batch in batch_list], axis=0)
-            predictions = scipy.special.expit(outputs)
+            predictions = scipy.special.expit(outputs).squeeze()
+            pred_smoothed = lambda_smooth(predictions)
             labels = np.concatenate([batch['labels'] for batch in batch_list], axis=0)
             times = np.concatenate([batch['times'] for batch in batch_list], axis=0)
             # signal = np.concatenate([batch['signals'][...,-1,2,3] for batch in result]).squeeze()
@@ -753,9 +758,10 @@ class Model(_Base_Class, LightningModule):
                     lw=0.5,
                 )
                 plt.plot(times, labels, label='True label', lw=3)
-                plt.plot(times, predictions, label='Predicted probability')
+                plt.plot(times, predictions, label='Predicted prob.', color='lightgreen', lw=0.75)
+                plt.plot(times[n_boxcar-1:], pred_smoothed, label='Smoothed pred. prob.', color='green', lw=1.5)
                 plt.ylim(-0.3,1.1)
-                plt.axhline(0.5, color='k', linestyle='--', label='Threshold')
+                # plt.axhline(0.5, color='k', linestyle='--', label='Threshold')
                 plt.axvline(dataset.t_stop, color='r', label='ELM onset', lw=3)
                 plt.axvspan(bes_time[0], dataset.t_start, color='y', alpha=0.2, zorder=1)
                 plt.axvspan(dataset.t_stop, bes_time[-1], color='y', alpha=0.2, zorder=1)
@@ -2251,16 +2257,16 @@ if __name__=='__main__':
         elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=20,
-        max_epochs=2,
-        lr=1e-2,
-        # lr_warmup_epochs=5,
+        # max_elms=20,
+        max_epochs=50,
+        lr=3e-3,
+        lr_warmup_epochs=5,
         # weight_decay=1e-4,
         # batch_size={0:64, 5:128, 10: 256},
-        batch_size=128,
+        batch_size=256,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=0,
+        num_workers=4,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.2,
         # use_wandb=True,
