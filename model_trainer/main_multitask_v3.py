@@ -744,7 +744,6 @@ class Model(_Base_Class, LightningModule):
             pred_smoothed = lambda_smooth(predictions)
             labels = np.concatenate([batch['labels'] for batch in batch_list], axis=0)
             times = np.concatenate([batch['times'] for batch in batch_list], axis=0)
-            # signal = np.concatenate([batch['signals'][...,-1,2,3] for batch in result]).squeeze()
             i_row, i_col = 2, 3
             bes_channel = i_row*8 + i_col + 1
             bes_signal = dataset.signals[...,::25,i_row,i_col].numpy().squeeze()
@@ -757,24 +756,35 @@ class Model(_Base_Class, LightningModule):
                     label=f'BES ch. {bes_channel} (filt/stand)', 
                     lw=0.5,
                 )
-                plt.plot(times, labels, label='True label', lw=3)
-                plt.plot(times, predictions, label='Predicted prob.', color='lightgreen', lw=0.75)
-                plt.plot(times[n_boxcar-1:], pred_smoothed, label='Smoothed pred. prob.', color='green', lw=1.5)
+                plt.plot(times, labels, 
+                         label='True label', lw=3)
+                plt.plot(times, predictions, 
+                         label='Predicted prob.', color='lightgreen', lw=1)
+                plt.plot(times[n_boxcar-1:], pred_smoothed, 
+                         label='Smoothed pred. prob.', color='green', lw=1.5)
                 plt.ylim(-0.3,1.1)
-                # plt.axhline(0.5, color='k', linestyle='--', label='Threshold')
-                plt.axvline(dataset.t_stop, color='r', label='ELM onset', lw=3)
-                plt.axvspan(bes_time[0], dataset.t_start, color='y', alpha=0.2, zorder=1)
-                plt.axvspan(dataset.t_stop, bes_time[-1], color='y', alpha=0.2, zorder=1)
-                plt.title(f'P(ELM onset within {dataset.t_predict:.1f} ms) | Shot {dataset.shot} | ELM {dataset.elm_index}')
+                plt.axvline(dataset.t_stop, 
+                            color='r', label='ELM onset', lw=3)
+                plt.axvspan(bes_time[0], dataset.t_start, 
+                            color='y', alpha=0.2, zorder=1)
+                plt.axvspan(dataset.t_stop, bes_time[-1], 
+                            color='y', alpha=0.2, zorder=1)
+                plt.title(f'Shot {dataset.shot} | Sig. win. {self.signal_window_size/1e3:.2f} ms| P(ELM within {dataset.t_predict:.1f} ms)')
                 plt.xlabel('Time (ms)')
-                plt.legend(loc='lower right')
+                plt.ylabel('Scaled BES signal or probability')
+                plt.legend(
+                    loc='lower right',
+                    labelspacing=0.2,
+                    framealpha=0.8,
+                    fontsize='small',
+                )
+                plt.tight_layout()
                 file_path = Path(
                     self.trainer.loggers[0].name,
                     self.trainer.loggers[0].version,
                     f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
                 )
                 plt.savefig(file_path, dpi=300)
-            continue
 
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
@@ -2258,7 +2268,7 @@ if __name__=='__main__':
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         # max_elms=20,
-        max_epochs=50,
+        max_epochs=60,
         lr=3e-3,
         lr_warmup_epochs=5,
         # weight_decay=1e-4,
@@ -2269,7 +2279,7 @@ if __name__=='__main__':
         num_workers=4,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.2,
-        # use_wandb=True,
+        use_wandb=True,
         monitor_metric='sum_loss/train',
         # backbone_model_path='experiment_default/r2025_09_13_12_13_37',
         # backbone_unfreeze_at_epoch=9,
