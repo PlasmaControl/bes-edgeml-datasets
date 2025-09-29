@@ -8,10 +8,10 @@ import re
 import traceback
 
 
-import lightning
-import lightning.pytorch
 import numpy as np
+import matplotlib.pyplot as plt
 import scipy.signal
+import scipy.special
 import sklearn.metrics
 from sklearn.model_selection import train_test_split 
 import h5py
@@ -25,7 +25,6 @@ import torch.optim.lr_scheduler
 import torch.utils.data
 import torch.multiprocessing as mp
 mp.set_start_method('spawn', force=True)
-
 
 from lightning.pytorch import Trainer, LightningModule, LightningDataModule
 from lightning.pytorch.strategies import DDPStrategy
@@ -108,7 +107,7 @@ class Model(_Base_Class, LightningModule):
         super().__post_init__()
         super(_Base_Class, self).__init__()
         self.save_hyperparameters()
-        self.trainer: lightning.pytorch.Trainer = None
+        self.trainer: Trainer = None
 
         if self.is_global_zero:
             print_fields(self)
@@ -731,11 +730,44 @@ class Model(_Base_Class, LightningModule):
         self.predict_outputs: dict[int,list] = {}
 
     def on_predict_end(self) -> None:
+        plt.ioff()
+        plt.figure()
         for i_dl, batch_list in self.predict_outputs.items():
             task = self.trainer.datamodule.loader_tasks[i_dl]
+            dataset = self.trainer.predict_dataloaders[i_dl].dataset
             outputs = np.concatenate([batch['outputs'] for batch in batch_list], axis=0)
+            predictions = scipy.special.expit(outputs)
             labels = np.concatenate([batch['labels'] for batch in batch_list], axis=0)
             times = np.concatenate([batch['times'] for batch in batch_list], axis=0)
+            # signal = np.concatenate([batch['signals'][...,-1,2,3] for batch in result]).squeeze()
+            i_row, i_col = 2, 3
+            bes_channel = i_row*8 + i_col + 1
+            bes_signal = dataset.signals[...,::25,i_row,i_col].numpy().squeeze()
+            bes_time = dataset.time[::25]
+            plt.clf()
+            if task == 'elm_class':
+                plt.plot(
+                    bes_time, 
+                    bes_signal/(3*np.std(bes_signal)), 
+                    label=f'BES ch. {bes_channel} (filt/stand)', 
+                    lw=0.5,
+                )
+                plt.plot(times, labels, label='True label', lw=3)
+                plt.plot(times, predictions, label='Predicted probability')
+                plt.ylim(-0.3,1.1)
+                plt.axhline(0.5, color='k', linestyle='--', label='Threshold')
+                plt.axvline(dataset.t_stop, color='r', label='ELM onset', lw=3)
+                plt.axvspan(bes_time[0], dataset.t_start, color='y', alpha=0.2, zorder=1)
+                plt.axvspan(dataset.t_stop, bes_time[-1], color='y', alpha=0.2, zorder=1)
+                plt.title(f'P(ELM onset within {dataset.t_predict:.1f} ms) | Shot {dataset.shot} | ELM {dataset.elm_index}')
+                plt.xlabel('Time (ms)')
+                plt.legend(loc='lower right')
+                file_path = Path(
+                    self.trainer.loggers[0].name,
+                    self.trainer.loggers[0].version,
+                    f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
+                )
+                plt.savefig(file_path, dpi=300)
             continue
 
     def on_before_optimizer_step(self, optimizer):
@@ -2228,7 +2260,7 @@ if __name__=='__main__':
         batch_size=128,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=2,
+        num_workers=0,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.2,
         # use_wandb=True,
