@@ -1302,8 +1302,9 @@ class Data(_Base_Class, LightningDataModule):
             self.zprint(f"      Shuffling shots within stages")
             for stage in stages:
                 self.rng.shuffle(self.global_conf_data_shot_split[stage])
-        for stage in stages:
-            shots = self.global_conf_data_shot_split[stage]
+        self.global_conf_data_shot_split['predict'] = self.global_conf_data_shot_split['test']
+        # for stage in stages:
+        for stage, shots in self.global_conf_data_shot_split.items():
             if len(shots) <= 6:
                 self.zprint(f"      {stage.capitalize()}  n_shots: {len(shots)}  shots: {shots}")
             else:
@@ -1402,6 +1403,7 @@ class Data(_Base_Class, LightningDataModule):
                     self.stage_to_rank_to_event_mapping[sub_stage][i_rank],
                     key=lambda e: e['sw_count'],
                 )
+        self.stage_to_rank_to_event_mapping['predict'] = self.stage_to_rank_to_event_mapping['test']
 
 
         # Forced shots  
