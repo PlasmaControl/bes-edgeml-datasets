@@ -736,9 +736,11 @@ class Model(_Base_Class, LightningModule):
         n_boxcar = 8
         boxcar_window = scipy.signal.windows.boxcar(n_boxcar) / n_boxcar
         lambda_smooth = lambda x: np.convolve(x, boxcar_window, mode='valid')
+        dataloaders: Sequence[torch.utils.data.DataLoader] = self.trainer.predict_dataloaders
+        datamodule: Data = self.trainer.datamodule
         for i_dl, batch_list in self.predict_outputs.items():
-            task = self.trainer.datamodule.loader_tasks[i_dl]
-            dataset = self.trainer.predict_dataloaders[i_dl].dataset
+            task = datamodule.loader_tasks[i_dl]
+            dataset = dataloaders[i_dl].dataset
             outputs = np.concatenate([batch['outputs'] for batch in batch_list], axis=0)
             predictions = scipy.special.expit(outputs).squeeze()
             pred_smoothed = lambda_smooth(predictions)
@@ -1669,17 +1671,26 @@ class Data(_Base_Class, LightningDataModule):
 
         if sub_stage in ['train', 'validation', 'test']:
             self.confinement_datasets[sub_stage] = Confinement_TrainValTest_Dataset(
-                    signals=packaged_signals,
-                    n_rows=self.n_rows,
-                    n_cols=self.n_cols,
-                    labels=packaged_labels,
-                    sample_indices=packaged_valid_t0_indices,
-                    window_start_indices=packaged_window_start,
-                    signal_window_size=self.signal_window_size,
-                    shot_event_keys=packaged_shot_event_key,
-                )
+                signals=packaged_signals,
+                n_rows=self.n_rows,
+                n_cols=self.n_cols,
+                labels=packaged_labels,
+                sample_indices=packaged_valid_t0_indices,
+                window_start_indices=packaged_window_start,
+                signal_window_size=self.signal_window_size,
+                shot_event_keys=packaged_shot_event_key,
+            )
         elif sub_stage == 'predict':
-            pass
+            self.confinement_datasets[sub_stage] = Confinement_Predict_Dataset(
+                signals=packaged_signals,
+                n_rows=self.n_rows,
+                n_cols=self.n_cols,
+                labels=packaged_labels,
+                sample_indices=packaged_valid_t0_indices,
+                window_start_indices=packaged_window_start,
+                signal_window_size=self.signal_window_size,
+                shot_event_keys=packaged_shot_event_key,
+            )
 
     def get_dataloader_from_dataset(
             self, 
@@ -1705,51 +1716,53 @@ class Data(_Base_Class, LightningDataModule):
                     batch_size = value
                     break
         assert batch_size > 0
+        num_workers = 0 if stage=='predict' else self.num_workers
         return torch.utils.data.DataLoader(
             dataset=dataset,
             sampler=sampler,
             batch_size=batch_size//self.trainer.world_size,  # batch size per rank
-            num_workers=self.num_workers,
+            num_workers=num_workers,
             drop_last=True if stage=='train' else False,
             prefetch_factor=2 if self.num_workers else None,
             pin_memory=pin_memory,
             persistent_workers=True if self.num_workers else False,
         )
 
-    def get_confinement_dataloaders(
-            self, 
-            stage: str,
-            dataset: torch.utils.data.Dataset,
-    ) -> torch.utils.data.DataLoader:
-        sampler = torch.utils.data.DistributedSampler(
-            dataset=dataset,
-            num_replicas=1,
-            rank=0,
-            shuffle=True if stage=='train' else False,
-            seed=int(self.rng.integers(0, 2**32-1)),
-            drop_last=True if stage=='train' else False,
-        )
-        batch_size: int = None
-        if isinstance(self.batch_size, int):
-            batch_size = self.batch_size
-            pin_memory = True
-        elif isinstance(self.batch_size, dict):
-            pin_memory = False
-            for key, value in reversed(self.batch_size.items()):
-                if self.trainer.current_epoch >= key:
-                    batch_size = value
-                    break
-        assert batch_size > 0
-        return torch.utils.data.DataLoader(
-            dataset=dataset,
-            sampler=sampler,
-            batch_size=batch_size//self.trainer.world_size,  # batch size per rank
-            num_workers=self.num_workers,
-            drop_last=True if stage=='train' else False,
-            prefetch_factor=2 if self.num_workers else None,
-            pin_memory=pin_memory,
-            persistent_workers=True if self.num_workers else False,
-        )
+    # def get_confinement_dataloaders(
+    #         self, 
+    #         stage: str,
+    #         dataset: torch.utils.data.Dataset,
+    # ) -> torch.utils.data.DataLoader:
+    #     sampler = torch.utils.data.DistributedSampler(
+    #         dataset=dataset,
+    #         num_replicas=1,
+    #         rank=0,
+    #         shuffle=True if stage=='train' else False,
+    #         seed=int(self.rng.integers(0, 2**32-1)),
+    #         drop_last=True if stage=='train' else False,
+    #     )
+    #     batch_size: int = None
+    #     if isinstance(self.batch_size, int):
+    #         batch_size = self.batch_size
+    #         pin_memory = True
+    #     elif isinstance(self.batch_size, dict):
+    #         pin_memory = False
+    #         for key, value in reversed(self.batch_size.items()):
+    #             if self.trainer.current_epoch >= key:
+    #                 batch_size = value
+    #                 break
+    #     assert batch_size > 0
+    #     num_workers = 0 if stage=='predict' else self.num_workers
+    #     return torch.utils.data.DataLoader(
+    #         dataset=dataset,
+    #         sampler=sampler,
+    #         batch_size=batch_size//self.trainer.world_size,  # batch size per rank
+    #         num_workers=self.num_workers,
+    #         drop_last=True if stage=='train' else False,
+    #         prefetch_factor=2 if self.num_workers else None,
+    #         pin_memory=pin_memory,
+    #         persistent_workers=True if self.num_workers else False,
+    #     )
 
     def set_fir_filter(self):
         assert len(self.fir_bp) == 2, "fir_bp must be a sequence of (f_low, f_high)"
@@ -1781,7 +1794,7 @@ class Data(_Base_Class, LightningDataModule):
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_dataloader_from_dataset('train', self.elm_datasets['train'])
         if 'conf_onehot' in self.tasks:
-            loaders['conf_onehot'] = self.get_confinement_dataloaders('train', self.confinement_datasets['train'])
+            loaders['conf_onehot'] = self.get_dataloader_from_dataset('train', self.confinement_datasets['train'])
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='max_size_cycle',
@@ -1794,7 +1807,7 @@ class Data(_Base_Class, LightningDataModule):
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_dataloader_from_dataset('validation', self.elm_datasets['validation'])
         if 'conf_onehot' in self.tasks:
-            loaders['conf_onehot'] = self.get_confinement_dataloaders('validation', self.confinement_datasets['validation'])
+            loaders['conf_onehot'] = self.get_dataloader_from_dataset('validation', self.confinement_datasets['validation'])
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='sequential',
@@ -1807,7 +1820,7 @@ class Data(_Base_Class, LightningDataModule):
         if 'elm_class' in self.tasks:
             loaders['elm_class'] = self.get_dataloader_from_dataset('test', self.elm_datasets['test'])
         if 'conf_onehot' in self.tasks:
-            loaders['conf_onehot'] = self.get_confinement_dataloaders('test', self.confinement_datasets['test'])
+            loaders['conf_onehot'] = self.get_dataloader_from_dataset('test', self.confinement_datasets['test'])
         combined_loader: CombinedLoader = CombinedLoader(
             iterables=loaders,
             mode='sequential',
@@ -1815,7 +1828,7 @@ class Data(_Base_Class, LightningDataModule):
         _ = iter(combined_loader)
         return combined_loader
 
-    def predict_dataloader(self) -> CombinedLoader:
+    def predict_dataloader(self) -> list:
         loaders = []
         self.loader_tasks = []
         for task in self.tasks:
@@ -1825,7 +1838,7 @@ class Data(_Base_Class, LightningDataModule):
                     self.loader_tasks.append(task)
             elif task == 'conf_onehot':
                 for dataset in self.confinement_datasets['predict']:
-                    loaders.append(self.get_confinement_dataloaders('predict', dataset))
+                    loaders.append(self.get_dataloader_from_dataset('predict', dataset))
                     self.loader_tasks.append(task)
         return loaders
 
@@ -1970,6 +1983,21 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
         # Convert to tensor
         confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
         return signal_window, label, confinement_mode_id_tensor
+
+
+@dataclasses.dataclass(eq=False)
+class Confinement_Predict_Dataset(torch.utils.data.Dataset):
+    signals: np.ndarray
+    n_rows: int
+    n_cols: int
+    labels: np.ndarray
+    sample_indices: np.ndarray
+    window_start_indices: np.ndarray
+    signal_window_size: int
+    shot_event_keys: np.ndarray
+
+    def __post_init__(self) -> None:
+        pass
 
 
 def main(
@@ -2261,16 +2289,16 @@ if __name__=='__main__':
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        # 'conf_onehot': [None,16,4],
+        'conf_onehot': [None,16,4],
     }
     main(
-        # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        elm_data_file=ml_data.small_data_100,
+        confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        # max_elms=20,
-        max_epochs=60,
+        max_elms=20,
+        max_epochs=2,
         lr=3e-3,
         lr_warmup_epochs=5,
         # weight_decay=1e-4,
@@ -2278,10 +2306,10 @@ if __name__=='__main__':
         batch_size=256,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=4,
+        num_workers=0,
         max_confinement_event_length=int(30e3),
         confinement_dataset_factor=0.2,
-        use_wandb=True,
+        # use_wandb=True,
         monitor_metric='sum_loss/train',
         # backbone_model_path='experiment_default/r2025_09_13_12_13_37',
         # backbone_unfreeze_at_epoch=9,

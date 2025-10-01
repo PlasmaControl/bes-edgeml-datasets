@@ -5,8 +5,8 @@
 #SBATCH --mail-type=ALL
 
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=4
-#SBATCH --gpus-per-node=4
+#SBATCH --ntasks-per-node=1
+#SBATCH --gpus-per-node=1
 #SBATCH --cpus-per-task=32
 
 #SBATCH --signal=SIGTERM@180
@@ -46,7 +46,7 @@ echo UNIQUE_IDENTIFIER: ${UNIQUE_IDENTIFIER}
 export WANDB__SERVICE_WAIT=500
 export CUDA_LAUNCH_BLOCKING=1
 
-SCRIPT=main_multitask_v2.py
+SCRIPT=main_multitask_v3.py
 echo Script:
 echo "${SCRIPT}"
 
