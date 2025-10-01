@@ -533,11 +533,14 @@ class Model(_Base_Class, LightningModule):
         )
 
     def predict_step(self, batch, batch_idx, dataloader_idx) -> bool:
+        if batch_idx == 0:
+            self.zprint(f"  Predict step for dataloader_idx {dataloader_idx}")
         assert dataloader_idx is not None
         signals, labels, times = batch
         assert isinstance(signals, torch.Tensor)
         features = self.feature_model(signals)
-        task = self.trainer.datamodule.loader_tasks[dataloader_idx]
+        datamodule: Data = self.trainer.datamodule
+        task = datamodule.loader_tasks[dataloader_idx]
         task_outputs = self.task_models[task](features)
         if batch_idx == 0:
             assert dataloader_idx not in self.predict_outputs
@@ -1131,6 +1134,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def setup_elm_data_for_rank(self, sub_stage: str):
         self.zprint("  \u2B1C " + f"Setup ELM data for stage {sub_stage.upper()}")
+        if sub_stage=='predict' and 'predict' in self.elm_datasets and self.elm_datasets['predict']:
+            self.zprint("    ELM predict dataset already setup")
+            return
         # broadcast
         self.elm_signal_window_metadata = self.broadcast(self.elm_signal_window_metadata)
         self.signal_standardization_mean = self.broadcast(self.signal_standardization_mean)
@@ -1180,7 +1186,7 @@ class Data(_Base_Class, LightningDataModule):
                 sw_list=sw_for_rank,
                 elms_to_signals_dict=elms_to_signals_map,
             )
-        if sub_stage == 'predict':
+        if sub_stage in ['test', 'predict']:
             dataset_list: list[ELM_Predict_Dataset] = []
             for i_elm in elms_to_signals_map:
                 dataset_list.append(
@@ -1194,7 +1200,7 @@ class Data(_Base_Class, LightningDataModule):
                         shot=elms_to_shot_map[i_elm],
                     )
                 )
-            self.elm_datasets[sub_stage] = dataset_list
+            self.elm_datasets['predict'] = dataset_list
 
     def prepare_confinement_data(self):
         self.zprint("\u2B1C Prepare confinement data (rank 0 only)")
@@ -1997,7 +2003,40 @@ class Confinement_Predict_Dataset(torch.utils.data.Dataset):
     shot_event_keys: np.ndarray
 
     def __post_init__(self) -> None:
-        pass
+        self.labels = torch.from_numpy(self.labels)
+        self.signals = torch.from_numpy(np.ascontiguousarray(self.signals)[np.newaxis, ...])
+        self.window_start_indices = torch.from_numpy(self.window_start_indices)
+        self.sample_indices = torch.from_numpy(self.sample_indices)
+
+        assert (
+            self.signals.ndim == 4 and
+            self.signals.shape[0] == 1 and
+            self.signals.shape[2] == self.n_rows and
+            self.signals.shape[3] == self.n_cols
+        ), "Signals have incorrect shape"
+        assert self.signals.shape[1] == self.labels.shape[0]
+        assert torch.max(self.sample_indices) < self.labels.shape[0]
+
+    def __len__(self) -> int:
+        return self.sample_indices.numel()
+    
+    def __getitem__(self, i: int) -> tuple:
+        # Retrieve the index from sample_indices that is guaranteed to have enough previous data
+        i_t0 = self.sample_indices[i]
+        # Define the start index for the signal window to look backwards
+        start_index = i_t0 - self.signal_window_size + 1
+        # Retrieve the signal window from start_index to i_t0 (inclusive)
+        signal_window = self.signals[:, start_index:i_t0 + 1, :, :]
+        # The label is typically the current index in real-time scenarios
+        label = self.labels[i_t0: i_t0 + 1]
+        # Look up the correct confinement_mode_key based on i_t0
+        i_key = (self.window_start_indices <= i_t0).nonzero().max()
+        shot_event_key = self.shot_event_keys[i_key]
+        # Convert the key to an integer by removing non-numeric characters and converting to int
+        confinement_mode_id_int = int(shot_event_key.replace('/', ''))
+        # Convert to tensor
+        confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
+        return signal_window, label, confinement_mode_id_tensor
 
 
 def main(
@@ -2303,7 +2342,7 @@ if __name__=='__main__':
         lr_warmup_epochs=5,
         # weight_decay=1e-4,
         # batch_size={0:64, 5:128, 10: 256},
-        batch_size=256,
+        batch_size=128,
         fraction_validation=0.15,
         fraction_test=0.15,
         num_workers=0,
