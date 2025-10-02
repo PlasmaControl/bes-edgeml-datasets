@@ -533,18 +533,16 @@ class Model(_Base_Class, LightningModule):
         )
 
     def predict_step(self, batch, batch_idx, dataloader_idx) -> bool:
+        assert dataloader_idx is not None
         if batch_idx == 0:
             self.zprint(f"  Predict step for dataloader_idx {dataloader_idx}")
-        assert dataloader_idx is not None
+            assert dataloader_idx not in self.predict_outputs
+            self.predict_outputs[dataloader_idx] = []
         signals, labels, times = batch
-        assert isinstance(signals, torch.Tensor)
         features = self.feature_model(signals)
         datamodule: Data = self.trainer.datamodule
         task = datamodule.loader_tasks[dataloader_idx]
         task_outputs = self.task_models[task](features)
-        if batch_idx == 0:
-            assert dataloader_idx not in self.predict_outputs
-            self.predict_outputs[dataloader_idx] = []
         prediction_outputs = {
             'outputs': task_outputs.numpy(force=True),
             'labels': labels.numpy(force=True),
@@ -637,14 +635,14 @@ class Model(_Base_Class, LightningModule):
             batch: dict|list, 
     ) -> dict[str, torch.Tensor]:
         results = {}
-        for task_name in self.task_names:
+        for task in self.task_names:
             x = (
-                batch[task_name][0]
+                batch[task][0]
                 if isinstance(batch, dict) 
                 else batch[0]
             )
             features = self.feature_model(x)
-            results[task_name] = self.task_models[task_name](features)
+            results[task] = self.task_models[task](features)
         return results
 
     def on_fit_start(self):
@@ -739,8 +737,13 @@ class Model(_Base_Class, LightningModule):
         n_boxcar = 8
         boxcar_window = scipy.signal.windows.boxcar(n_boxcar) / n_boxcar
         lambda_smooth = lambda x: np.convolve(x, boxcar_window, mode='valid')
-        dataloaders: Sequence[torch.utils.data.DataLoader] = self.trainer.predict_dataloaders
-        datamodule: Data = self.trainer.datamodule
+        trainer: Trainer = self.trainer
+        dataloaders: Sequence[torch.utils.data.DataLoader] = trainer.predict_dataloaders
+        datamodule: Data = trainer.datamodule
+        figure_dir = Path(
+            trainer.loggers[0].name,
+            trainer.loggers[0].version,
+        )
         for i_dl, batch_list in self.predict_outputs.items():
             task = datamodule.loader_tasks[i_dl]
             dataset = dataloaders[i_dl].dataset
@@ -754,13 +757,13 @@ class Model(_Base_Class, LightningModule):
             bes_signal = dataset.signals[...,::25,i_row,i_col].numpy().squeeze()
             bes_time = dataset.time[::25]
             plt.clf()
+            plt.plot(
+                bes_time, 
+                bes_signal/(3*np.std(bes_signal)), 
+                label=f'BES ch. {bes_channel} (filt/stand)', 
+                lw=0.5,
+            )
             if task == 'elm_class':
-                plt.plot(
-                    bes_time, 
-                    bes_signal/(3*np.std(bes_signal)), 
-                    label=f'BES ch. {bes_channel} (filt/stand)', 
-                    lw=0.5,
-                )
                 plt.plot(times, labels, 
                          label='True label', lw=3)
                 plt.plot(times, predictions, 
@@ -775,21 +778,19 @@ class Model(_Base_Class, LightningModule):
                 plt.axvspan(dataset.t_stop, bes_time[-1], 
                             color='y', alpha=0.2, zorder=1)
                 plt.title(f'Shot {dataset.shot} | Sig. win. {self.signal_window_size/1e3:.2f} ms| P(ELM within {dataset.t_predict:.1f} ms)')
-                plt.xlabel('Time (ms)')
                 plt.ylabel('Scaled BES signal or probability')
-                plt.legend(
-                    loc='lower right',
-                    labelspacing=0.2,
-                    framealpha=0.8,
-                    fontsize='small',
-                )
-                plt.tight_layout()
-                file_path = Path(
-                    self.trainer.loggers[0].name,
-                    self.trainer.loggers[0].version,
-                    f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
-                )
-                plt.savefig(file_path, dpi=300)
+                file_path = figure_dir / f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
+            elif task == 'conf_onehot':
+                pass
+            plt.xlabel('Time (ms)')
+            plt.legend(
+                loc='lower right',
+                labelspacing=0.2,
+                framealpha=0.8,
+                fontsize='small',
+            )
+            plt.tight_layout()
+            plt.savefig(file_path, dpi=300)
 
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
@@ -1150,8 +1151,8 @@ class Data(_Base_Class, LightningDataModule):
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
         elms_to_signals_map: dict[int, torch.Tensor] = {}
         elms_to_time_map: dict[int, np.ndarray] = {}
-        elms_to_interelm_map: dict[int, tuple[float,float]] = {}
         elms_to_shot_map: dict[int, int] = {}
+        elms_to_interelm_map: dict[int, tuple[float,float]] = {}
         with h5py.File(self.elm_data_file) as root:
             for elm_index in elms_for_rank:
                 elm_group: h5py.Group = root['elms'][f"{elm_index:06d}"]
@@ -1515,12 +1516,17 @@ class Data(_Base_Class, LightningDataModule):
         start_index = 0
         outlier_count = 0
         count_of_valid_t0_indices: int = 0
+        shotevent_to_signals_map: dict[str, np.ndarray] = {}
+        shotevent_to_time_map: dict[str, np.ndarray] = {}
+        shotevent_to_labels_map: dict[str, np.ndarray] = {}
+        shotevent_to_shot_and_event_map: dict[str, tuple[int,int]] = {}
         with h5py.File(self.confinement_data_file, 'r') as root:
             for i, event_data in enumerate(rankwise_events):
                 if n_events >= 10 and i % (n_events//10) == 0:
                     self.zprint(f"    Reading event {i:04d}/{n_events:04d}")
                 shot = event_data['shot']
                 event = event_data['event']
+                shotevent_label = f"{shot}_{event}"
                 class_label = event_data['class_label']
                 event_group = root[str(shot)][str(event)]
                 labels = np.array(event_group["labels"], dtype=int)
@@ -1530,7 +1536,11 @@ class Data(_Base_Class, LightningDataModule):
                     labels = labels[:max_length]
                 else:
                     max_length = len(labels)
+                shotevent_to_labels_map[shotevent_label] = labels
                 signals = np.array(event_group["signals"][:, :max_length], dtype=np.float32)
+                bes_time = np.array(event_group["time"][:max_length], dtype=np.float32)  # (<time>)
+                shotevent_to_time_map[shotevent_label] = bes_time
+                shotevent_to_shot_and_event_map[shotevent_label] = (int(shot), int(event))
                 assert signals.shape[0] == 64
                 assert labels.size == signals.shape[1]
                 signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
@@ -1553,6 +1563,7 @@ class Data(_Base_Class, LightningDataModule):
                         scipy.signal.lfilter(x=signals, a=self.a_coeffs, b=self.b_coeffs),
                         dtype=np.float32,
                     )
+                shotevent_to_signals_map[shotevent_label] = signals
                 packaged_signals[start_index:start_index + signals.shape[0], ...] = signals
                 start_index += signals.shape[0]
                 event_2 = event_data.copy()
@@ -1677,26 +1688,27 @@ class Data(_Base_Class, LightningDataModule):
 
         if sub_stage in ['train', 'validation', 'test']:
             self.confinement_datasets[sub_stage] = Confinement_TrainValTest_Dataset(
-                signals=packaged_signals,
+                signal_window_size=self.signal_window_size,
                 n_rows=self.n_rows,
                 n_cols=self.n_cols,
+                signals=packaged_signals,
                 labels=packaged_labels,
                 sample_indices=packaged_valid_t0_indices,
                 window_start_indices=packaged_window_start,
-                signal_window_size=self.signal_window_size,
                 shot_event_keys=packaged_shot_event_key,
             )
-        elif sub_stage == 'predict':
-            self.confinement_datasets[sub_stage] = Confinement_Predict_Dataset(
-                signals=packaged_signals,
-                n_rows=self.n_rows,
-                n_cols=self.n_cols,
-                labels=packaged_labels,
-                sample_indices=packaged_valid_t0_indices,
-                window_start_indices=packaged_window_start,
-                signal_window_size=self.signal_window_size,
-                shot_event_keys=packaged_shot_event_key,
-            )
+        if sub_stage in ['test', 'predict']:
+            dataset_list: list[Confinement_Predict_Dataset] = []
+            for shotevent in shotevent_to_signals_map:
+                dataset = Confinement_Predict_Dataset(
+                    signal_window_size=self.signal_window_size,
+                    signals=shotevent_to_signals_map[shotevent],
+                    labels=shotevent_to_labels_map[shotevent],
+                    time=shotevent_to_time_map[shotevent],
+                    shot_event_keys=shotevent_to_shot_and_event_map[shotevent],
+                )
+                dataset_list.append(dataset)
+            self.confinement_datasets['predict'] = dataset_list
 
     def get_dataloader_from_dataset(
             self, 
@@ -1897,7 +1909,7 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
         signals = self.elms_to_signals_dict[sw_metadata['elm_index']]
         signal_window = signals[..., sw_metadata['i_t0'] : sw_metadata['i_t0'] + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(sw_metadata['time_to_elm']<=qval) for q, qval in self.time_to_elm_quantiles.items()}
-        return signal_window, quantile_binary_label, sw_metadata['time_to_elm']
+        return signal_window, quantile_binary_label #sw_metadata['time_to_elm']
 
 
 @dataclasses.dataclass(eq=False)
@@ -1982,61 +1994,60 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
         # The label is typically the current index in real-time scenarios
         label = self.labels[i_t0: i_t0 + 1]
         # Look up the correct confinement_mode_key based on i_t0
-        i_key = (self.window_start_indices <= i_t0).nonzero().max()
-        shot_event_key = self.shot_event_keys[i_key]
+        # i_key = (self.window_start_indices <= i_t0).nonzero().max()
+        # shot_event_key = self.shot_event_keys[i_key]
         # Convert the key to an integer by removing non-numeric characters and converting to int
-        confinement_mode_id_int = int(shot_event_key.replace('/', ''))
+        # confinement_mode_id_int = int(shot_event_key.replace('/', ''))
         # Convert to tensor
-        confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
-        return signal_window, label, confinement_mode_id_tensor
+        # confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
+        return signal_window, label #confinement_mode_id_tensor
 
 
 @dataclasses.dataclass(eq=False)
 class Confinement_Predict_Dataset(torch.utils.data.Dataset):
     signals: np.ndarray
-    n_rows: int
-    n_cols: int
     labels: np.ndarray
-    sample_indices: np.ndarray
-    window_start_indices: np.ndarray
+    time: np.ndarray
     signal_window_size: int
     shot_event_keys: np.ndarray
 
     def __post_init__(self) -> None:
         self.labels = torch.from_numpy(self.labels)
-        self.signals = torch.from_numpy(np.ascontiguousarray(self.signals)[np.newaxis, ...])
-        self.window_start_indices = torch.from_numpy(self.window_start_indices)
-        self.sample_indices = torch.from_numpy(self.sample_indices)
-
-        assert (
-            self.signals.ndim == 4 and
-            self.signals.shape[0] == 1 and
-            self.signals.shape[2] == self.n_rows and
-            self.signals.shape[3] == self.n_cols
-        ), "Signals have incorrect shape"
-        assert self.signals.shape[1] == self.labels.shape[0]
-        assert torch.max(self.sample_indices) < self.labels.shape[0]
+        self.signals = torch.from_numpy(self.signals[np.newaxis, ...])
+        self.time = torch.from_numpy(self.time)
+        self.shot = self.shot_event_keys[0]
+        self.event = self.shot_event_keys[1]
+        self.sample_indices = []
+        start_index = 0
+        while True:
+            stop_index = start_index + self.signal_window_size - 1
+            if stop_index > self.time.numel() - 1:
+                break
+            self.sample_indices.append(start_index)
+            start_index += self.signal_window_size // 8
+        self.sample_indices = torch.tensor(self.sample_indices, dtype=torch.int64)
 
     def __len__(self) -> int:
         return self.sample_indices.numel()
     
     def __getitem__(self, i: int) -> tuple:
         # Retrieve the index from sample_indices that is guaranteed to have enough previous data
-        i_t0 = self.sample_indices[i]
+        i_start = self.sample_indices[i]
         # Define the start index for the signal window to look backwards
-        start_index = i_t0 - self.signal_window_size + 1
+        i_stop = i_start + self.signal_window_size - 1
         # Retrieve the signal window from start_index to i_t0 (inclusive)
-        signal_window = self.signals[:, start_index:i_t0 + 1, :, :]
+        signal_window = self.signals[..., i_start:i_stop+1, :, :]
         # The label is typically the current index in real-time scenarios
-        label = self.labels[i_t0: i_t0 + 1]
+        label = self.labels[i_stop:i_stop+1]
+        time = self.time[i_stop:i_stop+1]
         # Look up the correct confinement_mode_key based on i_t0
-        i_key = (self.window_start_indices <= i_t0).nonzero().max()
-        shot_event_key = self.shot_event_keys[i_key]
+        # i_key = (self.window_start_indices <= i_start).nonzero().max()
+        # shot_event_key = self.shot_event_keys[i_key]
         # Convert the key to an integer by removing non-numeric characters and converting to int
-        confinement_mode_id_int = int(shot_event_key.replace('/', ''))
+        # confinement_mode_id_int = int(shot_event_key.replace('/', ''))
         # Convert to tensor
-        confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
-        return signal_window, label, confinement_mode_id_tensor
+        # confinement_mode_id_tensor = torch.tensor([confinement_mode_id_int], dtype=torch.int64)
+        return signal_window, label, time
 
 
 def main(
@@ -2237,7 +2248,6 @@ def main(
         enable_progress_bar = False,
         enable_model_summary = False,
         precision = precision,
-        # strategy = 'ddp' if world_size>1 else 'auto',
         strategy = DDPStrategy(
             gradient_as_bucket_view=True,
             static_graph=True,
