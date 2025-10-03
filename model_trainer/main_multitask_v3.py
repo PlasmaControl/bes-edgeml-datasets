@@ -535,7 +535,7 @@ class Model(_Base_Class, LightningModule):
     def predict_step(self, batch, batch_idx, dataloader_idx) -> bool:
         assert dataloader_idx is not None
         if batch_idx == 0:
-            self.zprint(f"  Predict step for dataloader_idx {dataloader_idx}")
+            self.zprint(f"  Predict for dataloader_idx {dataloader_idx}")
             assert dataloader_idx not in self.predict_outputs
             self.predict_outputs[dataloader_idx] = []
         signals, labels, times = batch
@@ -745,12 +745,9 @@ class Model(_Base_Class, LightningModule):
             trainer.loggers[0].version,
         )
         for i_dl, batch_list in self.predict_outputs.items():
+            self.zprint(f"  Plotting predictions for dataloader {i_dl}")
             task = datamodule.loader_tasks[i_dl]
             dataset = dataloaders[i_dl].dataset
-            outputs = np.concatenate([batch['outputs'] for batch in batch_list], axis=0)
-            predictions = scipy.special.expit(outputs).squeeze()
-            pred_smoothed = lambda_smooth(predictions)
-            labels = np.concatenate([batch['labels'] for batch in batch_list], axis=0)
             times = np.concatenate([batch['times'] for batch in batch_list], axis=0)
             i_row, i_col = 2, 3
             bes_channel = i_row*8 + i_col + 1
@@ -764,6 +761,10 @@ class Model(_Base_Class, LightningModule):
                 lw=0.5,
             )
             if task == 'elm_class':
+                outputs = np.concatenate([batch['outputs'] for batch in batch_list], axis=0)
+                predictions = scipy.special.expit(outputs).squeeze()
+                pred_smoothed = lambda_smooth(predictions)
+                labels = np.concatenate([batch['labels'] for batch in batch_list], axis=0)
                 plt.plot(times, labels, 
                          label='True label', lw=3)
                 plt.plot(times, predictions, 
@@ -842,6 +843,7 @@ class Data(_Base_Class, LightningDataModule):
     n_cols: int = 8
     max_confinement_event_length: int = None
     confinement_dataset_factor: float = None
+    balance_confinement_data_with_elm_data: bool = False
 
     def __post_init__(self):
         super().__post_init__()
@@ -934,7 +936,28 @@ class Data(_Base_Class, LightningDataModule):
             })
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
             self.barrier()
-        if 'FIT' in stage:
+        for sub_stage in sub_stages:
+            if 'elm_class' in self.tasks:
+                n_samples = (
+                    len(self.elm_datasets[sub_stage])
+                    if 'predict' not in sub_stage.lower()
+                    else sum([len(ds) for ds in self.elm_datasets[sub_stage]])
+                )
+                self.rprint(f"{sub_stage.upper()} ELM data samples: {n_samples:,d}")
+            if 'conf_onehot' in self.tasks:
+                n_samples = (
+                    len(self.confinement_datasets[sub_stage])
+                    if 'predict' not in sub_stage.lower()
+                    else sum([len(ds) for ds in self.confinement_datasets[sub_stage]])
+                )
+                self.rprint(f"{sub_stage.upper()} confinement data samples: {n_samples:,d}")
+            if self.elm_datasets and \
+                    self.confinement_datasets and \
+                    self.balance_confinement_data_with_elm_data and \
+                    'predict' not in sub_stage.lower() and \
+                    'test' not in sub_stage.lower():
+                assert len(self.elm_datasets[sub_stage]) == len(self.confinement_datasets[sub_stage])
+        if stage == 'fit':
             self.save_state_dict()
 
     def prepare_elm_data(self):
@@ -1136,7 +1159,7 @@ class Data(_Base_Class, LightningDataModule):
     def setup_elm_data_for_rank(self, sub_stage: str):
         self.zprint("  \u2B1C " + f"Setup ELM data for stage {sub_stage.upper()}")
         if sub_stage=='predict' and 'predict' in self.elm_datasets and self.elm_datasets['predict']:
-            self.zprint("    ELM predict dataset already setup")
+            self.zprint("    ELM `predict` dataset already setup")
             return
         # broadcast
         self.elm_signal_window_metadata = self.broadcast(self.elm_signal_window_metadata)
@@ -1494,6 +1517,9 @@ class Data(_Base_Class, LightningDataModule):
 
     def setup_confinement_data_for_rank(self, sub_stage: str):
         self.zprint("  \u2B1C " + f"Setup confinement data for stage {sub_stage.capitalize()}")
+        if sub_stage=='predict' and 'predict' in self.confinement_datasets and self.confinement_datasets['predict']:
+            self.zprint("    Confinement `predict` dataset already setup")
+            return
         t_tmp = time.time()
         # TODO move rankwise_stage_event_split to prepare_conf_data()
         self.stage_to_rank_to_event_mapping = self.broadcast(self.stage_to_rank_to_event_mapping)
@@ -1571,10 +1597,10 @@ class Data(_Base_Class, LightningDataModule):
                 event_2['valid_t0'] = valid_t0
                 rankwise_events_2.append(event_2)
                 count_of_valid_t0_indices += np.sum(valid_t0)
-                if self.elm_sw_count_by_stage:
-                    if count_of_valid_t0_indices > 2*self.elm_sw_count_by_stage[sub_stage]//self.world_size:
-                        self.zprint(f"    Stopping conf data read early to match ELM data size")
-                        break
+                # if self.elm_sw_count_by_stage:
+                #     if count_of_valid_t0_indices > 2*self.elm_sw_count_by_stage[sub_stage]//self.world_size:
+                #         self.zprint(f"    Stopping conf data read early to match ELM data size")
+                #         break
 
         self.zprint(f"    Outlier count: {outlier_count}")
         packaged_signals = packaged_signals[:start_index, ...]
@@ -1610,8 +1636,7 @@ class Data(_Base_Class, LightningDataModule):
         self.rng.shuffle(packaged_valid_t0_indices)
 
         # match valid t0 indices count across ranks
-        if self.trainer.world_size > 1:
-            self.rng.shuffle(packaged_valid_t0_indices)
+        if self.trainer.world_size > 1 and sub_stage in ['train', 'validation']:
             count_valid_t0_indices = len(packaged_valid_t0_indices)
             self.rprint(f"    Valid t0 indices (unbalanced across ranks): {count_valid_t0_indices:,d}")
             all_rank_count_valid_indices: list = [None for _ in range(self.trainer.world_size)]
@@ -1619,10 +1644,12 @@ class Data(_Base_Class, LightningDataModule):
                 all_rank_count_valid_indices[i] = self.broadcast(count_valid_t0_indices, src=i)
             length_limit = min(all_rank_count_valid_indices)
             packaged_valid_t0_indices = packaged_valid_t0_indices[:length_limit]
-        self.zprint(f"    Valid t0 indices for each rank: {len(packaged_valid_t0_indices):,d}")
+        self.rprint(f"    Valid t0 indices: {len(packaged_valid_t0_indices):,d}")
 
         # balance with ELM dataset, if applicable
-        if self.elm_sw_count_by_stage:
+        if self.elm_sw_count_by_stage and \
+                self.balance_confinement_data_with_elm_data and \
+                sub_stage in ['train', 'validation']:
             self.zprint(f"    Balancing confinement data with ELM data")
             elm_stage_sw_count = self.elm_sw_count_by_stage[sub_stage]
             elm_stage_rank_sw_count = elm_stage_sw_count // self.world_size
@@ -2106,6 +2133,7 @@ def main(
         confinement_dataset_factor: float = None,
         max_confinement_event_length: int = None,
         seed: int = 42,
+        balance_confinement_data_with_elm_data: bool = False,
 ) -> dict:
 
     ### SLURM/MPI environment
@@ -2296,6 +2324,7 @@ def main(
                 confinement_dataset_factor=confinement_dataset_factor,
                 max_confinement_event_length=max_confinement_event_length,
                 seed=seed,
+                balance_confinement_data_with_elm_data=balance_confinement_data_with_elm_data,
             )
 
     if not skip_train and not skip_data:
@@ -2356,8 +2385,9 @@ if __name__=='__main__':
         fraction_validation=0.15,
         fraction_test=0.15,
         num_workers=0,
-        max_confinement_event_length=int(30e3),
+        max_confinement_event_length=int(10e3),
         confinement_dataset_factor=0.2,
+        balance_confinement_data_with_elm_data=True,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
         # backbone_model_path='experiment_default/r2025_09_13_12_13_37',
