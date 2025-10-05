@@ -5,8 +5,8 @@
 #SBATCH --mail-type=ALL
 
 #SBATCH --nodes=1
-#SBATCH --ntasks-per-node=1
-#SBATCH --gpus-per-node=1
+#SBATCH --ntasks-per-node=4
+#SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
 #SBATCH --signal=SIGTERM@180
