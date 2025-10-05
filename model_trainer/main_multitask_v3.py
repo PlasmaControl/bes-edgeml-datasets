@@ -10,6 +10,7 @@ import traceback
 
 import numpy as np
 import matplotlib.pyplot as plt
+from regex import F
 import scipy.signal
 import scipy.signal.windows
 import scipy.special
@@ -508,6 +509,8 @@ class Model(_Base_Class, LightningModule):
     #     return parameter_list
 
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
+        if self.current_epoch==0 and batch_idx==0 and not dataloader_idx:
+            self.zprint("Begin training")
         output = self.update_step(
             batch, 
             batch_idx, 
@@ -936,29 +939,31 @@ class Data(_Base_Class, LightningDataModule):
             })
             self.zprint(f"  Confinement data setup time: {time.time()-t_tmp:.1f} s")
             self.barrier()
-        # for sub_stage in sub_stages:
-        #     if 'elm_class' in self.tasks:
-        #         n_samples = (
-        #             len(self.elm_datasets[sub_stage])
-        #             if 'predict' not in sub_stage.lower()
-        #             else sum([len(ds) for ds in self.elm_datasets[sub_stage]])
-        #         )
-        #         self.rprint(f"{sub_stage.upper()} ELM data samples: {n_samples:,d}")
-        #     if 'conf_onehot' in self.tasks:
-        #         n_samples = (
-        #             len(self.confinement_datasets[sub_stage])
-        #             if 'predict' not in sub_stage.lower()
-        #             else sum([len(ds) for ds in self.confinement_datasets[sub_stage]])
-        #         )
-        #         self.rprint(f"{sub_stage.upper()} confinement data samples: {n_samples:,d}")
+        self.zprint("\u2B1C Data setup summary")
+        for sub_stage in sub_stages:
+            self.zprint(f"  Stage {sub_stage}")
+            for task in self.tasks:
+                datasets = (
+                    self.elm_datasets[sub_stage] 
+                    if task == 'elm_class' 
+                    else self.confinement_datasets[sub_stage]
+                )
+                n_samples = (
+                    len(datasets)
+                    if 'predict' not in sub_stage.lower()
+                    else sum([len(ds) for ds in datasets])
+                )
+                batches = n_samples / (self.batch_size/self.world_size)
+                self.rprint(f"    {task}  n_samples: {n_samples:,d}  batches/epoch: {batches:.1f}")
+                self.barrier()
             # if 'elm_class' in self.tasks and \
             #         'conf_onehot' in self.tasks and \
             #         self.balance_confinement_data_with_elm_data and \
             #         'predict' not in sub_stage.lower() and \
             #         'test' not in sub_stage.lower():
             #     assert len(self.elm_datasets[sub_stage]) == len(self.confinement_datasets[sub_stage])
-        # if stage == 'fit':
-        #     self.save_state_dict()
+        if stage == 'fit':
+            self.save_state_dict()
 
     def prepare_elm_data(self):
         self.zprint("  \u2B1C Prepare ELM data (rank 0 only)")
@@ -1240,7 +1245,7 @@ class Data(_Base_Class, LightningDataModule):
             self.elm_datasets['predict'] = dataset_list
 
     def prepare_confinement_data(self):
-        self.zprint("\u2B1C Prepare confinement data (rank 0 only)")
+        self.zprint("  \u2B1C Prepare confinement data (rank 0 only)")
         check_bounds = lambda value, bounds: bounds[0] <= value <= bounds[1] if bounds else True
         r_avg_exclusions = z_avg_exclusions = delz_avg_exclusions = 0
         missing_inboard = bad_inboard = 0
@@ -1315,19 +1320,19 @@ class Data(_Base_Class, LightningDataModule):
 
         global_class_to_shots = [list(set(item)) for item in global_class_to_shots]
         # exclusions
-        self.zprint("    Global data exclusions")
+        self.zprint(f"    Data file exclusions")
         self.zprint(f"      missing inboard shot exclusions: {missing_inboard}")
         self.zprint(f"      bad inboard shot exclusions: {bad_inboard}")
         self.zprint(f"      r_avg shot exclusions: {r_avg_exclusions}")
         self.zprint(f"      z_avg shot exclusions: {z_avg_exclusions}")
         self.zprint(f"      delz_avg shot exclusions: {delz_avg_exclusions}")
         # data summary
-        self.zprint("    Global data summary (after exclusions)")
+        self.zprint("    Data file summary (after exclusions)")
         self.zprint(f"      Shots: {len(global_shot_to_events)}  n_sig_win {sum(global_class_signal_window_count):,d}")
         for i in range(self.num_classes):
             line =  f"      Class {i}:  shots {len(global_class_to_shots[i])}  "
             line += f"events {global_class_event_count[i]}  "
-            line += f"duration {global_class_duration[i]:,d}  "
+            line += f"duration {global_class_duration[i]:,d} mu-s  "
             line += f"n_sig_win {global_class_signal_window_count[i]:,d}"
             self.zprint(line)
 
@@ -1336,7 +1341,7 @@ class Data(_Base_Class, LightningDataModule):
         if self. global_conf_data_shot_split:
             self.zprint("    Using pre-loaded train/val/test shot split")
         else:
-            self.zprint("    Global stage to shot mapping")
+            self.zprint("    Data file stage to shot mapping")
             self.global_conf_data_shot_split = {st:[] for st in stages}
             p_train = 1. - self.fraction_validation - self.fraction_test
             for shot in global_shot_to_events:
@@ -1350,13 +1355,10 @@ class Data(_Base_Class, LightningDataModule):
         self.global_conf_data_shot_split['predict'] = self.global_conf_data_shot_split['test']
         # for stage in stages:
         for stage, shots in self.global_conf_data_shot_split.items():
-            if len(shots) <= 6:
-                self.zprint(f"      {stage.capitalize()}  n_shots: {len(shots)}  shots: {shots}")
-            else:
-                self.zprint(f"      {stage.capitalize()}  n_shots: {len(shots)}  shots: {shots[:6]}")
+            self.zprint(f"      {stage.capitalize()}  n_shots: {len(shots)}  shots: {shots if len(shots)<=6 else shots[:6]}")
 
         # create global stage to class to shot mapping
-        self.zprint("    Global stage to class to shot mapping")
+        self.zprint("    Data file stage to class to shot mapping")
         global_stage_to_class_to_shot_mapping: dict[str, dict[int, list]] = \
             {st:{i:[] for i in range(self.num_classes)} for st in stages}
         for st in stages:
@@ -1367,16 +1369,13 @@ class Data(_Base_Class, LightningDataModule):
                     if shot in global_class_to_shots[i]:
                         global_stage_to_class_to_shot_mapping[st][i].append(shot)
                 shots = global_stage_to_class_to_shot_mapping[st][i]
-                if len(shots) <= 6:
-                    self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots}")
-                else:
-                    self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots[:6]}")
+                self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots if len(shots)<=6 else shots[:6]}")
 
         # if needed, trim stage and class shotlists
         stage_to_class_to_shot_mapping: dict[str, dict[int, list]] = \
             {st: {i:[] for i in range(self.num_classes)} for st in stages}
         if self.confinement_dataset_factor:
-            self.zprint("    Reduced dataset stage to class to shot mapping")
+            self.zprint("    Training data stage to class to shot mapping")
             for st in global_stage_to_class_to_shot_mapping:
                 if len(self.global_conf_data_shot_split[st])==0: continue
                 self.zprint(f"      {st.capitalize()}")
@@ -1388,15 +1387,12 @@ class Data(_Base_Class, LightningDataModule):
                         global_stage_to_class_to_shot_mapping[st][i][:n_shots]
                     )
                     shots = stage_to_class_to_shot_mapping[st][i]
-                    if len(shots) <= 6:
-                        self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots}")
-                    else:
-                        self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots[:6]}")
+                    self.zprint(f"        Class {i}  n_shots: {len(shots)}  shots: {shots if len(shots)<=6 else shots[:6]}")
         else:
             stage_to_class_to_shot_mapping = global_stage_to_class_to_shot_mapping.copy()
 
         # stage to events mapping
-        self.zprint("    Reduced dataset stage to class to event mapping")
+        self.zprint("    Training data stage to class to event mapping")
         stage_to_event_mapping: dict[str,list] = {}
         for st in stage_to_class_to_shot_mapping:
             stage_to_event_mapping[st] = []
@@ -1428,7 +1424,7 @@ class Data(_Base_Class, LightningDataModule):
         # split events among ranks for each stage
         self.zprint(f"    Rankwise signal window counts (approx)")
         for sub_stage in stages:
-            # short events longest to shortest for stage
+            # sort events longest to shortest for stage
             stage_to_event_mapping[sub_stage] = sorted(
                 stage_to_event_mapping[sub_stage],
                 key=lambda e: e['sw_count'],
@@ -1441,7 +1437,8 @@ class Data(_Base_Class, LightningDataModule):
                 argmin = np.argmin(rankwise_total_sw_counts)
                 self.stage_to_rank_to_event_mapping[sub_stage][argmin].append(event)
                 rankwise_total_sw_counts[argmin] += event['sw_count']
-            self.zprint(f"      {sub_stage.capitalize()}: {rankwise_total_sw_counts}")
+            with np.printoptions(formatter={'int': lambda s: f'{s:,d}'}):
+                self.zprint(f"      {sub_stage.capitalize()}: {rankwise_total_sw_counts}")
             # sort events shortest to longest for each rank
             for i_rank in range(self.world_size):
                 self.stage_to_rank_to_event_mapping[sub_stage][i_rank] = sorted(
@@ -1526,8 +1523,6 @@ class Data(_Base_Class, LightningDataModule):
 
             # self.global_stage_to_shot['predict'] = self.global_stage_to_shot['test']
 
-        return
-
     def setup_confinement_data_for_rank(self, sub_stage: str):
         self.zprint("  \u2B1C " + f"Setup confinement data for stage {sub_stage.capitalize()}")
         if sub_stage=='predict' and 'predict' in self.confinement_datasets and self.confinement_datasets['predict']:
@@ -1562,7 +1557,7 @@ class Data(_Base_Class, LightningDataModule):
         with h5py.File(self.confinement_data_file, 'r') as root:
             for i, event_data in enumerate(rankwise_events):
                 if n_events >= 10 and i % (n_events//10) == 0:
-                    self.zprint(f"    Reading event {i:04d}/{n_events:04d}")
+                    self.zprint(f"      Reading event {i:04d}/{n_events:04d}")
                 shot = event_data['shot']
                 event = event_data['event']
                 shotevent_label = f"{shot}_{event}"
@@ -1618,6 +1613,7 @@ class Data(_Base_Class, LightningDataModule):
         self.zprint(f"    Outlier count: {outlier_count}")
         packaged_signals = packaged_signals[:start_index, ...]
         self.zprint(f"    Signal memory size: {packaged_signals.nbytes/(1024**3):.4f} GB")
+        self.barrier()
         # assert start_index == packaged_signals.shape[0]
         packaged_labels = np.concatenate([confinement_mode['labels'] for confinement_mode in rankwise_events_2], axis=0)
         packaged_valid_t0 = np.concatenate([confinement_mode['valid_t0'] for confinement_mode in rankwise_events_2], axis=0)
@@ -1769,9 +1765,7 @@ class Data(_Base_Class, LightningDataModule):
         batch_size: int = None
         if isinstance(self.batch_size, int):
             batch_size = self.batch_size
-            pin_memory = True
         elif isinstance(self.batch_size, dict):
-            pin_memory = False
             for key, value in reversed(self.batch_size.items()):
                 if self.trainer.current_epoch >= key:
                     batch_size = value
@@ -1784,9 +1778,9 @@ class Data(_Base_Class, LightningDataModule):
             batch_size=batch_size//self.trainer.world_size,  # batch size per rank
             num_workers=num_workers,
             # drop_last=True if stage=='train' else False,
-            prefetch_factor=2 if self.num_workers else None,
-            pin_memory=pin_memory,
-            persistent_workers=True if self.num_workers else False,
+            prefetch_factor=2 if num_workers else None,
+            pin_memory=True if isinstance(self.batch_size, int) else False,
+            persistent_workers=True if num_workers else False,
         )
 
     # def get_confinement_dataloaders(
@@ -2382,26 +2376,26 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
-        # 'elm_class': [None,16,1],
+        'elm_class': [None,16,1],
         'conf_onehot': [None,16,4],
     }
     main(
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
+        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=20,
+        max_elms=40,
         max_epochs=2,
         lr=3e-3,
         lr_warmup_epochs=5,
-        # weight_decay=1e-4,
-        # batch_size={0:64, 5:128, 10: 256},
         batch_size=128,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=0,
-        max_confinement_event_length=int(20e3),
+        num_workers=2,
+        max_confinement_event_length=int(15e3),
         confinement_dataset_factor=0.2,
         # balance_confinement_data_with_elm_data=True,
         # use_wandb=True,
