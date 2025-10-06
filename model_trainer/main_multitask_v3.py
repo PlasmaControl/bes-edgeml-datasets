@@ -509,9 +509,10 @@ class Model(_Base_Class, LightningModule):
     #     return parameter_list
 
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
-        if self.current_epoch==0 and batch_idx==0 and not dataloader_idx:
+        if not (self.current_epoch or batch_idx or dataloader_idx):
             self.zprint("Begin training")
-        self.rprint(f"{self.current_epoch}, {batch_idx}, {dataloader_idx}")
+        if batch_idx%500 == 0:
+            self.zprint(f"    {self.current_epoch}, {batch_idx}, {dataloader_idx}")
         output = self.update_step(
             batch, 
             batch_idx, 
@@ -1661,10 +1662,10 @@ class Data(_Base_Class, LightningDataModule):
         if self.elm_sw_count_by_stage and \
                 self.balance_confinement_data_with_elm_data and \
                 sub_stage in ['train', 'validation']:
-            self.zprint(f"    Balancing confinement data with ELM data")
             elm_stage_sw_count = self.elm_sw_count_by_stage[sub_stage]
             elm_stage_rank_sw_count = elm_stage_sw_count // self.world_size
             if len(packaged_valid_t0_indices) > elm_stage_rank_sw_count:
+                self.zprint(f"    Balancing confinement data with ELM data")
                 packaged_valid_t0_indices = packaged_valid_t0_indices[:elm_stage_rank_sw_count]
             self.zprint(f"    Final valid t0 indices for each rank: {len(packaged_valid_t0_indices):,d}")
 
@@ -1909,7 +1910,7 @@ class Data(_Base_Class, LightningDataModule):
         if self.is_global_zero:
             state_dict_file = Path(self.log_dir)/'state_dict.pt'
             state_dict_file.parent.mkdir(parents=True, exist_ok=True)
-            self.zprint(f"  Saving state_dict: {state_dict_file}")
+            self.zprint(f"Saving state_dict: {state_dict_file}")
             state_dict = {item: getattr(self, item) for item in self.state_items}
             for key in state_dict:
                 self.zprint(f"    {key}")
@@ -2386,22 +2387,22 @@ if __name__=='__main__':
     }
     main(
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
+        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=40,
+        # max_elms=40,
         max_epochs=2,
         lr=3e-3,
         lr_warmup_epochs=5,
-        batch_size=128,
+        batch_size=512,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=2,
-        max_confinement_event_length=int(15e3),
-        confinement_dataset_factor=0.2,
+        num_workers=4,
+        # max_confinement_event_length=int(15e3),
+        # confinement_dataset_factor=0.2,
         # balance_confinement_data_with_elm_data=True,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
