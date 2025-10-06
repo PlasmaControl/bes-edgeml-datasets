@@ -511,6 +511,7 @@ class Model(_Base_Class, LightningModule):
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
         if self.current_epoch==0 and batch_idx==0 and not dataloader_idx:
             self.zprint("Begin training")
+        self.rprint(f"{self.current_epoch}, {batch_idx}, {dataloader_idx}")
         output = self.update_step(
             batch, 
             batch_idx, 
@@ -1149,12 +1150,12 @@ class Data(_Base_Class, LightningDataModule):
                                 elm_signal_window_metadata.pop(i)
 
                 # balance signal windows across world_size
-                # if self.world_size > 1:
-                #     remainder = len(elm_signal_window_metadata) % self.world_size
-                #     if remainder:
-                #         elm_signal_window_metadata = elm_signal_window_metadata[:-remainder]
-                # assert len(elm_signal_window_metadata) % self.world_size == 0
-                # self.zprint(f"  Final global signal window count: {len(elm_signal_window_metadata):,d}")
+                if self.world_size > 1:
+                    remainder = len(elm_signal_window_metadata) % self.world_size
+                    if remainder:
+                        elm_signal_window_metadata = elm_signal_window_metadata[:-remainder]
+                assert len(elm_signal_window_metadata) % self.world_size == 0
+                self.zprint(f"  Rank-balanced global signal window count: {len(elm_signal_window_metadata):,d}")
                 self.elm_signal_window_metadata[sub_stage] = elm_signal_window_metadata
                 if sub_stage == 'test':
                     self.elm_signal_window_metadata['predict'] = self.elm_signal_window_metadata['test']
@@ -1240,6 +1241,7 @@ class Data(_Base_Class, LightningDataModule):
                         interelm_times=elms_to_interelm_map[i_elm],
                         elm_index=i_elm,
                         shot=elms_to_shot_map[i_elm],
+                        stride_factor=self.stride_factor,
                     )
                 )
             self.elm_datasets['predict'] = dataset_list
@@ -1298,7 +1300,7 @@ class Data(_Base_Class, LightningDataModule):
                     if event['labels'].size < self.signal_window_size:
                         continue
                     valid_t0 = np.zeros(event['labels'].size, dtype=int)
-                    valid_t0[self.signal_window_size-1::self.signal_window_size//8] = 1
+                    valid_t0[self.signal_window_size-1::self.signal_window_size//self.stride_factor] = 1
                     valid_t0_indices = np.arange(valid_t0.size, dtype=int)
                     valid_t0_indices = valid_t0_indices[valid_t0 == 1]
                     n_signal_windows = len(valid_t0_indices)
@@ -1422,7 +1424,7 @@ class Data(_Base_Class, LightningDataModule):
                 self.zprint(line)
 
         # split events among ranks for each stage
-        self.zprint(f"    Rankwise signal window counts (approx)")
+        self.zprint(f"    Approx. rank-wise signal window counts")
         for sub_stage in stages:
             # sort events longest to shortest for stage
             stage_to_event_mapping[sub_stage] = sorted(
@@ -1492,7 +1494,7 @@ class Data(_Base_Class, LightningDataModule):
         #             if self.max_confinement_event_length:
         #                 event_length = min(event_length, self.max_confinement_event_length)
         #             valid_t0 = np.zeros(event_length, dtype=int)
-        #             valid_t0[self.signal_window_size-1::self.signal_window_size//8] = 1
+        #             valid_t0[self.signal_window_size-1::self.signal_window_size//self.stride_factor] = 1
         #             valid_t0_indices = np.arange(valid_t0.size, dtype=int)
         #             valid_t0_indices = valid_t0_indices[valid_t0 == 1]
         #             n_signal_windows = len(valid_t0_indices)
@@ -1579,7 +1581,7 @@ class Data(_Base_Class, LightningDataModule):
                 assert labels.size == signals.shape[1]
                 signals = np.transpose(signals, (1, 0)).reshape(-1, self.n_rows, self.n_cols)
                 valid_t0 = np.zeros(labels.size, dtype=int)
-                valid_t0[self.signal_window_size-1::self.signal_window_size//8] = 1
+                valid_t0[self.signal_window_size-1::self.signal_window_size//self.stride_factor] = 1
                 valid_t0_indices = np.arange(valid_t0.size, dtype=int)
                 valid_t0_indices = valid_t0_indices[valid_t0 == 1]
                 for i in valid_t0_indices:
@@ -1645,14 +1647,14 @@ class Data(_Base_Class, LightningDataModule):
         self.rng.shuffle(packaged_valid_t0_indices)
 
         # match valid t0 indices count across ranks
-        # if self.trainer.world_size > 1 and sub_stage in ['train', 'validation']:
+        if self.trainer.world_size > 1 and sub_stage in ['train', 'validation']:
             # count_valid_t0_indices = len(packaged_valid_t0_indices)
-        #     self.rprint(f"    Valid t0 indices (unbalanced across ranks): {count_valid_t0_indices:,d}")
-            # all_rank_count_valid_indices: list = [None for _ in range(self.trainer.world_size)]
-            # for i in range(self.trainer.world_size):
-            #     all_rank_count_valid_indices[i] = self.broadcast(len(packaged_valid_t0_indices), src=i)
-        #     length_limit = min(all_rank_count_valid_indices)
-        #     packaged_valid_t0_indices = packaged_valid_t0_indices[:length_limit]
+            # self.rprint(f"    Valid t0 indices (unbalanced across ranks): {count_valid_t0_indices:,d}")
+            all_rank_count_valid_indices: list = [None for _ in range(self.trainer.world_size)]
+            for i in range(self.trainer.world_size):
+                all_rank_count_valid_indices[i] = self.broadcast(len(packaged_valid_t0_indices), src=i)
+            length_limit = min(all_rank_count_valid_indices)
+            packaged_valid_t0_indices = packaged_valid_t0_indices[:length_limit]
         self.rprint(f"    Valid t0 indices: {len(packaged_valid_t0_indices):,d}")
 
         # balance with ELM dataset, if applicable
@@ -1745,6 +1747,7 @@ class Data(_Base_Class, LightningDataModule):
                     labels=shotevent_to_labels_map[shotevent],
                     time=shotevent_to_time_map[shotevent],
                     shot_event_keys=shotevent_to_shot_and_event_map[shotevent],
+                    stride_factor=self.stride_factor,
                 )
                 dataset_list.append(dataset)
             self.confinement_datasets['predict'] = dataset_list
@@ -1958,6 +1961,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
     time_to_elm_quantiles: dict[float, float] = None
     shot: int = None
     elm_index: int = None
+    stride_factor: int = 8
 
     def __post_init__(self):
         super().__init__()
@@ -1971,7 +1975,7 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
         self.labels[self.i_start : self.i_predict] = 0
         self.labels[self.i_predict : self.i_stop+1] = 1
         i_sw_start = 0
-        stride = self.signal_window_size // 8
+        stride = self.signal_window_size // self.stride_factor
         self.valid_t0 = []
         while True:
             i_sw_end = i_sw_start + self.signal_window_size - 1
@@ -2047,6 +2051,7 @@ class Confinement_Predict_Dataset(torch.utils.data.Dataset):
     time: np.ndarray
     signal_window_size: int
     shot_event_keys: np.ndarray
+    stride_factor: int = 8
 
     def __post_init__(self) -> None:
         self.labels = torch.from_numpy(self.labels)
@@ -2061,7 +2066,7 @@ class Confinement_Predict_Dataset(torch.utils.data.Dataset):
             if stop_index > self.time.numel() - 1:
                 break
             self.sample_indices.append(start_index)
-            start_index += self.signal_window_size // 8
+            start_index += self.signal_window_size // self.stride_factor
         self.sample_indices = torch.tensor(self.sample_indices, dtype=torch.int64)
 
     def __len__(self) -> int:
