@@ -5,12 +5,10 @@ from typing import OrderedDict, Sequence
 import os
 import time
 import re
-import traceback
-
+import pickle
 
 import numpy as np
 import matplotlib.pyplot as plt
-from regex import F
 import scipy.signal
 import scipy.signal.windows
 import scipy.special
@@ -36,6 +34,9 @@ from lightning.pytorch.callbacks import \
 from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 from lightning.pytorch.utilities import grad_norm
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
+
+# import torchmetrics.classification
+from torchmetrics.classification import BinaryF1Score, BinaryPrecision, BinaryRecall
 
 import ml_data
 
@@ -102,6 +103,7 @@ class Model(_Base_Class, LightningModule):
     unfreeze_uncertainty_epoch: int = -1
     backbone_model_path: str|Path = None
     backbone_first_n_layers: int = None
+    elmwise_f1_interval: int = 25
 
     def __post_init__(self):
 
@@ -110,6 +112,7 @@ class Model(_Base_Class, LightningModule):
         super(_Base_Class, self).__init__()
         self.save_hyperparameters()
         self.trainer: Trainer = None
+        self.run_dir: Path = None
 
         if self.is_global_zero:
             print_fields(self)
@@ -151,14 +154,18 @@ class Model(_Base_Class, LightningModule):
             self.task_configs[task_name] = {}
             self.task_configs[task_name]['layers'] = self.mlp_tasks[task_name]
             if 'class' in task_name:
+                self.elm_wise_results = {}
                 self.task_configs[task_name]['metrics'] = {
-                        'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
-                        'f1_score': sklearn.metrics.f1_score,
-                        'precision_score': sklearn.metrics.precision_score,
-                        'recall_score': sklearn.metrics.recall_score,
-                        'mean_stat': torch.mean,
-                        'std_stat': torch.std,
-                    }
+                    'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
+                    # 'f1_score': sklearn.metrics.f1_score,
+                    'f1_score': BinaryF1Score(),
+                    # 'precision_score': sklearn.metrics.precision_score,
+                    # 'recall_score': sklearn.metrics.recall_score,
+                    'precision_score': BinaryPrecision(),
+                    'recall_score': BinaryRecall(),
+                    'mean_stat': torch.mean,
+                    'std_stat': torch.std,
+                }
                 self.task_configs[task_name]['monitor_metric'] = 'f1_score/val'
             elif 'onehot' in task_name:
                 self.task_configs[task_name]['metrics'] = {
@@ -511,8 +518,8 @@ class Model(_Base_Class, LightningModule):
     def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
         if not (self.current_epoch or batch_idx or dataloader_idx):
             self.zprint("Begin training")
-        if batch_idx%500 == 0:
-            self.zprint(f"    {self.current_epoch}, {batch_idx}, {dataloader_idx}")
+        # if batch_idx%500 == 0:
+        #     self.zprint(f"    {self.current_epoch}, {batch_idx}, {dataloader_idx}")
         output = self.update_step(
             batch, 
             batch_idx, 
@@ -575,10 +582,25 @@ class Model(_Base_Class, LightningModule):
             metrics = self.task_metrics[task]
             if task == 'elm_class' and dataloader_idx in [None, 0]:
                 labels: torch.Tensor = batch[task][1][0.5] if isinstance(batch, dict) else batch[1][0.5]
+                elm_indices: torch.Tensor = batch[task][2] if isinstance(batch, dict) else batch[2]
+                task_outputs: torch.Tensor = task_outputs.reshape_as(labels)
+                if self.current_epoch%self.elmwise_f1_interval==0 and stage in ['train','val']:
+                    if batch_idx==0 and stage=='train':
+                        assert not self.elm_wise_results
+                    for i in range(elm_indices.shape[0]):
+                        elm_index = elm_indices[i].item()
+                        if elm_index not in self.elm_wise_results:
+                            self.elm_wise_results[elm_index] = {
+                                'labels': [], 
+                                'outputs': [], 
+                                'stage': stage,
+                            }
+                        self.elm_wise_results[elm_index]['labels'].append(labels[i].item())
+                        self.elm_wise_results[elm_index]['outputs'].append(task_outputs[i].item())
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
-                            input=task_outputs.reshape_as(labels),
+                            input=task_outputs,
                             target=labels.type_as(task_outputs),
                         )
                         prod_loss = prod_loss * metric_value if prod_loss else metric_value
@@ -589,15 +611,19 @@ class Model(_Base_Class, LightningModule):
                         )
                         sum_loss = sum_loss + metric_weighted if sum_loss else metric_weighted
                     elif 'score' in metric_name:
+                        # metric_value = metric_function(
+                        #     y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
+                        #     y_true=labels.detach().cpu(),
+                        #     zero_division=0,
+                        # )
                         metric_value = metric_function(
-                            y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
-                            y_true=labels.detach().cpu(),
-                            zero_division=0,
+                            preds=task_outputs,
+                            target=labels,
                         )
                         if metric_name == 'f1_score':
                             sum_score = sum_score + metric_value if sum_score else metric_value
                     elif 'stat' in metric_name:
-                        metric_value = metric_function(task_outputs).item()
+                        metric_value = metric_function(task_outputs)#.item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
             elif task == 'conf_onehot' and dataloader_idx in [None, 1]:
                 labels = batch[task][1] if isinstance(batch, dict) else batch[1]
@@ -656,9 +682,13 @@ class Model(_Base_Class, LightningModule):
         # for param in self.task_log_sigma.parameters():
         #     param.requires_grad = False
 
+    def on_validation_epoch_start(self):
+        pass
+
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
+        self.elm_wise_results = {}
         train_dataloader: CombinedLoader = self.trainer.train_dataloader
         for dl in train_dataloader.values():
             self.current_batch_size = dl.batch_size * self.trainer.world_size
@@ -700,7 +730,6 @@ class Model(_Base_Class, LightningModule):
         if self.is_multitask:
             for logger in self.loggers:
                 logger.log_metrics(
-                    # metrics=self.task_log_sigma, 
                     metrics={
                         f'task_log_sigma/{task}': self.task_log_sigma[task].data.item()
                         for task in self.task_names
@@ -728,6 +757,45 @@ class Model(_Base_Class, LightningModule):
             if self.n_frozen_layers:
                 line += f" n_frozen: {self.n_frozen_layers}" 
             print(line)
+        # global ELM-wise F1 scores
+        all_elm_wise_results = {}
+        for i in range(self.trainer.world_size):
+            all_elm_wise_results[i] = self.trainer.strategy.broadcast(self.elm_wise_results, src=i)
+        if self.is_global_zero and self.global_step > 0 and self.current_epoch%self.elmwise_f1_interval==0:
+            elm_wise_results = {}
+            for rank_results in all_elm_wise_results.values():
+                for elm_index in rank_results:
+                    assert elm_index not in elm_wise_results
+                elm_wise_results.update(rank_results)
+            elm_wise_f1_scores = {}
+            for elm_index, elm_data in elm_wise_results.items():
+                labels = np.array(elm_data['labels'], dtype=int)
+                outputs = (np.array(elm_data['outputs']) >= 0.0).astype(int)
+                f1_score = sklearn.metrics.f1_score(
+                    y_true=labels, 
+                    y_pred=outputs,
+                    zero_division=0,
+                )
+                elm_wise_f1_scores[elm_index] = f1_score
+            sorted_elm_scores_by_stage = {}
+            for stage in ['train','val']:
+                sorted_elm_indices = sorted(
+                    [key for key in elm_wise_f1_scores.keys() if elm_wise_results[key]['stage']==stage],
+                    key=lambda key: elm_wise_f1_scores[key],
+                    reverse=True,
+                )
+                # for elm_index in sorted_elm_indices[:10]:
+                #     self.zprint(f"  {stage}  ELM {elm_index:04d} F1 {elm_wise_f1_scores[elm_index]:.3f} (n_samples {len(elm_wise_results[elm_index]['labels'])})")
+                sorted_elm_scores_by_stage[stage] = {
+                    elm_index: elm_wise_f1_scores[elm_index]
+                    for elm_index in sorted_elm_indices
+                }
+            pickle_file = self.run_dir / f'elm_wise_f1_scores_ep{self.current_epoch:04d}.pkl'
+            assert not pickle_file.exists()
+            with open(pickle_file, 'wb') as f:
+                self.zprint(f"  Saving ELM-wise F1 scores to {pickle_file}")
+                pickle.dump(sorted_elm_scores_by_stage, f)
+        return
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
@@ -745,10 +813,6 @@ class Model(_Base_Class, LightningModule):
         trainer: Trainer = self.trainer
         dataloaders: Sequence[torch.utils.data.DataLoader] = trainer.predict_dataloaders
         datamodule: Data = trainer.datamodule
-        figure_dir = Path(
-            trainer.loggers[0].name,
-            trainer.loggers[0].version,
-        )
         for i_dl, batch_list in self.predict_outputs.items():
             self.zprint(f"  Plotting predictions for dataloader {i_dl}")
             task = datamodule.loader_tasks[i_dl]
@@ -785,9 +849,9 @@ class Model(_Base_Class, LightningModule):
                             color='y', alpha=0.2, zorder=1)
                 plt.title(f'Shot {dataset.shot} | Sig. win. {self.signal_window_size/1e3:.2f} ms| P(ELM within {dataset.t_predict:.1f} ms)')
                 plt.ylabel('Scaled BES signal or probability')
-                file_path = figure_dir / f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
+                file_path = self.run_dir / f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
             elif task == 'conf_onehot':
-                file_path = figure_dir / f'predict_conf_shot_{dataset.shot}_eventid_{dataset.event:04d}.png'
+                file_path = self.run_dir / f'predict_conf_shot_{dataset.shot}_eventid_{dataset.event:04d}.png'
             plt.xlabel('Time (ms)')
             plt.legend(
                 loc='lower right',
@@ -806,6 +870,11 @@ class Model(_Base_Class, LightningModule):
         assert self.is_global_zero == self.trainer.is_global_zero
         if self.is_global_zero:
             assert self.global_rank == 0
+        trainer: Trainer = self.trainer
+        self.run_dir = Path(
+            trainer.loggers[0].name,
+            trainer.loggers[0].version,
+        )
 
     @staticmethod
     def param_count(model: LightningModule) -> int:
@@ -1951,7 +2020,7 @@ class ELM_TrainValTest_Dataset(torch.utils.data.Dataset):
         signals = self.elms_to_signals_dict[sw_metadata['elm_index']]
         signal_window = signals[..., sw_metadata['i_t0'] : sw_metadata['i_t0'] + self.signal_window_size, :, :]
         quantile_binary_label = {q: int(sw_metadata['time_to_elm']<=qval) for q, qval in self.time_to_elm_quantiles.items()}
-        return signal_window, quantile_binary_label #sw_metadata['time_to_elm']
+        return signal_window, quantile_binary_label, sw_metadata['elm_index'] #sw_metadata['time_to_elm']
 
 
 @dataclasses.dataclass(eq=False)
@@ -2384,24 +2453,24 @@ if __name__=='__main__':
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        'conf_onehot': [None,16,4],
+        # 'conf_onehot': [None,16,4],
     }
     main(
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
-        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
-        # elm_data_file=ml_data.small_data_100,
+        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
+        elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        # max_elms=40,
+        max_elms=50,
         max_epochs=2,
         lr=3e-3,
         lr_warmup_epochs=5,
-        batch_size=512,
+        batch_size=128,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=4,
+        num_workers=0,
         # max_confinement_event_length=int(15e3),
         # confinement_dataset_factor=0.2,
         # balance_confinement_data_with_elm_data=True,
