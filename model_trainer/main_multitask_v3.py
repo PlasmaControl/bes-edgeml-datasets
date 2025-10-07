@@ -1640,6 +1640,7 @@ class Data(_Base_Class, LightningDataModule):
         packaged_valid_t0_indices = np.arange(packaged_valid_t0.size, dtype=int)
         packaged_valid_t0_indices = packaged_valid_t0_indices[packaged_valid_t0 == 1]
         assert np.all(np.isfinite(packaged_labels[packaged_valid_t0_indices]))
+        assert len(packaged_valid_t0_indices)
         for i in packaged_valid_t0_indices:
             assert i - self.signal_window_size + 1 >= 0  # start slice
             assert i+1 <= packaged_valid_t0.size  # end slice
@@ -1682,7 +1683,7 @@ class Data(_Base_Class, LightningDataModule):
             signal_max = -np.inf
             n_bins = 200
             cummulative_hist = np.zeros(n_bins, dtype=int)
-            stat_interval = max(1, packaged_valid_t0_indices.size//int(2e3))
+            stat_interval = max(1, packaged_valid_t0_indices.size//int(1e3))
             stat_count = 0
             for i in packaged_valid_t0_indices[::stat_interval]:
                 stat_count += 1
