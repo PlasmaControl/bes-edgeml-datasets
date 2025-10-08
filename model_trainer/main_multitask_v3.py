@@ -66,6 +66,7 @@ class _Base_Class:
 
         self.world_size = int(os.getenv("SLURM_NTASKS", default=1))
         self.world_rank = int(os.getenv("SLURM_PROCID", default=0))
+        self.slurm_local_rank = int(os.getenv("SLURM_LOCALID", default=0))
         self.is_global_zero = self.world_rank == 0
 
         if self.world_rank > 0:
@@ -158,11 +159,11 @@ class Model(_Base_Class, LightningModule):
                 self.task_configs[task_name]['metrics'] = {
                     'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
                     # 'f1_score': sklearn.metrics.f1_score,
-                    'f1_score': BinaryF1Score(),
+                    'f1_score': BinaryF1Score().to(f'cuda:{self.slurm_local_rank}'),
                     # 'precision_score': sklearn.metrics.precision_score,
                     # 'recall_score': sklearn.metrics.recall_score,
-                    'precision_score': BinaryPrecision(),
-                    'recall_score': BinaryRecall(),
+                    'precision_score': BinaryPrecision().to(f'cuda:{self.slurm_local_rank}'),
+                    'recall_score': BinaryRecall().to(f'cuda:{self.slurm_local_rank}'),
                     'mean_stat': torch.mean,
                     'std_stat': torch.std,
                 }
@@ -547,7 +548,7 @@ class Model(_Base_Class, LightningModule):
     def predict_step(self, batch, batch_idx, dataloader_idx) -> bool:
         assert dataloader_idx is not None
         if batch_idx == 0:
-            self.zprint(f"  Predict for dataloader_idx {dataloader_idx}")
+            self.rprint(f"  Predict for dataloader_idx {dataloader_idx}")
             assert dataloader_idx not in self.predict_outputs
             self.predict_outputs[dataloader_idx] = []
         signals, labels, times = batch
@@ -568,7 +569,7 @@ class Model(_Base_Class, LightningModule):
 
     def update_step(
             self, 
-            batch: dict|list, 
+            batch: dict, 
             batch_idx = None, 
             dataloader_idx = None,
             stage: str = '', 
@@ -764,8 +765,8 @@ class Model(_Base_Class, LightningModule):
         if self.is_global_zero and self.global_step > 0 and self.current_epoch%self.elmwise_f1_interval==0:
             elm_wise_results = {}
             for rank_results in all_elm_wise_results.values():
-                for elm_index in rank_results:
-                    assert elm_index not in elm_wise_results
+                # for elm_index in rank_results:
+                #     assert elm_index not in elm_wise_results
                 elm_wise_results.update(rank_results)
             elm_wise_f1_scores = {}
             for elm_index, elm_data in elm_wise_results.items():
@@ -803,6 +804,8 @@ class Model(_Base_Class, LightningModule):
 
     def on_predict_start(self) -> None:
         self.predict_outputs: dict[int,list] = {}
+        self.rprint("  Predict start")
+        self.trainer.strategy.barrier()
 
     def on_predict_end(self) -> None:
         plt.ioff()
@@ -861,6 +864,7 @@ class Model(_Base_Class, LightningModule):
             )
             plt.tight_layout()
             plt.savefig(file_path, dpi=300)
+        trainer.strategy.barrier()
 
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
@@ -1025,7 +1029,10 @@ class Data(_Base_Class, LightningDataModule):
                     else sum([len(ds) for ds in datasets])
                 )
                 batches = n_samples / (self.batch_size/self.world_size)
-                self.rprint(f"    {task}  n_samples: {n_samples:,d}  batches/epoch: {batches:.1f}")
+                out = f"    {task}  n_samples: {n_samples:,d}  batches/epoch: {batches:.1f}"
+                if 'predict' in sub_stage.lower():
+                    out += f"  datasets: {len(datasets)}"
+                self.rprint(out)
                 self.barrier()
             # if 'elm_class' in self.tasks and \
             #         'conf_onehot' in self.tasks and \
@@ -1962,13 +1969,16 @@ class Data(_Base_Class, LightningDataModule):
         self.loader_tasks = []
         for task in self.tasks:
             if task == 'elm_class':
+                # self.rprint("  \u2B1C " + f" ELM n_datasets: {len(self.elm_datasets['predict'])}")
                 for dataset in self.elm_datasets['predict']:
                     loaders.append(self.get_dataloader_from_dataset('predict', dataset))
                     self.loader_tasks.append(task)
             elif task == 'conf_onehot':
+                # self.rprint("  \u2B1C " + f" conf. n_datasets: {len(self.confinement_datasets['predict'])}")
                 for dataset in self.confinement_datasets['predict']:
                     loaders.append(self.get_dataloader_from_dataset('predict', dataset))
                     self.loader_tasks.append(task)
+        self.rprint(f"  Predict dataloaders: {len(loaders)}")
         return loaders
 
     def load_state_dict(self, state: dict) -> None:
@@ -2459,18 +2469,18 @@ if __name__=='__main__':
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
-        elm_data_file=ml_data.small_data_100,
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
+        # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=50,
+        max_elms=100,
         max_epochs=2,
         lr=3e-3,
         lr_warmup_epochs=5,
-        batch_size=128,
+        batch_size=256,
         fraction_validation=0.15,
         fraction_test=0.15,
-        num_workers=0,
+        num_workers=4,
         # max_confinement_event_length=int(15e3),
         # confinement_dataset_factor=0.2,
         # balance_confinement_data_with_elm_data=True,
