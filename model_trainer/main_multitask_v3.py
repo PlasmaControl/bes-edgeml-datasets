@@ -36,7 +36,9 @@ from lightning.pytorch.utilities import grad_norm
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
 
 # import torchmetrics.classification
-from torchmetrics.classification import BinaryF1Score, BinaryPrecision, BinaryRecall
+from torchmetrics.classification import \
+    BinaryF1Score, BinaryPrecision, BinaryRecall, \
+    MulticlassF1Score, MulticlassPrecision, MulticlassRecall
 
 import ml_data
 
@@ -114,6 +116,7 @@ class Model(_Base_Class, LightningModule):
         self.save_hyperparameters()
         self.trainer: Trainer = None
         self.run_dir: Path = None
+        self.local_device: str = f'cuda:{self.slurm_local_rank}'
 
         if self.is_global_zero:
             print_fields(self)
@@ -158,12 +161,9 @@ class Model(_Base_Class, LightningModule):
                 self.elm_wise_results = {}
                 self.task_configs[task_name]['metrics'] = {
                     'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
-                    # 'f1_score': sklearn.metrics.f1_score,
-                    'f1_score': BinaryF1Score().to(f'cuda:{self.slurm_local_rank}'),
-                    # 'precision_score': sklearn.metrics.precision_score,
-                    # 'recall_score': sklearn.metrics.recall_score,
-                    'precision_score': BinaryPrecision().to(f'cuda:{self.slurm_local_rank}'),
-                    'recall_score': BinaryRecall().to(f'cuda:{self.slurm_local_rank}'),
+                    'f1_score': BinaryF1Score().to(self.local_device),
+                    'precision_score': BinaryPrecision().to(self.local_device),
+                    'recall_score': BinaryRecall().to(self.local_device),
                     'mean_stat': torch.mean,
                     'std_stat': torch.std,
                 }
@@ -171,9 +171,9 @@ class Model(_Base_Class, LightningModule):
             elif 'onehot' in task_name:
                 self.task_configs[task_name]['metrics'] = {
                     'ce_loss': torch.nn.functional.cross_entropy,
-                    'f1_score': sklearn.metrics.f1_score,
-                    'precision_score': sklearn.metrics.precision_score,
-                    'recall_score': sklearn.metrics.recall_score,
+                    'f1_score': MulticlassF1Score(4).to(self.local_device),
+                    'precision_score': MulticlassPrecision(4).to(self.local_device),
+                    'recall_score': MulticlassRecall(4).to(self.local_device),
                     'mean_stat': lambda t: torch.abs(torch.mean(t)), #torch.mean,
                     'std_stat': torch.std,
                 }
@@ -612,11 +612,6 @@ class Model(_Base_Class, LightningModule):
                         )
                         sum_loss = sum_loss + metric_weighted if sum_loss else metric_weighted
                     elif 'score' in metric_name:
-                        # metric_value = metric_function(
-                        #     y_pred=(task_outputs.detach().cpu() >= 0.0).type(torch.int), 
-                        #     y_true=labels.detach().cpu(),
-                        #     zero_division=0,
-                        # )
                         metric_value = metric_function(
                             preds=task_outputs,
                             target=labels,
@@ -627,12 +622,12 @@ class Model(_Base_Class, LightningModule):
                         metric_value = metric_function(task_outputs)#.item()
                     self.log(f"{task}/{metric_name}/{stage}", metric_value, sync_dist=True, add_dataloader_idx=False)
             elif task == 'conf_onehot' and dataloader_idx in [None, 1]:
-                labels = batch[task][1] if isinstance(batch, dict) else batch[1]
+                labels = (batch[task][1] if isinstance(batch, dict) else batch[1]).flatten()
                 for metric_name, metric_function in metrics.items():
                     if 'loss' in metric_name:
                         metric_value = metric_function(
                             input=task_outputs,
-                            target=labels.flatten(),
+                            target=labels,
                         )
                         prod_loss = prod_loss * metric_value if prod_loss else metric_value
                         metric_weighted = (
@@ -643,13 +638,8 @@ class Model(_Base_Class, LightningModule):
                         sum_loss = sum_loss + metric_weighted if sum_loss else metric_weighted
                     elif 'score' in metric_name:
                         metric_value = metric_function(
-                            y_pred=(task_outputs > 0.0).type(torch.int).detach().cpu(), 
-                            y_true=torch.nn.functional.one_hot(
-                                labels.flatten().detach().cpu(),
-                                num_classes=4,
-                            ),
-                            zero_division=0,
-                            average='macro',
+                            preds=task_outputs,
+                            target=labels,
                         )
                         if metric_name == 'f1_score':
                             sum_score = sum_score + metric_value if sum_score else metric_value
@@ -2497,16 +2487,16 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        # max_elms=100,
-        max_epochs=1,
+        max_elms=30,
+        max_epochs=2,
         lr=3e-3,
         lr_warmup_epochs=5,
-        batch_size=512,
+        batch_size=128,
         fraction_validation=0.125,
         fraction_test=0.1,
-        num_workers=4,
-        # max_confinement_event_length=int(20e3),
-        # confinement_dataset_factor=0.2,
+        num_workers=0,
+        max_confinement_event_length=int(5e3),
+        confinement_dataset_factor=0.2,
         # balance_confinement_data_with_elm_data=True,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
