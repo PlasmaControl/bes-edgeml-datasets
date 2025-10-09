@@ -68,6 +68,7 @@ class _Base_Class:
 
         self.world_size = int(os.getenv("SLURM_NTASKS", default=1))
         self.world_rank = int(os.getenv("SLURM_PROCID", default=0))
+        self.num_nodes = int(os.getenv('SLURM_NNODES', default=1))
         self.slurm_local_rank = int(os.getenv("SLURM_LOCALID", default=0))
         self.is_global_zero = self.world_rank == 0
 
@@ -667,6 +668,23 @@ class Model(_Base_Class, LightningModule):
             results[task] = self.task_models[task](features)
         return results
 
+    def setup(self, stage=None):  # fit, validate, test, or predict
+        assert self.is_global_zero == self.trainer.is_global_zero
+        if self.is_global_zero:
+            assert self.global_rank == 0
+        trainer: Trainer = self.trainer
+        self.run_dir = Path(
+            trainer.loggers[0].name,
+            trainer.loggers[0].version,
+        )
+        if self.world_size > 0:
+            print(f"World rank {self.world_rank} of size {self.world_size} on {self.num_nodes} node(s)")
+        if self.num_nodes > 1:
+            local_rank = int(os.getenv("SLURM_LOCALID", default=0))
+            node_rank = int(os.getenv("SLURM_NODEID", default=0))
+            print(f"  Local rank {local_rank} on node {node_rank}")
+        trainer.strategy.barrier()
+
     def on_fit_start(self):
         self.t_fit_start = time.time()
         self.zprint(f"**** Fit start with max epochs {self.trainer.max_epochs} ****")
@@ -794,10 +812,11 @@ class Model(_Base_Class, LightningModule):
 
     def on_predict_start(self) -> None:
         self.predict_outputs: dict[int,list] = {}
-        self.rprint("  Predict start")
+        self.zprint("  Predict start")
         self.trainer.strategy.barrier()
 
     def on_predict_end(self) -> None:
+        self.trainer.strategy.barrier()
         if not self.predict_outputs:
             return
         plt.ioff()
@@ -809,7 +828,7 @@ class Model(_Base_Class, LightningModule):
         dataloaders: Sequence[torch.utils.data.DataLoader] = trainer.predict_dataloaders
         datamodule: Data = trainer.datamodule
         for i_dl, batch_list in self.predict_outputs.items():
-            self.zprint(f"  Plotting predictions for dataloader {i_dl}")
+            self.rprint(f"  Plotting predictions for dataloader {i_dl}")
             task = datamodule.loader_tasks[i_dl]
             dataset = dataloaders[i_dl].dataset
             times = np.concatenate([batch['times'] for batch in batch_list], axis=0)
@@ -856,21 +875,11 @@ class Model(_Base_Class, LightningModule):
             )
             plt.tight_layout()
             plt.savefig(file_path, dpi=300)
-        # trainer.strategy.barrier()
+        trainer.strategy.barrier()
 
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
         self.log_dict(norms, on_step=True)
-
-    def setup(self, stage=None):  # fit, validate, test, or predict
-        assert self.is_global_zero == self.trainer.is_global_zero
-        if self.is_global_zero:
-            assert self.global_rank == 0
-        trainer: Trainer = self.trainer
-        self.run_dir = Path(
-            trainer.loggers[0].name,
-            trainer.loggers[0].version,
-        )
 
     @staticmethod
     def param_count(model: LightningModule) -> int:
@@ -1235,7 +1244,7 @@ class Data(_Base_Class, LightningDataModule):
             'elm_sw_count_by_stage': self.elm_sw_count_by_stage,
         })
         for state, count in self.elm_sw_count_by_stage.items():
-            self.zprint(f"  {state.upper()}  signal windows: {count:,d}  batches per epoch: {count / (self.batch_size):,.2f}")    
+            self.zprint(f"  {state.upper()}  n_sigwins: {count:,d}  batches/ep: {count / (self.batch_size):,.2f}")    
         self.zprint(f"  ELM data prepare time: {time.time()-t_tmp:0.1f} s")
 
     def setup_elm_data_for_rank(self, sub_stage: str):
@@ -1260,7 +1269,6 @@ class Data(_Base_Class, LightningDataModule):
         # sw_per_rank = len(sw_for_stage) // self.trainer.world_size
         # sw_for_rank = sw_for_stage[self.trainer.global_rank*sw_per_rank:(self.trainer.global_rank+1)*sw_per_rank]
         sw_for_rank: np.ndarray = sw_for_stage[indices_for_ranks[self.trainer.global_rank]]
-        self.rprint(f"    {sub_stage.upper()} signal windows: {len(sw_for_rank):,d}  batches per epoch: {len(sw_for_rank) / (self.batch_size//self.trainer.world_size):,.2f}")
         elms_for_rank = np.unique(np.array([item['elm_index'] for item in sw_for_rank],dtype=int))
         elms_to_signals_map: dict[int, torch.Tensor] = {}
         elms_to_time_map: dict[int, np.ndarray] = {}
@@ -1289,7 +1297,7 @@ class Data(_Base_Class, LightningDataModule):
                 )
         assert len(elms_to_signals_map) == len(elms_for_rank)
         signal_memory_size = sum([array.nbytes for array in elms_to_signals_map.values()])
-        self.rprint(f"    Signal memory size: {signal_memory_size/(1024**3):.3f} GB")
+        self.rprint(f"    {sub_stage.upper()} n_sigwins: {len(sw_for_rank):,d}  batches/ep: {len(sw_for_rank) / (self.batch_size//self.trainer.world_size):,.2f}  mem: {signal_memory_size/(1024**3):.3f} GB")
         self.barrier()
 
         # rank-wise datasets
@@ -1986,7 +1994,7 @@ class Data(_Base_Class, LightningDataModule):
                 for dataset in self.confinement_datasets['predict']:
                     loaders.append(self.get_dataloader_from_dataset('predict', dataset))
                     self.loader_tasks.append(task)
-        self.rprint(f"  Predict dataloaders: {len(loaders)}")
+        self.zprint(f"  Predict dataloaders: {len(loaders)}")
         return loaders
 
     def load_state_dict(self, state: dict) -> None:
@@ -2250,16 +2258,13 @@ def main(
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
     world_size = int(os.getenv("SLURM_NTASKS", default=1))
     world_rank = int(os.getenv("SLURM_PROCID", default=0))
-    if world_size > 0:
-        print(f"World rank {world_rank} of size {world_size} on {num_nodes} node(s)")
-    if num_nodes > 1:
-        local_rank = int(os.getenv("SLURM_LOCALID", default=0))
-        node_rank = int(os.getenv("SLURM_NODEID", default=0))
-        print(f"  Local rank {local_rank} on node {node_rank}")
-    is_global_zero = (world_rank == 0)
 
+    is_global_zero = (world_rank == 0)
     def zprint(text):
-        if is_global_zero: print(text)
+        if is_global_zero:
+            print(text)
+
+    zprint(f"World rank {world_rank} of size {world_size} on {num_nodes} node(s)")
 
     ### model
     zprint("\u2B1C Creating model")
@@ -2487,15 +2492,15 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=30,
+        max_elms=100,
         max_epochs=2,
         lr=3e-3,
         lr_warmup_epochs=5,
         batch_size=128,
         fraction_validation=0.125,
         fraction_test=0.1,
-        num_workers=0,
-        max_confinement_event_length=int(5e3),
+        num_workers=4,
+        max_confinement_event_length=int(25e3),
         confinement_dataset_factor=0.2,
         # balance_confinement_data_with_elm_data=True,
         # use_wandb=True,
