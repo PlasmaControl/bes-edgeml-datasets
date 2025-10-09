@@ -4,7 +4,7 @@
 #SBATCH --mail-user=david.smith@wisc.edu
 #SBATCH --mail-type=ALL
 
-#SBATCH --nodes=1
+#SBATCH --nodes=4
 #SBATCH --ntasks-per-node=4
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32

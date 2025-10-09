@@ -808,6 +808,8 @@ class Model(_Base_Class, LightningModule):
         self.trainer.strategy.barrier()
 
     def on_predict_end(self) -> None:
+        if not self.predict_outputs:
+            return
         plt.ioff()
         plt.figure()
         n_boxcar = 8
@@ -864,7 +866,7 @@ class Model(_Base_Class, LightningModule):
             )
             plt.tight_layout()
             plt.savefig(file_path, dpi=300)
-        trainer.strategy.barrier()
+        # trainer.strategy.barrier()
 
     def on_before_optimizer_step(self, optimizer):
         norms = grad_norm(self, norm_type=2)
@@ -934,6 +936,8 @@ class Data(_Base_Class, LightningDataModule):
         self.trainer: Trainer = None
 
         self.state_items = []
+
+        self.allow_zero_length_dataloader_with_multiple_devices = True
 
         for task_name in self.tasks:
             assert task_name in ['elm_class', 'conf_onehot'], f"Unknown task {task_name}"
@@ -1321,6 +1325,13 @@ class Data(_Base_Class, LightningDataModule):
                         stride_factor=self.stride_factor,
                     )
                 )
+            rankwise_dataset_count = [
+                self.broadcast(len(dataset_list), src=i)
+                for i in range(self.world_size)
+            ]
+            max_rankwise_dataset_count = max(rankwise_dataset_count)
+            while len(dataset_list) < max_rankwise_dataset_count:
+                dataset_list.append(ELM_Predict_Dataset())
             self.elm_datasets['predict'] = dataset_list
 
     def prepare_confinement_data(self):
@@ -1828,6 +1839,13 @@ class Data(_Base_Class, LightningDataModule):
                     stride_factor=self.stride_factor,
                 )
                 dataset_list.append(dataset)
+            rankwise_dataset_count = [
+                self.broadcast(len(dataset_list), src=i)
+                for i in range(self.world_size)
+            ]
+            max_rankwise_dataset_count = max(rankwise_dataset_count)
+            while len(dataset_list) < max_rankwise_dataset_count:
+                dataset_list.append(Confinement_Predict_Dataset())
             self.confinement_datasets['predict'] = dataset_list
 
     def get_dataloader_from_dataset(
@@ -2046,6 +2064,9 @@ class ELM_Predict_Dataset(torch.utils.data.Dataset):
 
     def __post_init__(self):
         super().__init__()
+        if self.time is None and self.signals is None:
+            self.valid_t0 = []
+            return
         self.t_start = self.interelm_times[0]
         self.t_stop = self.interelm_times[1]
         self.t_predict = self.time_to_elm_quantiles[0.5]
@@ -2127,14 +2148,17 @@ class Confinement_TrainValTest_Dataset(torch.utils.data.Dataset):
 
 @dataclasses.dataclass(eq=False)
 class Confinement_Predict_Dataset(torch.utils.data.Dataset):
-    signals: np.ndarray
-    labels: np.ndarray
-    time: np.ndarray
-    signal_window_size: int
-    shot_event_keys: np.ndarray
+    signals: np.ndarray = None
+    labels: np.ndarray = None
+    time: np.ndarray = None
+    signal_window_size: int = None
+    shot_event_keys: np.ndarray = None
     stride_factor: int = 8
 
     def __post_init__(self) -> None:
+        if self.signals is None and self.time is None:
+            self.sample_indices = torch.tensor([])
+            return
         self.labels = torch.from_numpy(self.labels)
         self.signals = torch.from_numpy(self.signals[np.newaxis, ...])
         self.time = torch.from_numpy(self.time)
@@ -2463,7 +2487,7 @@ if __name__=='__main__':
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        # 'conf_onehot': [None,16,4],
+        'conf_onehot': [None,16,4],
     }
     main(
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
@@ -2473,15 +2497,15 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=100,
-        max_epochs=2,
+        # max_elms=100,
+        max_epochs=1,
         lr=3e-3,
         lr_warmup_epochs=5,
-        batch_size=256,
-        fraction_validation=0.15,
-        fraction_test=0.15,
+        batch_size=512,
+        fraction_validation=0.125,
+        fraction_test=0.1,
         num_workers=4,
-        # max_confinement_event_length=int(15e3),
+        # max_confinement_event_length=int(20e3),
         # confinement_dataset_factor=0.2,
         # balance_confinement_data_with_elm_data=True,
         # use_wandb=True,
