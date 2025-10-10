@@ -1,8 +1,7 @@
-from numpy import random
-from model_trainer.main_multitask_v2 import main
+import os
+from model_trainer.main_multitask_v3 import main
 
 if __name__=='__main__':
-    rng = random.default_rng()
 
     fir_choices = (
         (8, None),
@@ -10,18 +9,22 @@ if __name__=='__main__':
         (None, 100),
         (None, 200),
     )
+    weight_decay_choices = (1e-5, 1e-4)
+    task_id = int(os.getenv('SLURM_ARRAY_TASK_ID', None))
 
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v18',
+        experiment_name='multi_256_v26',
+        trial_name_prefix=f'L3_T{task_id:02d}',
         # data
-        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=rng.choice([60,80]),
-        max_confinement_event_length=int(30e3),
-        confinement_dataset_factor=0.3,
-        fraction_validation=0.15,
+        max_elms=80,
+        max_confinement_event_length=int(20e3),
+        confinement_dataset_factor=0.2,
+        fraction_validation=0.1,
+        fraction_test=0.1,
         num_workers=4,
         # model
         feature_model_layers = (
@@ -34,14 +37,14 @@ if __name__=='__main__':
             'conf_onehot': [None, 32, 4],
         },
         monitor_metric='sum_score/train',
-        fir_bp=fir_choices[rng.choice(len(fir_choices))],
+        fir_bp=fir_choices[task_id%len(fir_choices)],
         # training
-        max_epochs=500,
-        lr=rng.choice([3e-3, 1e-2]),
+        max_epochs=150,
+        lr=1e-2,
         lr_warmup_epochs=10,
         lr_scheduler_patience=50,
         lr_scheduler_threshold=1e-2,
-        weight_decay=rng.choice([1e-5, 1e-4, 1e-3]),
+        weight_decay=weight_decay_choices[task_id%len(weight_decay_choices)],
         batch_size=256,
         use_wandb=True,
         early_stopping_patience=125,

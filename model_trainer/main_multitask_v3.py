@@ -863,7 +863,7 @@ class Model(_Base_Class, LightningModule):
                             color='y', alpha=0.2, zorder=1)
                 plt.axvspan(dataset.t_stop, bes_time[-1], 
                             color='y', alpha=0.2, zorder=1)
-                plt.title(f'Shot {dataset.shot} | Sig. win. {self.signal_window_size/1e3:.2f} ms| P(ELM within {dataset.t_predict:.1f} ms)')
+                plt.title(f'Shot {dataset.shot} | ELM ID {dataset.elm_index:04d}')
                 plt.xlabel('Time (ms)')
                 plt.ylabel(f'Scaled BES ch. {bes_channel} or probability')
                 plt.legend(
@@ -963,7 +963,7 @@ class Model(_Base_Class, LightningModule):
                     ),
                     fontsize='large',
                 )
-                plt.title(f"Shot {dataset.shot}")
+                plt.title(f"Shot {dataset.shot} | event {dataset.event}")
                 plt.xlabel('Time (ms)')
                 plt.ylabel(f'Scaled BES ch. {bes_channel}')
                 # lower plot
@@ -976,6 +976,25 @@ class Model(_Base_Class, LightningModule):
                 plt.xlim(axes[0].get_xlim())
                 plt.ylabel('Probability predictions')
                 plt.xlabel('Time (ms)')
+                labs = ['L-mode','H-mode','QH-mode','WP QH-mode']
+                rects = []
+                for i in range(4):
+                    rects.append(
+                        patches.Rectangle(
+                            (0,0),1,1,
+                            facecolor=f'C{i}',
+                            edgecolor=None,
+                            alpha=0.5,
+                        )
+                    )
+                for i, ax in enumerate(axes):
+                    plt.sca(ax)
+                    plt.legend(
+                        rects, labs,
+                        ncols=2,
+                        fontsize='small',
+                        loc='upper right' if i==0 else 'lower right',
+                    )
                 file_path = self.run_dir / f'predict_conf_shot_{dataset.shot}_eventid_{dataset.event:04d}.png'
             plt.tight_layout()
             plt.savefig(file_path, dpi=300)
@@ -2303,6 +2322,7 @@ class Confinement_Predict_Dataset(torch.utils.data.Dataset):
 def main(
         experiment_name: str = 'experiment_default',
         trial_name: str = None,
+        trial_name_prefix: str = None,
         restart_trial_name: str = None,
         wandb_id: str = None,
         signal_window_size: int = 256,
@@ -2446,6 +2466,8 @@ def main(
         datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
         slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
         trial_name = f"r{slurm_identifier}" if slurm_identifier else f"r{datetime_str}"
+        if trial_name_prefix:
+            trial_name = f"{trial_name_prefix}_{trial_name}"
     zprint(f"Trial name: {trial_name}")
     zprint(f"Trial path: {experiment_dir/trial_name}")
     tb_logger = TensorBoardLogger(
@@ -2600,21 +2622,20 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=20,
-        max_epochs=1,
-        lr=3e-3,
-        lr_warmup_epochs=5,
-        batch_size=128,
-        fraction_validation=0.125,
+        max_elms=80,
+        max_epochs=10,
+        lr=1e-2,
+        lr_warmup_epochs=2,
+        batch_size=256,
+        fraction_validation=0.1,
         fraction_test=0.1,
-        num_workers=0,
-        max_confinement_event_length=int(5e3),
+        num_workers=4,
+        max_confinement_event_length=int(20e3),
         confinement_dataset_factor=0.2,
-        # balance_confinement_data_with_elm_data=True,
-        # use_wandb=True,
+        use_wandb=True,
         monitor_metric='sum_loss/train',
-        skip_train=True,
-        skip_test=True,
+        # skip_train=True,
+        # skip_test=True,
         # backbone_model_path='experiment_default/r2025_09_13_12_13_37',
         # backbone_unfreeze_at_epoch=9,
         # backbone_first_n_layers=3,
