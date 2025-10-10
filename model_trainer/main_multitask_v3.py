@@ -8,6 +8,7 @@ import re
 import pickle
 
 import numpy as np
+from matplotlib import patches
 import matplotlib.pyplot as plt
 import scipy.signal
 import scipy.signal.windows
@@ -677,6 +678,7 @@ class Model(_Base_Class, LightningModule):
             trainer.loggers[0].name,
             trainer.loggers[0].version,
         )
+        trainer.strategy.barrier()
         if self.world_size > 0:
             print(f"World rank {self.world_rank} of size {self.world_size} on {self.num_nodes} node(s)")
         if self.num_nodes > 1:
@@ -830,8 +832,10 @@ class Model(_Base_Class, LightningModule):
         for i_dl, batch_list in self.predict_outputs.items():
             self.rprint(f"  Plotting predictions for dataloader {i_dl}")
             task = datamodule.loader_tasks[i_dl]
+            times = np.concatenate([batch['times'] for batch in batch_list], axis=0).squeeze()
+            labels = np.concatenate([batch['labels'] for batch in batch_list], axis=0).squeeze()
+            outputs = np.concatenate([batch['outputs'] for batch in batch_list], axis=0).squeeze()
             dataset = dataloaders[i_dl].dataset
-            times = np.concatenate([batch['times'] for batch in batch_list], axis=0)
             i_row, i_col = 2, 3
             bes_channel = i_row*8 + i_col + 1
             bes_signal = dataset.signals[...,::25,i_row,i_col].numpy().squeeze()
@@ -842,12 +846,11 @@ class Model(_Base_Class, LightningModule):
                 bes_signal/(3*np.std(bes_signal)), 
                 label=f'BES ch. {bes_channel} (filt/stand)', 
                 lw=0.5,
+                c='k'
             )
             if task == 'elm_class':
-                outputs = np.concatenate([batch['outputs'] for batch in batch_list], axis=0)
-                predictions = scipy.special.expit(outputs).squeeze()
+                predictions = scipy.special.expit(outputs)
                 pred_smoothed = lambda_smooth(predictions)
-                labels = np.concatenate([batch['labels'] for batch in batch_list], axis=0)
                 plt.plot(times, labels, 
                          label='True label', lw=3)
                 plt.plot(times, predictions, 
@@ -862,19 +865,98 @@ class Model(_Base_Class, LightningModule):
                 plt.axvspan(dataset.t_stop, bes_time[-1], 
                             color='y', alpha=0.2, zorder=1)
                 plt.title(f'Shot {dataset.shot} | Sig. win. {self.signal_window_size/1e3:.2f} ms| P(ELM within {dataset.t_predict:.1f} ms)')
-                plt.ylabel('Scaled BES signal or probability')
+                plt.ylabel(f'Scaled BES ch. {bes_channel} or probability')
                 file_path = self.run_dir / f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
             elif task == 'conf_onehot':
+                label = labels[0]
+                dt = times[1]-times[0]
+                assert all(labels==label)
+                outputs_argmax = outputs.argmax(axis=1)
+                ylim = plt.ylim()
+                plt.axvspan(
+                    times[0]-dt, times[-1],
+                    ymin=0.01, ymax=0.11,
+                    facecolor=f'C{label}', 
+                    edgecolor=None,
+                    alpha=0.5,
+                )
+                plt.annotate(
+                    text='Ground truth',
+                    xy=(
+                        times[0] + 0.02*(times[-1]-times[0]), 
+                        ylim[0] + 0.03*(ylim[1]-ylim[0]),
+                    ),
+                    fontsize='large',
+                )
+                dt = times[1]-times[0]
+                t0 = None
+                n_outputs = outputs_argmax.size
+                for i in range(n_outputs):
+                    previous_output = outputs_argmax[i-1] if i-1>=0 else -1
+                    output = outputs_argmax[i]
+                    next_output = outputs_argmax[i+1] if i+1<=n_outputs-1 else -1
+                    t0 = times[i]-dt if output != previous_output else t0
+                    if output == next_output:
+                        continue
+                    tf = times[i]
+                    plt.axvspan(
+                        t0, tf,
+                        ymin=0.12, ymax=0.22,
+                        facecolor=f'C{output}', 
+                        edgecolor=None,
+                        alpha=0.5,
+                    )
+                plt.annotate(
+                    text='Raw predictions',
+                    xy=(
+                        times[0] + 0.02*(times[-1]-times[0]), 
+                        ylim[0] + 0.14*(ylim[1]-ylim[0]),
+                    ),
+                    fontsize='large',
+                )
+                smoothed_outputs = np.ndarray((n_outputs-n_boxcar+1, 4), dtype=float)
+                for i in range(4):
+                    smoothed_outputs[:,i] = lambda_smooth(outputs[:,i])
+                smoothed_argmax = smoothed_outputs.argmax(axis=1)
+                n_outputs = smoothed_argmax.size
+                smoothed_times = times[n_boxcar-1:]
+                t0 = None
+                for i in range(n_outputs):
+                    previous_output = smoothed_argmax[i-1] if i-1>=0 else -1
+                    output = smoothed_argmax[i]
+                    next_output = smoothed_argmax[i+1] if i+1<=n_outputs-1 else -1
+                    t0 = smoothed_times[i]-dt if output != previous_output else t0
+                    if i==0: t0 = times[i]-dt
+                    if output == next_output:
+                        continue
+                    tf = smoothed_times[i]
+                    plt.axvspan(
+                        t0, tf,
+                        ymin=0.23, ymax=0.33,
+                        facecolor=f'C{output}', 
+                        edgecolor=None,
+                        alpha=0.5,
+                    )
+                plt.annotate(
+                    text='Smoothed predictions',
+                    xy=(
+                        times[0] + 0.02*(times[-1]-times[0]), 
+                        ylim[0] + 0.25*(ylim[1]-ylim[0]),
+                    ),
+                    fontsize='large',
+                )
+                plt.ylabel(f'Scaled BES ch. {bes_channel}')
                 file_path = self.run_dir / f'predict_conf_shot_{dataset.shot}_eventid_{dataset.event:04d}.png'
             plt.xlabel('Time (ms)')
             plt.legend(
-                loc='lower right',
+                loc='upper right',
                 labelspacing=0.2,
                 framealpha=0.8,
                 fontsize='small',
             )
             plt.tight_layout()
             plt.savefig(file_path, dpi=300)
+            continue
         trainer.strategy.barrier()
 
     def on_before_optimizer_step(self, optimizer):
@@ -2481,7 +2563,7 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
-        'elm_class': [None,16,1],
+        # 'elm_class': [None,16,1],
         'conf_onehot': [None,16,4],
     }
     main(
@@ -2493,14 +2575,14 @@ if __name__=='__main__':
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
         max_elms=100,
-        max_epochs=2,
+        max_epochs=1,
         lr=3e-3,
         lr_warmup_epochs=5,
         batch_size=128,
         fraction_validation=0.125,
         fraction_test=0.1,
-        num_workers=4,
-        max_confinement_event_length=int(25e3),
+        num_workers=0,
+        max_confinement_event_length=int(5e3),
         confinement_dataset_factor=0.2,
         # balance_confinement_data_with_elm_data=True,
         # use_wandb=True,
