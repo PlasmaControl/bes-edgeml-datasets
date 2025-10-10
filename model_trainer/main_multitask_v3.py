@@ -822,7 +822,7 @@ class Model(_Base_Class, LightningModule):
         if not self.predict_outputs:
             return
         plt.ioff()
-        plt.figure()
+        fig = plt.figure()
         n_boxcar = 8
         boxcar_window = scipy.signal.windows.boxcar(n_boxcar) / n_boxcar
         lambda_smooth = lambda x: np.convolve(x, boxcar_window, mode='valid')
@@ -841,14 +841,13 @@ class Model(_Base_Class, LightningModule):
             bes_signal = dataset.signals[...,::25,i_row,i_col].numpy().squeeze()
             bes_time = dataset.time[::25]
             plt.clf()
-            plt.plot(
-                bes_time, 
-                bes_signal/(3*np.std(bes_signal)), 
-                label=f'BES ch. {bes_channel} (filt/stand)', 
-                lw=0.5,
-                c='k'
-            )
             if task == 'elm_class':
+                fig.set_size_inches((4.25,3.5))
+                plt.plot(
+                    bes_time, bes_signal/(3*np.std(bes_signal)), 
+                    label=f'BES ch. {bes_channel} (filt/stand)', 
+                    lw=0.5, c='k'
+                )
                 predictions = scipy.special.expit(outputs)
                 pred_smoothed = lambda_smooth(predictions)
                 plt.plot(times, labels, 
@@ -865,14 +864,30 @@ class Model(_Base_Class, LightningModule):
                 plt.axvspan(dataset.t_stop, bes_time[-1], 
                             color='y', alpha=0.2, zorder=1)
                 plt.title(f'Shot {dataset.shot} | Sig. win. {self.signal_window_size/1e3:.2f} ms| P(ELM within {dataset.t_predict:.1f} ms)')
+                plt.xlabel('Time (ms)')
                 plt.ylabel(f'Scaled BES ch. {bes_channel} or probability')
+                plt.legend(
+                    loc='upper right',
+                    labelspacing=0.2,
+                    framealpha=0.8,
+                    fontsize='small',
+                )
                 file_path = self.run_dir / f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
             elif task == 'conf_onehot':
+                fig.set_size_inches((4.25,6.25))
+                axes = fig.subplots(nrows=2)
+                # upper plot
+                plt.sca(axes[0])
+                plt.plot(
+                    bes_time, bes_signal/(3*np.std(bes_signal)), 
+                    label=f'BES ch. {bes_channel} (filt/stand)', 
+                    lw=0.5, c='k'
+                )
                 label = labels[0]
                 dt = times[1]-times[0]
                 assert all(labels==label)
-                outputs_argmax = outputs.argmax(axis=1)
                 ylim = plt.ylim()
+                # plot ground truth
                 plt.axvspan(
                     times[0]-dt, times[-1],
                     ymin=0.01, ymax=0.11,
@@ -888,33 +903,8 @@ class Model(_Base_Class, LightningModule):
                     ),
                     fontsize='large',
                 )
-                dt = times[1]-times[0]
-                t0 = None
-                n_outputs = outputs_argmax.size
-                for i in range(n_outputs):
-                    previous_output = outputs_argmax[i-1] if i-1>=0 else -1
-                    output = outputs_argmax[i]
-                    next_output = outputs_argmax[i+1] if i+1<=n_outputs-1 else -1
-                    t0 = times[i]-dt if output != previous_output else t0
-                    if output == next_output:
-                        continue
-                    tf = times[i]
-                    plt.axvspan(
-                        t0, tf,
-                        ymin=0.12, ymax=0.22,
-                        facecolor=f'C{output}', 
-                        edgecolor=None,
-                        alpha=0.5,
-                    )
-                plt.annotate(
-                    text='Raw predictions',
-                    xy=(
-                        times[0] + 0.02*(times[-1]-times[0]), 
-                        ylim[0] + 0.14*(ylim[1]-ylim[0]),
-                    ),
-                    fontsize='large',
-                )
-                smoothed_outputs = np.ndarray((n_outputs-n_boxcar+1, 4), dtype=float)
+                # plot smoothed predictions
+                smoothed_outputs = np.ndarray((outputs.shape[0]-n_boxcar+1, 4), dtype=float)
                 for i in range(4):
                     smoothed_outputs[:,i] = lambda_smooth(outputs[:,i])
                 smoothed_argmax = smoothed_outputs.argmax(axis=1)
@@ -932,7 +922,7 @@ class Model(_Base_Class, LightningModule):
                     tf = smoothed_times[i]
                     plt.axvspan(
                         t0, tf,
-                        ymin=0.23, ymax=0.33,
+                        ymin=0.12, ymax=0.22,
                         facecolor=f'C{output}', 
                         edgecolor=None,
                         alpha=0.5,
@@ -941,19 +931,52 @@ class Model(_Base_Class, LightningModule):
                     text='Smoothed predictions',
                     xy=(
                         times[0] + 0.02*(times[-1]-times[0]), 
+                        ylim[0] + 0.14*(ylim[1]-ylim[0]),
+                    ),
+                    fontsize='large',
+                )
+                # plot raw predictions
+                dt = times[1]-times[0]
+                t0 = None
+                outputs_argmax = outputs.argmax(axis=1)
+                n_outputs = outputs_argmax.size
+                for i in range(n_outputs):
+                    previous_output = outputs_argmax[i-1] if i-1>=0 else -1
+                    output = outputs_argmax[i]
+                    next_output = outputs_argmax[i+1] if i+1<=n_outputs-1 else -1
+                    t0 = times[i]-dt if output != previous_output else t0
+                    if output == next_output:
+                        continue
+                    tf = times[i]
+                    plt.axvspan(
+                        t0, tf,
+                        ymin=0.23, ymax=0.33,
+                        facecolor=f'C{output}', 
+                        edgecolor=None,
+                        alpha=0.5,
+                    )
+                plt.annotate(
+                    text='Raw predictions',
+                    xy=(
+                        times[0] + 0.02*(times[-1]-times[0]), 
                         ylim[0] + 0.25*(ylim[1]-ylim[0]),
                     ),
                     fontsize='large',
                 )
+                plt.title(f"Shot {dataset.shot}")
+                plt.xlabel('Time (ms)')
                 plt.ylabel(f'Scaled BES ch. {bes_channel}')
+                # lower plot
+                plt.sca(axes[1])
+                for i in range(4):
+                    probs = scipy.special.expit(outputs[:,i])
+                    sm_probs = scipy.special.expit(lambda_smooth(outputs[:,i]))
+                    plt.plot(times, probs, c=f'C{i}', lw=0.6,)
+                    plt.plot(times[n_boxcar-1:], sm_probs, c=f'C{i}', lw=2,)
+                plt.xlim(axes[0].get_xlim())
+                plt.ylabel('Probability predictions')
+                plt.xlabel('Time (ms)')
                 file_path = self.run_dir / f'predict_conf_shot_{dataset.shot}_eventid_{dataset.event:04d}.png'
-            plt.xlabel('Time (ms)')
-            plt.legend(
-                loc='upper right',
-                labelspacing=0.2,
-                framealpha=0.8,
-                fontsize='small',
-            )
             plt.tight_layout()
             plt.savefig(file_path, dpi=300)
             continue
@@ -1869,7 +1892,7 @@ class Data(_Base_Class, LightningDataModule):
             stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
             exkurt = np.sum(cummulative_hist * ((bin_center - mean)/stdev) ** 4) / np.sum(cummulative_hist) - 3
             self.zprint(f"    Signal stats (after FIR, if used): mean {mean:.3f} stdev {stdev:.3f} exkurt {exkurt:.3f} min/max {signal_min:.3f}/{signal_max:.3f}")
-            if sub_stage == 'train':
+            if sub_stage == 'train' or not (confinement_raw_signal_mean and confinement_raw_signal_stdev):
                 confinement_raw_signal_mean = mean.astype(np.float32)
                 confinement_raw_signal_stdev = stdev.astype(np.float32)
                 self.save_hyperparameters({
@@ -1879,8 +1902,6 @@ class Data(_Base_Class, LightningDataModule):
 
         confinement_raw_signal_mean = self.broadcast(confinement_raw_signal_mean)
         confinement_raw_signal_stdev = self.broadcast(confinement_raw_signal_stdev)
-        self.signal_standardization_mean = self.broadcast(self.signal_standardization_mean)
-        self.signal_standardization_stdev = self.broadcast(self.signal_standardization_stdev)
         if self.signal_standardization_mean and self.signal_standardization_stdev:
             self.zprint(f"    Using existing mean/stdev for standardization")
         else:
@@ -1891,6 +1912,8 @@ class Data(_Base_Class, LightningDataModule):
                 'standardization_mean': self.signal_standardization_mean,
                 'standardization_stdev': self.signal_standardization_stdev,
             })
+        self.signal_standardization_mean = self.broadcast(self.signal_standardization_mean)
+        self.signal_standardization_stdev = self.broadcast(self.signal_standardization_stdev)
         self.zprint(f"    Standarizing signals with mean {self.signal_standardization_mean:.3f} and std {self.signal_standardization_stdev:.3f}")
         packaged_signals = (packaged_signals - self.signal_standardization_mean) / self.signal_standardization_stdev
 
@@ -2316,6 +2339,8 @@ def main(
         gradient_clip_algorithm: str = 'value',
         skip_train: bool = False,
         skip_data: bool = False,
+        skip_test: bool = False,
+        skip_predict: bool = False,
         precision = None,
         # data
         elm_data_file: str|Path = None,
@@ -2531,15 +2556,16 @@ def main(
             datamodule=lit_datamodule,
             ckpt_path=ckpt_path,
         )
-        if fraction_test:
-            trainer.test(
-                model=lit_model, 
-                datamodule=lit_datamodule,
-            )
-            trainer.predict(
-                model=lit_model, 
-                datamodule=lit_datamodule,
-            )
+    if fraction_test and not skip_test and not skip_data:
+        trainer.test(
+            model=lit_model, 
+            datamodule=lit_datamodule,
+        )
+    if fraction_test and not skip_predict and not skip_data:
+        trainer.predict(
+            model=lit_model, 
+            datamodule=lit_datamodule,
+        )
 
     zprint(f"Trial name: {trial_name}")
     zprint(f"Trial path: {experiment_dir/trial_name}")
@@ -2563,7 +2589,7 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
-        # 'elm_class': [None,16,1],
+        'elm_class': [None,16,1],
         'conf_onehot': [None,16,4],
     }
     main(
@@ -2574,7 +2600,7 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=100,
+        max_elms=20,
         max_epochs=1,
         lr=3e-3,
         lr_warmup_epochs=5,
@@ -2587,6 +2613,8 @@ if __name__=='__main__':
         # balance_confinement_data_with_elm_data=True,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
+        skip_train=True,
+        skip_test=True,
         # backbone_model_path='experiment_default/r2025_09_13_12_13_37',
         # backbone_unfreeze_at_epoch=9,
         # backbone_first_n_layers=3,
