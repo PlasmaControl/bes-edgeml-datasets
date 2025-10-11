@@ -11,9 +11,9 @@
 
 #SBATCH --signal=SIGTERM@180
 
-#SBATCH --time=60
+#SBATCH --time=120
 #SBATCH --qos=regular
-#SBATCH --array=0-79%8
+#SBATCH --array=0-39%8
 
 module --redirect list
 which python
@@ -58,7 +58,6 @@ if __name__=='__main__':
         (None, 100),
         (None, 200),
     )
-    weight_decay_choices = (1e-5, 1e-4)
     task_id = int(os.getenv('SLURM_ARRAY_TASK_ID', None))
 
     main(
@@ -69,11 +68,11 @@ if __name__=='__main__':
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=80,
-        max_confinement_event_length=int(20e3),
-        confinement_dataset_factor=0.2,
-        fraction_validation=0.1,
-        fraction_test=0.1,
+        max_elms=120,
+        max_confinement_event_length=int(30e3),
+        confinement_dataset_factor=0.4,
+        fraction_validation=0.125,
+        fraction_test=0.125,
         num_workers=4,
         # model
         feature_model_layers = (
@@ -93,7 +92,7 @@ if __name__=='__main__':
         lr_warmup_epochs=10,
         lr_scheduler_patience=50,
         lr_scheduler_threshold=1e-2,
-        weight_decay=weight_decay_choices[task_id%len(weight_decay_choices)],
+        weight_decay=1e-5,
         batch_size=256,
         use_wandb=True,
         early_stopping_patience=125,

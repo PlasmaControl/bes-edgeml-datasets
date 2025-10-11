@@ -2634,6 +2634,7 @@ if __name__=='__main__':
         confinement_dataset_factor=0.2,
         use_wandb=True,
         monitor_metric='sum_loss/train',
+        balance_confinement_data_with_elm_data=True,
         # skip_train=True,
         # skip_test=True,
         # backbone_model_path='experiment_default/r2025_09_13_12_13_37',
