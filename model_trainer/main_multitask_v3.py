@@ -447,8 +447,7 @@ class Model(_Base_Class, LightningModule):
         # }
 
         optim_kwargs = {
-            'params': [
-                params_weights, params_biases, params_batchnorms, params_sigmas],
+            'params': [params_weights, params_biases, params_batchnorms, params_sigmas],
             'lr': self.lr,
             'weight_decay': self.weight_decay,
         }
@@ -587,9 +586,8 @@ class Model(_Base_Class, LightningModule):
                 labels: torch.Tensor = batch[task][1][0.5] if isinstance(batch, dict) else batch[1][0.5]
                 elm_indices: torch.Tensor = batch[task][2] if isinstance(batch, dict) else batch[2]
                 task_outputs: torch.Tensor = task_outputs.reshape_as(labels)
-                if self.current_epoch%self.elmwise_f1_interval==0 and stage in ['train','val']:
-                    if batch_idx==0 and stage=='train':
-                        assert not self.elm_wise_results
+                if (self.current_epoch%self.elmwise_f1_interval==0 and stage in ['train','val']) or \
+                    stage=='test':
                     for i in range(elm_indices.shape[0]):
                         elm_index = elm_indices[i].item()
                         if elm_index not in self.elm_wise_results:
@@ -696,6 +694,10 @@ class Model(_Base_Class, LightningModule):
     def on_validation_epoch_start(self):
         pass
 
+    def on_test_start(self) -> None:
+        self.elm_wise_results = {}
+        return super().on_test_start()
+
     def on_train_epoch_start(self):
         self.t_train_epoch_start = time.time()
         self.s_train_epoch_start = self.global_step
@@ -747,7 +749,7 @@ class Model(_Base_Class, LightningModule):
                     },
                     step=self.global_step,
                 )
-        if self.is_global_zero and self.global_step > 0:
+        if self.is_global_zero:
             epoch_time = time.time() - self.t_train_epoch_start
             global_time = time.time() - self.t_fit_start
             epoch_steps = self.global_step-self.s_train_epoch_start
@@ -768,11 +770,20 @@ class Model(_Base_Class, LightningModule):
             if self.n_frozen_layers:
                 line += f" n_frozen: {self.n_frozen_layers}" 
             print(line)
+        self.save_elm_wise_f1_scores()
+
+    def on_test_end(self) -> None:
+        self.save_elm_wise_f1_scores()
+        return super().on_test_end()
+
+    def save_elm_wise_f1_scores(self):
+        if not self.elm_wise_results:
+            return
         # global ELM-wise F1 scores
         all_elm_wise_results = {}
         for i in range(self.trainer.world_size):
             all_elm_wise_results[i] = self.trainer.strategy.broadcast(self.elm_wise_results, src=i)
-        if self.is_global_zero and self.global_step > 0 and self.current_epoch%self.elmwise_f1_interval==0:
+        if self.is_global_zero:
             elm_wise_results = {}
             for rank_results in all_elm_wise_results.values():
                 # for elm_index in rank_results:
@@ -789,24 +800,57 @@ class Model(_Base_Class, LightningModule):
                 )
                 elm_wise_f1_scores[elm_index] = f1_score
             sorted_elm_scores_by_stage = {}
-            for stage in ['train','val']:
+            for stage in ['train','val','test']:
                 sorted_elm_indices = sorted(
                     [key for key in elm_wise_f1_scores.keys() if elm_wise_results[key]['stage']==stage],
                     key=lambda key: elm_wise_f1_scores[key],
                     reverse=True,
                 )
-                # for elm_index in sorted_elm_indices[:10]:
-                #     self.zprint(f"  {stage}  ELM {elm_index:04d} F1 {elm_wise_f1_scores[elm_index]:.3f} (n_samples {len(elm_wise_results[elm_index]['labels'])})")
-                sorted_elm_scores_by_stage[stage] = {
-                    elm_index: elm_wise_f1_scores[elm_index]
-                    for elm_index in sorted_elm_indices
-                }
-            pickle_file = self.run_dir / f'elm_wise_f1_scores_ep{self.current_epoch:04d}.pkl'
+                if sorted_elm_indices:
+                    sorted_elm_scores_by_stage[stage] = {
+                        elm_index: elm_wise_f1_scores[elm_index]
+                        for elm_index in sorted_elm_indices
+                    }
+            if 'test' not in sorted_elm_scores_by_stage:
+                pickle_file = self.run_dir / 'scores' / f'elm_wise_f1_scores_ep{self.current_epoch:04d}.pkl'
+            else:
+                pickle_file = self.run_dir / 'scores' / f'elm_wise_f1_scores_test.pkl'
+            pickle_file.parent.mkdir(exist_ok=True)
             assert not pickle_file.exists()
             with open(pickle_file, 'wb') as f:
                 self.zprint(f"  Saving ELM-wise F1 scores to {pickle_file}")
                 pickle.dump(sorted_elm_scores_by_stage, f)
-        return
+
+    @classmethod
+    def read_elm_scores(cls, filename: str|Path, n: int = 3):
+        filename = Path(filename)
+        assert filename.exists()
+        with open(filename, 'rb') as f:
+            sorted_elm_scores_by_stage = pickle.load(f)
+        plt.ioff()
+        plt.figure(figsize=(4.25,3.5))
+        for stage in sorted_elm_scores_by_stage:
+            print(stage)
+            sorted_keys = list(sorted_elm_scores_by_stage[stage].keys())
+            for key in sorted_keys[:n]:
+                print(f"  ELM ID {key}  F1 {sorted_elm_scores_by_stage[stage][key]:.3f}")
+            for key in sorted_keys[-n:]:
+                print(f"  ELM ID {key}  F1 {sorted_elm_scores_by_stage[stage][key]:.3f}")
+            # plot histograms
+            plt.clf()
+            f1_scores = list(sorted_elm_scores_by_stage[stage].values())
+            plt.hist(
+                f1_scores,
+                bins=20,
+                range=(0,1),
+            )
+            plt.title(f'ELM-wise F1 score distribution | {stage.upper()}')
+            plt.xlabel('F1 score')
+            plt.ylabel('ELM count')
+            plt.tight_layout()
+            file_name = filename.parent / f'F1_dist_{stage}.png'
+            plt.savefig(file_name, dpi=300)
+
 
     def on_fit_end(self) -> None:
         delt = time.time() - self.t_fit_start
@@ -872,7 +916,7 @@ class Model(_Base_Class, LightningModule):
                     framealpha=0.8,
                     fontsize='small',
                 )
-                file_path = self.run_dir / f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
+                file_name = f'predict_elm_shot_{dataset.shot}_elmid_{dataset.elm_index:04d}.png'
             elif task == 'conf_onehot':
                 fig.set_size_inches((4.25,6.25))
                 axes = fig.subplots(nrows=2)
@@ -995,10 +1039,11 @@ class Model(_Base_Class, LightningModule):
                         fontsize='small',
                         loc='upper right' if i==0 else 'lower right',
                     )
-                file_path = self.run_dir / f'predict_conf_shot_{dataset.shot}_eventid_{dataset.event:04d}.png'
+                file_name = f'predict_conf_shot_{dataset.shot}_eventid_{dataset.event:04d}.png'
             plt.tight_layout()
+            file_path = self.run_dir / 'figs' / file_name
+            file_path.parent.mkdir(exist_ok=True)
             plt.savefig(file_path, dpi=300)
-            continue
         trainer.strategy.barrier()
 
     def on_before_optimizer_step(self, optimizer):
@@ -2622,19 +2667,19 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=80,
-        max_epochs=10,
+        max_elms=120,
+        max_epochs=25,
         lr=1e-2,
         lr_warmup_epochs=2,
         batch_size=256,
-        fraction_validation=0.1,
-        fraction_test=0.1,
+        fraction_validation=0.125,
+        fraction_test=0.125,
         num_workers=4,
-        max_confinement_event_length=int(20e3),
-        confinement_dataset_factor=0.2,
-        use_wandb=True,
+        max_confinement_event_length=int(25e3),
+        confinement_dataset_factor=0.25,
+        # use_wandb=True,
         monitor_metric='sum_loss/train',
-        balance_confinement_data_with_elm_data=True,
+        # balance_confinement_data_with_elm_data=True,
         # skip_train=True,
         # skip_test=True,
         # backbone_model_path='experiment_default/r2025_09_13_12_13_37',

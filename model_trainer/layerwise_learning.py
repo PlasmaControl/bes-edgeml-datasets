@@ -1,7 +1,12 @@
 import os
+from numpy import random
 from model_trainer.main_multitask_v3 import main
 
 if __name__=='__main__':
+
+    seed = int(os.getenv("RAND_SEED"))
+    print(f'Linux RAND_SEED: {seed}')
+    rng = random.default_rng(seed)
 
     task_id = int(os.getenv('SLURM_ARRAY_TASK_ID'))
     fir_choices = (
@@ -12,21 +17,23 @@ if __name__=='__main__':
     )
     fir_bp = fir_choices[task_id%len(fir_choices)]
     weight_decay_choices = (1e-4, 1e-5)
-    weight_decay = weight_decay_choices[(task_id//len(fir_choices))%len(weight_decay_choices)]
+    weight_decay = rng.choice(weight_decay_choices)
+    batch_size = rng.choice([256,512,1024])
 
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v26',
-        trial_name_prefix=f'L3_BS512_T{task_id:02d}',
+        experiment_name='multi_256_v27',
+        trial_name_prefix=f'L3_T{task_id:02d}',
         # data
+        seed=seed,
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         max_elms=240,
-        max_confinement_event_length=int(40e3),
-        confinement_dataset_factor=0.5,
-        fraction_validation=0.125,
-        fraction_test=0.125,
+        max_confinement_event_length=int(30e3),
+        confinement_dataset_factor=0.4,
+        fraction_validation=0.1,
+        fraction_test=0,
         num_workers=4,
         # model
         feature_model_layers = (
@@ -41,13 +48,13 @@ if __name__=='__main__':
         monitor_metric='sum_score/train',
         fir_bp=fir_bp,
         # training
-        max_epochs=200,
+        max_epochs=201,
         lr=1e-2,
         lr_warmup_epochs=10,
         lr_scheduler_patience=50,
         lr_scheduler_threshold=1e-2,
         weight_decay=weight_decay,
-        batch_size=512,
+        batch_size=batch_size,
         use_wandb=True,
         early_stopping_patience=125,
     )
