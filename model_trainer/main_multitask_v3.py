@@ -221,7 +221,8 @@ class Model(_Base_Class, LightningModule):
         for i_layer, layer in enumerate(self.feature_model_layers):
             in_channels: int = 1 if i_layer==0 else previous_out_channels
             # batch norm before conv layer (except input layer)
-            if i_layer > 0 and self.batch_norm:
+            # if i_layer > 0 and self.batch_norm:
+            if self.batch_norm:
                 layer_name = f"L{i_layer:02d}_BatchNorm"
                 feature_layer_dict[layer_name] = torch.nn.BatchNorm3d(in_channels)
                 self.zprint(f"  {layer_name} (regularization)")
@@ -2551,7 +2552,7 @@ def main(
     if precision is None:
         precision = '16-mixed' if torch.cuda.is_available() else 32
     reload_dataloaders_every_n_epochs = (
-        0 if isinstance(batch_size, int) else
+        0 if isinstance(batch_size, (int,np.int64)) else
         list(batch_size.keys())[1]
     )
     trainer = Trainer(

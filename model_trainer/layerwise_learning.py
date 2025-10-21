@@ -18,7 +18,7 @@ if __name__=='__main__':
     fir_bp = fir_choices[task_id%len(fir_choices)]
     weight_decay_choices = (1e-4, 1e-5)
     weight_decay = rng.choice(weight_decay_choices)
-    batch_size = rng.choice([256,512,1024])
+    batch_size = int(rng.choice([256,512,1024]))
 
     main(
         # scenario
