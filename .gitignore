@@ -12,6 +12,7 @@ experiment*/
 *.csv
 *.hdf5
 *.png
+*.pkl
 
 futures*.txt
 
