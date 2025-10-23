@@ -1077,6 +1077,7 @@ class Data(_Base_Class, LightningDataModule):
     time_to_elm_quantile_max: float = None
     contrastive_learning: bool = False
     min_pre_elm_time: float = None
+    bad_elm_indices: Sequence[int] = ()
     # confinement data configuration
     confinement_data_file: str|Path = None
     bad_confinement_shots: Sequence[int] = ()
@@ -1231,6 +1232,16 @@ class Data(_Base_Class, LightningDataModule):
             datafile_shots = list(datafile_shots)
             datafile_elms = [int(elm_key) for elm_key in root['elms']]
             self.zprint(f"    ELMs/shots in data file: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
+            if self.bad_elm_indices:
+                self.save_hyperparameters({
+                    'bad_elm_indices': self.bad_elm_indices,
+                })
+                datafile_elms = [
+                    elm 
+                    for elm in datafile_elms
+                    if elm not in self.bad_elm_indices
+                ]
+                self.zprint(f"    ELMs/shots in data file with exclusions: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
             # check for reloaded data state
             if self.global_elm_data_shot_split:
                 self.zprint("    Global shot split was pre-loaded")
@@ -1248,10 +1259,7 @@ class Data(_Base_Class, LightningDataModule):
                 self.global_elm_data_shot_split['predict'] = self.global_elm_data_shot_split['test']
             # global shot split
             for stage, shotlist in self.global_elm_data_shot_split.items():
-                if len(shotlist)<=7:
-                    self.zprint(f"      {stage.upper()} shots: {shotlist}")
-                else:
-                    self.zprint(f"      {stage.upper()} shots: {shotlist[0:7]}")
+                self.zprint(f"      {stage.upper()} shots: {shotlist if len(shotlist)<=7 else shotlist[0:7]}")
             for stage in ['train','validation']:
                 assert stage in self.global_elm_data_shot_split and len(self.global_elm_data_shot_split[stage])>0
             # prepare ELMs for stages
