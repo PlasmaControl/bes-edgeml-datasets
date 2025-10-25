@@ -1236,11 +1236,13 @@ class Data(_Base_Class, LightningDataModule):
                 self.save_hyperparameters({
                     'bad_elm_indices': self.bad_elm_indices,
                 })
+                self.zprint(f"    Excluding {len(self.bad_elm_indices):,d} bad ELM indices")
                 datafile_elms = [
                     elm 
                     for elm in datafile_elms
                     if elm not in self.bad_elm_indices
                 ]
+                datafile_shots = list(set([int(root['elms'][f"{elm_id:06d}"].attrs['shot']) for elm_id in datafile_elms]))
                 self.zprint(f"    ELMs/shots in data file with exclusions: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
             # check for reloaded data state
             if self.global_elm_data_shot_split:
@@ -2433,6 +2435,7 @@ def main(
         max_confinement_event_length: int = None,
         seed: int = 42,
         balance_confinement_data_with_elm_data: bool = False,
+        bad_elm_indices: Sequence[int] = (),
 ) -> dict:
 
     ### SLURM/MPI environment
@@ -2623,6 +2626,7 @@ def main(
                 max_confinement_event_length=max_confinement_event_length,
                 seed=seed,
                 balance_confinement_data_with_elm_data=balance_confinement_data_with_elm_data,
+                bad_elm_indices=bad_elm_indices,
             )
 
     if not skip_train and not skip_data:
@@ -2666,8 +2670,11 @@ if __name__=='__main__':
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        'conf_onehot': [None,16,4],
+        # 'conf_onehot': [None,16,4],
     }
+    with open('count_of_bad_elms.pkl', 'rb') as f:
+        data_dict = pickle.load(f)
+        bad_elm_indices = data_dict['bad_elms']
     main(
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
@@ -2676,13 +2683,14 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=120,
-        max_epochs=25,
+        max_elms=1000,
+        max_epochs=2,
+        bad_elm_indices=bad_elm_indices,
         lr=1e-2,
         lr_warmup_epochs=2,
-        batch_size=256,
+        batch_size=512,
         fraction_validation=0.125,
-        fraction_test=0.125,
+        fraction_test=0,
         num_workers=4,
         max_confinement_event_length=int(25e3),
         confinement_dataset_factor=0.25,

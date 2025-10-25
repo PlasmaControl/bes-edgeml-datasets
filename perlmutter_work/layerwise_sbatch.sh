@@ -51,6 +51,7 @@ echo Random seed: ${RAND_SEED}
 
 SCRIPT=$(cat << END
 import os
+import pickle
 from numpy import random
 from model_trainer.main_multitask_v3 import main
 
@@ -72,10 +73,20 @@ if __name__=='__main__':
     weight_decay = rng.choice(weight_decay_choices)
     batch_size = int(rng.choice([256,512,1024]))
 
+    bad_elm_files = [
+        '/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/count_of_bad_elms_multi_256_v27.pkl',
+        '/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/count_of_bad_elms_multi_256_v28.pkl',
+    ]
+    bad_elm_indices = []
+    for bad_elm_file in bad_elm_files:
+        with open(bad_elm_file, 'rb') as f:
+            bad_elm_data = pickle.load(f)
+            bad_elm_indices.extend(bad_elm_data['bad_elms'])
+
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v27',
+        experiment_name='multi_256_v28',
         trial_name_prefix=f'L3_T{task_id:02d}',
         # data
         seed=seed,
@@ -87,6 +98,7 @@ if __name__=='__main__':
         fraction_validation=0.1,
         fraction_test=0,
         num_workers=4,
+        bad_elm_indices=bad_elm_indices,
         # model
         feature_model_layers = (
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
