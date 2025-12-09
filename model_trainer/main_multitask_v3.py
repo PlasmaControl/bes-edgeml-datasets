@@ -387,13 +387,6 @@ class Model(_Base_Class, LightningModule):
             if i_layer < self.backbone_first_n_layers:
                 self.zprint(f"Adding module {module_name} to backbone")
                 self.backbone.add_module(module_name, module)
-        # print('missing from src:', missing)
-        # print('unexpected in src:', unexpected)
-        # # for self_mod_name, self_mod in self.named_modules():
-        # #     print(self_mod.named_parameters())
-        # #     for src_param_name, src_param in source_model['state_dict'].items():
-        # #         if src_param_name.startswith(self_mod_name):
-        # #             print(self_mod_name, self_mod.shape, src_param.shape)
 
     def configure_optimizers(self):
         self.zprint("\u2B1C " + f"Creating {self.use_optimizer.upper()} optimizer")
@@ -1105,7 +1098,7 @@ class Data(_Base_Class, LightningDataModule):
 
         self.trainer: Trainer = None
 
-        self.state_items = []
+        self.state_items = ['seed']
 
         self.allow_zero_length_dataloader_with_multiple_devices = True
 
@@ -1143,31 +1136,33 @@ class Data(_Base_Class, LightningDataModule):
 
         for item in self.state_items:
             assert hasattr(self, item)
-            assert not getattr(self, item)
+            if item != 'seed':
+                assert not getattr(self, item)
 
         # FIR filter
         self.a_coeffs = self.b_coeffs = None
         self.set_fir_filter()
 
-        # seed and RNG
-        if self.seed is None:
-            self.seed = np.random.default_rng().integers(0, 2**32-1)
-            self.zprint(f"Using random seed: {self.seed}")
-            self.save_hyperparameters("seed")
-        self.zprint(f"Using random number generator with seed {self.seed}")
-        self.rng = np.random.default_rng(self.seed)
-
     def prepare_data(self):
         self.zprint("\u2B1C Prepare data (rank 0 only)")
+        # seed and RNG
+        if self.seed is None:
+            self.seed = int(np.random.default_rng().integers(0, 2**32-1))
+            self.zprint(f"  Randomly generated seed: {self.seed}")
+            self.save_hyperparameters("seed")
+        self.zprint(f"  Using random number generator with seed {self.seed}")
+        self.prepare_rng = np.random.default_rng(self.seed)
         if 'elm_class' in self.tasks:
             self.prepare_elm_data()
         if 'conf_onehot' in self.tasks:
             self.prepare_confinement_data()
         self.save_state_dict()
+        del self.prepare_rng
 
     def setup(self, stage: str):
         # called on all ranks after "prepare_data()"
         self.zprint("\u2B1C " + f"Setup stage {stage} (all ranks)")
+        # self.rank_rng = np.random.default_rng()
         assert stage in ['fit', 'test', 'predict'], f"Invalid stage: {stage}"
         assert self.is_global_zero == self.trainer.is_global_zero
         assert self.world_size == self.trainer.world_size
@@ -1208,12 +1203,6 @@ class Data(_Base_Class, LightningDataModule):
                     out += f"  datasets: {len(datasets)}"
                 self.rprint(out)
                 self.barrier()
-            # if 'elm_class' in self.tasks and \
-            #         'conf_onehot' in self.tasks and \
-            #         self.balance_confinement_data_with_elm_data and \
-            #         'predict' not in sub_stage.lower() and \
-            #         'test' not in sub_stage.lower():
-            #     assert len(self.elm_datasets[sub_stage]) == len(self.confinement_datasets[sub_stage])
         if stage == 'fit':
             self.save_state_dict()
 
@@ -1250,7 +1239,7 @@ class Data(_Base_Class, LightningDataModule):
             else:
                 self.zprint("    Shuffling datafile shots")
                 # shuffle shots in database
-                self.rng.shuffle(datafile_shots)
+                self.prepare_rng.shuffle(datafile_shots)
                 self.zprint("    Splitting datafile shots into train/val/test")
                 n_test_shots = int(self.fraction_test * len(datafile_shots))
                 n_validation_shots = int(self.fraction_validation * len(datafile_shots))
@@ -1283,7 +1272,7 @@ class Data(_Base_Class, LightningDataModule):
                     if root['elms'][f"{i_elm:06d}"].attrs['shot'] in self.global_elm_data_shot_split[sub_stage]
                 ]
                 # shuffles ELMs in stage
-                self.rng.shuffle(global_elms_for_stage)
+                self.prepare_rng.shuffle(global_elms_for_stage)
                 # limit max ELMs in stage
                 if self.max_elms:
                     global_elms_for_stage = global_elms_for_stage[:n_elms[sub_stage]]
@@ -1613,13 +1602,13 @@ class Data(_Base_Class, LightningDataModule):
             self.global_conf_data_shot_split = {st:[] for st in stages}
             p_train = 1. - self.fraction_validation - self.fraction_test
             for shot in global_shot_to_events:
-                choice = self.rng.choice(
+                choice = self.prepare_rng.choice(
                     3, p=(p_train, self.fraction_validation, self.fraction_test)
                 )
                 self.global_conf_data_shot_split[stages[choice]].append(shot)
             self.zprint(f"      Shuffling shots within stages")
             for stage in stages:
-                self.rng.shuffle(self.global_conf_data_shot_split[stage])
+                self.prepare_rng.shuffle(self.global_conf_data_shot_split[stage])
         self.global_conf_data_shot_split['predict'] = self.global_conf_data_shot_split['test']
         # for stage in stages:
         for stage, shots in self.global_conf_data_shot_split.items():
@@ -1910,8 +1899,8 @@ class Data(_Base_Class, LightningDataModule):
             assert i - self.signal_window_size + 1 >= 0  # start slice
             assert i+1 <= packaged_valid_t0.size  # end slice
 
-        self.zprint(f"    Shuffling valid t0 indices")
-        self.rng.shuffle(packaged_valid_t0_indices)
+        # self.zprint(f"    Shuffling valid t0 indices")
+        # self.rank_rng.shuffle(packaged_valid_t0_indices)
 
         # match valid t0 indices count across ranks
         if self.trainer.world_size > 1 and sub_stage in ['train', 'validation']:
@@ -2036,7 +2025,7 @@ class Data(_Base_Class, LightningDataModule):
             num_replicas=1,
             rank=0,
             shuffle=True if stage=='train' else False,
-            seed=int(self.rng.integers(0, 2**32-1)),
+            seed=int(np.random.default_rng().integers(0, 2**32-1)),
             # drop_last=True if stage=='train' else False,
         )
         batch_size: int = None
@@ -2601,33 +2590,31 @@ def main(
     ### data
     if not skip_data:
         zprint("\u2B1C Creating data module")
-        if ckpt_path and False:  # do not reload datamodule when restarting.
-            pass
-        else:
-            if ckpt_path:
-                assert seed is not None
-            lit_datamodule = Data(
-                signal_window_size=signal_window_size,
-                log_dir=trainer.log_dir,
-                elm_data_file=elm_data_file,
-                confinement_data_file=confinement_data_file,
-                tasks=lit_model.task_names,
-                max_elms=max_elms,
-                batch_size=batch_size,
-                fraction_test=fraction_test,
-                fraction_validation=fraction_validation,
-                num_workers=num_workers,
-                time_to_elm_quantile_min=time_to_elm_quantile_min,
-                time_to_elm_quantile_max=time_to_elm_quantile_max,
-                contrastive_learning=contrastive_learning,
-                min_pre_elm_time=min_pre_elm_time,
-                fir_bp=fir_bp,
-                confinement_dataset_factor=confinement_dataset_factor,
-                max_confinement_event_length=max_confinement_event_length,
-                seed=seed,
-                balance_confinement_data_with_elm_data=balance_confinement_data_with_elm_data,
-                bad_elm_indices=bad_elm_indices,
-            )
+        if ckpt_path:
+            assert seed is not None
+        # TODO: after instantiating datamodule, load state_dict of checkpoint into datamodule
+        lit_datamodule = Data(
+            signal_window_size=signal_window_size,
+            log_dir=trainer.log_dir,
+            elm_data_file=elm_data_file,
+            confinement_data_file=confinement_data_file,
+            tasks=lit_model.task_names,
+            max_elms=max_elms,
+            batch_size=batch_size,
+            fraction_test=fraction_test,
+            fraction_validation=fraction_validation,
+            num_workers=num_workers,
+            time_to_elm_quantile_min=time_to_elm_quantile_min,
+            time_to_elm_quantile_max=time_to_elm_quantile_max,
+            contrastive_learning=contrastive_learning,
+            min_pre_elm_time=min_pre_elm_time,
+            fir_bp=fir_bp,
+            confinement_dataset_factor=confinement_dataset_factor,
+            max_confinement_event_length=max_confinement_event_length,
+            seed=seed,
+            balance_confinement_data_with_elm_data=balance_confinement_data_with_elm_data,
+            bad_elm_indices=bad_elm_indices,
+        )
 
     if not skip_train and not skip_data:
         zprint("\u2B1C Begin Trainer.fit()")
@@ -2641,7 +2628,7 @@ def main(
             model=lit_model, 
             datamodule=lit_datamodule,
         )
-    if fraction_test and not skip_predict and not skip_data:
+    if fraction_test and not (skip_predict or skip_test) and not skip_data:
         trainer.predict(
             model=lit_model, 
             datamodule=lit_datamodule,
@@ -2661,20 +2648,22 @@ def main(
     }
 
 if __name__=='__main__':
+    seed = int(np.random.default_rng().integers(0, 2**32-1))
+    print(seed)
     feature_model_layers = (
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
-        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
-        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+        # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+        # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
         'elm_class': [None,16,1],
-        # 'conf_onehot': [None,16,4],
+        'conf_onehot': [None,16,4],
     }
-    with open('count_of_bad_elms.pkl', 'rb') as f:
-        data_dict = pickle.load(f)
-        bad_elm_indices = data_dict['bad_elms']
+    # with open('count_of_bad_elms.pkl', 'rb') as f:
+    #     data_dict = pickle.load(f)
+    #     bad_elm_indices = data_dict['bad_elms']
     main(
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
@@ -2683,24 +2672,25 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=1000,
-        max_epochs=2,
-        bad_elm_indices=bad_elm_indices,
+        max_elms=150,
+        max_epochs=3,
+        # bad_elm_indices=bad_elm_indices,
         lr=1e-2,
         lr_warmup_epochs=2,
         batch_size=512,
         fraction_validation=0.125,
-        fraction_test=0,
-        num_workers=4,
+        fraction_test=0.125,
+        num_workers=2,
         max_confinement_event_length=int(25e3),
         confinement_dataset_factor=0.25,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
+        seed=seed,
         # balance_confinement_data_with_elm_data=True,
         # skip_train=True,
-        # skip_test=True,
-        # backbone_model_path='experiment_default/r2025_09_13_12_13_37',
-        # backbone_unfreeze_at_epoch=9,
+        skip_test=True,
+        # backbone_model_path='experiment_default/r2025_10_27_18_56_43',
+        # backbone_unfreeze_at_epoch=1,
         # backbone_first_n_layers=3,
         # backbone_initial_lr=1e-3,
         # backbone_warmup_rate=2,

@@ -5,8 +5,13 @@ from model_trainer.main_multitask_v3 import main
 
 if __name__=='__main__':
 
-    seed = int(os.getenv("RAND_SEED"))
-    print(f'Linux RAND_SEED: {seed}')
+    reuse_seed = True
+
+    if reuse_seed:
+        seed = None
+    else:
+        seed = int(os.getenv("RAND_SEED"))
+    print(f'seed = {seed}')
 
     task_id = int(os.getenv('SLURM_ARRAY_TASK_ID'))
     batch_size_values = [256, 512, 1024]
@@ -22,15 +27,15 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v29',
-        trial_name_prefix=f'L3_',
+        experiment_name='multi_256_v30',
+        trial_name_prefix=f'L4_',
         # data
         seed=seed,
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=240,
-        max_confinement_event_length=int(30e3),
-        confinement_dataset_factor=0.4,
+        max_elms=480,
+        max_confinement_event_length=int(40e3),
+        confinement_dataset_factor=0.6,
         fraction_validation=0.1,
         fraction_test=0.1,
         num_workers=4,
@@ -40,6 +45,7 @@ if __name__=='__main__':
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
             {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
+            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         ),
         mlp_tasks={
             'elm_class': [None, 32, 1],
