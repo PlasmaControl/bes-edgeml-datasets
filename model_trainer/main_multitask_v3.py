@@ -1117,11 +1117,12 @@ class Data(_Base_Class, LightningDataModule):
             self.elm_data_file = Path(self.elm_data_file).absolute()
             assert self.elm_data_file.exists(), f"ELM data file {self.elm_data_file} does not exist"
             self.global_elm_data_shot_split: dict[str,Sequence] = {}
-            self.elm_signal_window_metadata: dict[str,Sequence[dict]] = {}
+            self.time_to_elm_quantiles: dict[float,float] = {}
             self.state_items.extend([
                 'global_elm_data_shot_split',
+                'time_to_elm_quantiles',
             ])
-            self.time_to_elm_quantiles: dict[float,float] = {}
+            self.elm_signal_window_metadata: dict[str,Sequence[dict]] = {}
             self.elm_datasets: dict[str,torch.utils.data.Dataset] = {}
 
         if 'conf_onehot' in self.tasks:
@@ -1233,13 +1234,13 @@ class Data(_Base_Class, LightningDataModule):
                 ]
                 datafile_shots = list(set([int(root['elms'][f"{elm_id:06d}"].attrs['shot']) for elm_id in datafile_elms]))
                 self.zprint(f"    ELMs/shots in data file with exclusions: {len(datafile_elms):,d} / {len(datafile_shots):,d}")
+            # shuffle shots in database
+            self.zprint("    Shuffling datafile shots")
+            self.prepare_rng.shuffle(datafile_shots)
             # check for reloaded data state
             if self.global_elm_data_shot_split:
                 self.zprint("    Global shot split was pre-loaded")
             else:
-                self.zprint("    Shuffling datafile shots")
-                # shuffle shots in database
-                self.prepare_rng.shuffle(datafile_shots)
                 self.zprint("    Splitting datafile shots into train/val/test")
                 n_test_shots = int(self.fraction_test * len(datafile_shots))
                 n_validation_shots = int(self.fraction_validation * len(datafile_shots))
@@ -1350,6 +1351,15 @@ class Data(_Base_Class, LightningDataModule):
                 self.zprint(f"      Skipped ELMs for short pre-ELM time (threshold {self.min_pre_elm_time} ms): {skipped_short_pre_elm_time:,d}")
                 self.zprint(f"      Global signal windows: {len(elm_signal_window_metadata):,d}")
 
+                # balance signal windows across world_size
+                if self.world_size > 1:
+                    remainder = len(elm_signal_window_metadata) % self.world_size
+                    if remainder:
+                        elm_signal_window_metadata = elm_signal_window_metadata[:-remainder]
+                assert len(elm_signal_window_metadata) % self.world_size == 0
+                self.zprint(f"      Rank-balanced global signal window count: {len(elm_signal_window_metadata):,d}")
+
+                # stats
                 bin_center = bin_edges[:-1] + (bin_edges[1] - bin_edges[0]) / 2
                 mean = np.sum(cummulative_hist * bin_center) / np.sum(cummulative_hist)
                 stdev = np.sqrt(np.sum(cummulative_hist * (bin_center - mean) ** 2) / np.sum(cummulative_hist))
@@ -1358,27 +1368,37 @@ class Data(_Base_Class, LightningDataModule):
 
                 # mean/stdev for standarization
                 if sub_stage == 'train':
-                    self.zprint('\u2B1C' + f" Using {sub_stage.upper()} for standardizing mean and stdev")
                     self.save_hyperparameters({
                         'elm_raw_signal_mean': mean.item(),
                         'elm_raw_signal_stdev': stdev.item(),
                     })
-                    if not self.signal_standardization_mean:
+                    self.zprint("\u2B1C Standardization")
+                    if self.signal_standardization_mean:
+                        self.zprint(f"  Using pre-loaded mean/stdev for standardization")
+                    else:
+                        self.zprint(f"  Using {sub_stage.upper()} mean and stdev for standardization")
                         self.signal_standardization_mean = mean.item()
                         self.signal_standardization_stdev = stdev.item()
-                    self.zprint('\u2B1C' + f" Standarizing signals with mean {self.signal_standardization_mean:.3f} and std {self.signal_standardization_stdev:.3f}")
+                    self.zprint(f"  Standarizing signals with mean {self.signal_standardization_mean:.3f} and std {self.signal_standardization_stdev:.3f}")
                     self.save_hyperparameters({
                         'standardization_mean': self.signal_standardization_mean,
                         'standardization_stdev': self.signal_standardization_stdev,
                     })
 
                     quantiles = [0.5]
-                    time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in elm_signal_window_metadata]
-                    quantile_values = np.quantile(time_to_elm_labels, quantiles)
-                    self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
-                    self.zprint('\u2B1C' + f" Time-to-ELM quantiles for binary labels:")
+                    self.zprint("\u2B1C Time-to-ELM quantiles")
+                    if self.time_to_elm_quantiles:
+                        self.zprint(f"  Using pre-loaded time-to-ELM quantiles")
+                    else:
+                        self.zprint(f"  Using {sub_stage.upper()} time-to-ELM quantiles")
+                        time_to_elm_labels = [sig_win['time_to_elm'] for sig_win in elm_signal_window_metadata]
+                        quantile_values = np.quantile(time_to_elm_labels, quantiles)
+                        self.time_to_elm_quantiles = {q: qval.item() for q, qval in zip(quantiles, quantile_values)}
                     for q, qval in self.time_to_elm_quantiles.items():
-                        self.zprint('\u2B1C' + f"   Quantile {q:.2f}: {qval:.1f} ms")
+                        self.zprint(f"  Quantile {q:.2f}: {qval:.2f} ms")
+                    self.save_hyperparameters({
+                        'time_to_elm_quantiles': self.time_to_elm_quantiles,
+                    })
 
                 # set quantile limits
                 if self.time_to_elm_quantile_min is not None and self.time_to_elm_quantile_max is not None:
@@ -1386,25 +1406,19 @@ class Data(_Base_Class, LightningDataModule):
                     time_to_elm_min, time_to_elm_max = np.quantile(time_to_elm_labels, (self.time_to_elm_quantile_min, self.time_to_elm_quantile_max))
                     # contrastive learning
                     if self.contrastive_learning:
-                        self.zprint(f"  Contrastive learning with time-to-ELM quantiles 0.0-{self.time_to_elm_quantile_min:.2f} and {self.time_to_elm_quantile_max:.2f}-1.0")
+                        self.zprint(f"      Contrastive learning with time-to-ELM quantiles 0.0-{self.time_to_elm_quantile_min:.2f} and {self.time_to_elm_quantile_max:.2f}-1.0")
                         for i in np.arange(len(elm_signal_window_metadata)-1, -1, -1, dtype=int):
                             if (elm_signal_window_metadata[i]['time_to_elm'] > time_to_elm_min) and \
                                 (elm_signal_window_metadata[i]['time_to_elm'] < time_to_elm_max):
                                 elm_signal_window_metadata.pop(i)
                     else:
-                        self.zprint(f"  Restricting time-to-ELM labels to quantile range: {self.time_to_elm_quantile_min:.2f}-{self.time_to_elm_quantile_max:.2f}")
+                        self.zprint(f"      Restricting time-to-ELM labels to quantile range: {self.time_to_elm_quantile_min:.2f}-{self.time_to_elm_quantile_max:.2f}")
                         for i in np.arange(len(elm_signal_window_metadata)-1, -1, -1, dtype=int):
                             if (elm_signal_window_metadata[i]['time_to_elm'] < time_to_elm_min) or \
                                 (elm_signal_window_metadata[i]['time_to_elm'] > time_to_elm_max):
                                 elm_signal_window_metadata.pop(i)
 
-                # balance signal windows across world_size
-                if self.world_size > 1:
-                    remainder = len(elm_signal_window_metadata) % self.world_size
-                    if remainder:
-                        elm_signal_window_metadata = elm_signal_window_metadata[:-remainder]
-                assert len(elm_signal_window_metadata) % self.world_size == 0
-                self.zprint(f"  Rank-balanced global signal window count: {len(elm_signal_window_metadata):,d}")
+                # final global ELM metadata for stage
                 self.elm_signal_window_metadata[sub_stage] = elm_signal_window_metadata
                 if sub_stage == 'test':
                     self.elm_signal_window_metadata['predict'] = self.elm_signal_window_metadata['test']
@@ -2167,18 +2181,19 @@ class Data(_Base_Class, LightningDataModule):
         return loaders
 
     def load_state_dict(self, state: dict) -> None:
-        self.zprint(f"  Loading state dict keys: {self.state_items}")
+        self.zprint("\u2B1C Loading state dict")
         for item in self.state_items:
+            self.zprint(f"    {item}: {state[item]}")
             setattr(self, item, state[item])
 
     def save_state_dict(self):
         if self.is_global_zero:
             state_dict_file = Path(self.log_dir)/'state_dict.pt'
             state_dict_file.parent.mkdir(parents=True, exist_ok=True)
-            self.zprint(f"Saving state_dict: {state_dict_file}")
+            self.zprint("\u2B1C " + f"Saving state_dict: {state_dict_file}")
             state_dict = {item: getattr(self, item) for item in self.state_items}
             for key in state_dict:
-                self.zprint(f"    {key}")
+                self.zprint(f"    {key}:  {state_dict[key]}")
             torch.save(state_dict, state_dict_file)
 
     def rprint(self, text: str = ''):
@@ -2590,8 +2605,8 @@ def main(
     ### data
     if not skip_data:
         zprint("\u2B1C Creating data module")
-        if ckpt_path:
-            assert seed is not None
+        # if ckpt_path:
+        #     assert seed is not None
         # TODO: after instantiating datamodule, load state_dict of checkpoint into datamodule
         lit_datamodule = Data(
             signal_window_size=signal_window_size,
@@ -2615,6 +2630,12 @@ def main(
             balance_confinement_data_with_elm_data=balance_confinement_data_with_elm_data,
             bad_elm_indices=bad_elm_indices,
         )
+        if backbone_model_path:
+            state_dict_file = Path(backbone_model_path) / 'state_dict.pt'
+            assert state_dict_file.exists(), f"State dict file does not exist: {state_dict_file}"
+            print(f"Loading state_dict from: {state_dict_file}")
+            state_dict = torch.load(state_dict_file, weights_only=False)
+            lit_datamodule.load_state_dict(state_dict)
 
     if not skip_train and not skip_data:
         zprint("\u2B1C Begin Trainer.fit()")
@@ -2648,13 +2669,11 @@ def main(
     }
 
 if __name__=='__main__':
-    seed = int(np.random.default_rng().integers(0, 2**32-1))
-    print(seed)
     feature_model_layers = (
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
-        # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+        {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
     mlp_tasks={
@@ -2672,26 +2691,26 @@ if __name__=='__main__':
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         mlp_tasks=mlp_tasks,
-        max_elms=150,
-        max_epochs=3,
+        max_elms=250,
+        max_epochs=4,
         # bad_elm_indices=bad_elm_indices,
         lr=1e-2,
         lr_warmup_epochs=2,
-        batch_size=512,
+        batch_size=256,
         fraction_validation=0.125,
         fraction_test=0.125,
-        num_workers=2,
+        num_workers=4,
         max_confinement_event_length=int(25e3),
-        confinement_dataset_factor=0.25,
+        confinement_dataset_factor=0.3,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
-        seed=seed,
+        seed=int(np.random.default_rng().integers(0, 2**32-1)),
         # balance_confinement_data_with_elm_data=True,
         # skip_train=True,
         skip_test=True,
-        # backbone_model_path='experiment_default/r2025_10_27_18_56_43',
-        # backbone_unfreeze_at_epoch=1,
-        # backbone_first_n_layers=3,
-        # backbone_initial_lr=1e-3,
-        # backbone_warmup_rate=2,
+        backbone_model_path='experiment_default/r2025_12_10_11_39_32',
+        backbone_unfreeze_at_epoch=1,
+        backbone_first_n_layers=3,
+        backbone_initial_lr=1e-3,
+        backbone_warmup_rate=2,
     )
