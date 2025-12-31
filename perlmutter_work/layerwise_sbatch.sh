@@ -9,11 +9,11 @@
 #SBATCH --gpus-per-node=4
 #SBATCH --cpus-per-task=32
 
-#SBATCH --signal=SIGTERM@180
+#SBATCH --signal=SIGTERM@360
 
-#SBATCH --time=0-6
+#SBATCH --time=0-8
 #SBATCH --qos=regular
-#SBATCH --array=0-79%12
+#SBATCH --array=1-50%8
 
 module --redirect list
 which python
@@ -46,9 +46,6 @@ echo UNIQUE_IDENTIFIER: ${UNIQUE_IDENTIFIER}
 
 export WANDB__SERVICE_WAIT=500
 
-export RAND_SEED=${RANDOM}
-echo Random seed: ${RAND_SEED}
-
 SCRIPT=$(cat << END
 import os
 import pickle
@@ -57,12 +54,13 @@ from model_trainer.main_multitask_v3 import main
 
 if __name__=='__main__':
 
-    seed = int(os.getenv("RAND_SEED"))
-    print(f'Linux RAND_SEED: {seed}')
-
-    task_id = int(os.getenv('SLURM_ARRAY_TASK_ID'))
-    batch_size_values = [256, 512, 1024]
-    batch_size = batch_size_values[task_id % len(batch_size_values)]
+    # task_id = int(os.getenv('SLURM_ARRAY_TASK_ID'))
+    # backbone_model_path_dict = {
+    #     0: 'multi_256_v30/L4_r46892977_0',
+    #     1: 'multi_256_v30/L4_r46892977_1',
+    #     2: 'multi_256_v30/L4_r46892977_2',
+    # }
+    # backbone_model_path = backbone_model_path_dict[task_id]
 
     bad_elm_files = Path('/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/')
     bad_elm_indices = []
@@ -74,15 +72,14 @@ if __name__=='__main__':
     main(
         # scenario
         signal_window_size=256,
-        experiment_name='multi_256_v29',
-        trial_name_prefix=f'L3_',
+        experiment_name='multi_256_v30',
+        trial_name_prefix='L3',
         # data
-        seed=seed,
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         max_elms=240,
-        max_confinement_event_length=int(30e3),
-        confinement_dataset_factor=0.4,
+        max_confinement_event_length=int(20e3),
+        confinement_dataset_factor=0.3,
         fraction_validation=0.1,
         fraction_test=0.1,
         num_workers=4,
@@ -92,6 +89,8 @@ if __name__=='__main__':
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
             {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
+            # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+            # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         ),
         mlp_tasks={
             'elm_class': [None, 32, 1],
@@ -100,15 +99,20 @@ if __name__=='__main__':
         monitor_metric='sum_score/train',
         fir_bp=(None, 100),
         # training
-        max_epochs=251,
+        max_epochs=250,
         lr=1e-2,
         lr_warmup_epochs=10,
         lr_scheduler_patience=50,
         lr_scheduler_threshold=1e-2,
         weight_decay=1e-5,
-        batch_size=batch_size,
+        batch_size=256,
         use_wandb=True,
         early_stopping_patience=125,
+        # backbone_model_path=backbone_model_path,
+        # backbone_unfreeze_at_epoch=1,
+        # backbone_first_n_layers=3,
+        # backbone_initial_lr=1e-3,
+        # backbone_warmup_rate=2,
     )
 END
 )
