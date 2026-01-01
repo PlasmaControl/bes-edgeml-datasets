@@ -17,7 +17,7 @@ from pathlib import Path
 import contextlib
 import dataclasses
 from datetime import datetime
-from typing import Literal, Optional, OrderedDict, Sequence
+from typing import Literal, Optional, OrderedDict, Sequence, cast
 import os
 import sys
 import time
@@ -47,6 +47,7 @@ from lightning.pytorch.utilities.model_summary.model_summary import ModelSummary
 from lightning.pytorch.utilities import grad_norm
 from lightning.pytorch.utilities.combined_loader import CombinedLoader
 
+from torchmetrics import Metric
 from torchmetrics.classification import \
     BinaryF1Score, BinaryPrecision, BinaryRecall, \
     MulticlassF1Score, MulticlassPrecision, MulticlassRecall
@@ -163,16 +164,6 @@ def _validate_sub_stage_key(stage: str) -> str:
     return stage
 
 
-def _configure_multiprocessing_start_method() -> None:
-    """Set a safe multiprocessing start method without side effects on import."""
-
-    try:
-        mp.set_start_method('spawn', force=True)
-    except RuntimeError:
-        # Start method already set by the runtime / another import.
-        pass
-
-
 def print_fields(obj):
     print(f"{obj.__class__.__name__} fields:")
     class_fields_dict = {field.name: field for field in dataclasses.fields(obj.__class__)}
@@ -217,8 +208,14 @@ class TaskSpec:
 
 
 def _validate_task_specs(task_specs: Sequence[TaskSpec]) -> tuple[TaskSpec, ...]:
+    if task_specs is None:
+        task_specs = _default_task_specs()
+
     if not task_specs:
         raise ValueError("task_specs must be a non-empty sequence")
+
+    if not all([hasattr(spec, 'name') for spec in task_specs]):
+        raise ValueError("Each TaskSpec must have a 'name' attribute")
 
     names = [spec.name for spec in task_specs]
     if len(set(names)) != len(names):
@@ -315,7 +312,7 @@ class Model(_Base_Class, LightningModule):
     batch_norm: bool = True
     dropout: float = 0.0
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
-    task_specs: Optional[Sequence[TaskSpec]] = None
+    task_specs: Sequence[TaskSpec] = None
     unfreeze_uncertainty_epoch: int = -1
     uncertainty_warmup_epochs: int = 0
     multiobjective_method: Literal['uncertainty', 'pcgrad', 'gradnorm'] = 'uncertainty'
@@ -333,7 +330,7 @@ class Model(_Base_Class, LightningModule):
     def __post_init__(self):
 
         # init superclasses
-        super().__post_init__()
+        _Base_Class.__post_init__(self)
         LightningModule.__init__(self)
         # Avoid logging task_specs here; we finalize and log it later in a serializable form.
         self.save_hyperparameters(ignore=['task_specs'])
@@ -361,10 +358,7 @@ class Model(_Base_Class, LightningModule):
 
         # --- Task configuration ---
         # TaskSpec is the only supported external task configuration.
-        if self.task_specs is None:
-            self.task_specs = _default_task_specs()
-
-        self.task_specs = _validate_task_specs(self.task_specs)
+        self.task_specs: Sequence[TaskSpec] = _validate_task_specs(self.task_specs)
 
         # Log a JSON-friendly representation of task_specs (and only from the model) to avoid
         # Lightning's hparams merge conflict with the DataModule.
@@ -373,8 +367,7 @@ class Model(_Base_Class, LightningModule):
         self.task_specs_by_name: dict[str, TaskSpec] = {spec.name: spec for spec in self.task_specs}
         # (duplicate names are already checked in _validate_task_specs)
 
-        self.task_names = [spec.name for spec in self.task_specs]
-        self.is_multitask = len(self.task_names) > 1
+        self.is_multitask = len(self.task_specs) > 1
 
         # Task grouping for shared trunk computation.
         self.task_input_key: dict[str, str] = {
@@ -392,36 +385,35 @@ class Model(_Base_Class, LightningModule):
         self.elm_wise_results = {}
         self.task_configs = {}
         for spec in self.task_specs:
-            task_name = spec.name
-            self.task_configs[task_name] = {}
+            self.task_configs[spec.name] = {}
             if spec.task_type == 'binary':
                 out_dim = 1
             elif spec.task_type == 'multiclass':
                 if spec.num_classes is None or int(spec.num_classes) <= 1:
-                    raise ValueError(f"Task '{task_name}' multiclass requires num_classes > 1")
+                    raise ValueError(f"Task '{spec.name}' multiclass requires num_classes > 1")
                 out_dim = int(spec.num_classes)
             else:
                 raise ValueError(f"Unsupported task_type: {spec.task_type}")
 
-            self.task_configs[task_name]['layers'] = [
+            self.task_configs[spec.name]['layers'] = [
                 int(self.feature_space_size),
                 *[int(x) for x in spec.head_layers],
                 int(out_dim),
             ]
             if spec.task_type == 'binary':
-                self.task_configs[task_name]['score_metric_names'] = (
+                self.task_configs[spec.name]['score_metric_names'] = (
                     'f1_score',
                     'precision_score',
                     'recall_score',
                 )
-                self.task_configs[task_name]['metrics'] = {
+                self.task_configs[spec.name]['metrics'] = {
                     'bce_loss': torch.nn.functional.binary_cross_entropy_with_logits,
                     'mean_stat': torch.mean,
                     'std_stat': torch.std,
                 }
             elif spec.task_type == 'multiclass':
                 num_classes = int(spec.num_classes)
-                self.task_configs[task_name]['score_metric_names'] = (
+                self.task_configs[spec.name]['score_metric_names'] = (
                     # Back-compat defaults (treat as macro):
                     'f1_score',
                     'precision_score',
@@ -434,19 +426,19 @@ class Model(_Base_Class, LightningModule):
                     'recall_macro',
                     'recall_micro',
                 )
-                self.task_configs[task_name]['metrics'] = {
+                self.task_configs[spec.name]['metrics'] = {
                     'ce_loss': torch.nn.functional.cross_entropy,
                     'mean_stat': lambda t: torch.abs(torch.mean(t)),
                     'std_stat': torch.std,
                 }
-            self.task_configs[task_name]['monitor_metric'] = spec.monitor_metric
+            self.task_configs[spec.name]['monitor_metric'] = spec.monitor_metric
 
         # make task sub-models
         self.task_metrics: dict[str, dict] = {}
         self.task_models: torch.nn.ModuleDict = torch.nn.ModuleDict()
         self.task_log_sigma: torch.nn.ParameterDict = torch.nn.ParameterDict()
-        for task_name in self.task_names:
-            task_dict = self.task_configs[task_name]
+        for task_name, task_dict in self.task_configs.items():
+            # task_dict = self.task_configs[task_name]
             self.zprint(f'Task sub-model: {task_name}')
             task_layers: tuple[int] = task_dict['layers']
             task_metrics: dict = task_dict['metrics']
@@ -520,7 +512,7 @@ class Model(_Base_Class, LightningModule):
         # GradNorm-style task weights stored as buffers for checkpointing.
         # Initialized lazily (only when used) to keep default behavior unchanged.
         if self.multiobjective_method == 'gradnorm' and self.is_multitask:
-            for task in self.task_names:
+            for task in self.task_specs:
                 w = torch.tensor(1.0)
                 w.requires_grad_(True)
                 self.register_buffer(f"gradnorm_w__{task}", w, persistent=True)
@@ -654,7 +646,7 @@ class Model(_Base_Class, LightningModule):
                     size=[512]+list(self.input_data_shape[1:]),
                     dtype=torch.float32,
                 )]
-                for task in self.task_names
+                for task in self.task_specs
             }
             example_batch_output = self(random_batch_input)
             for task_name, task_output in example_batch_output.items():
@@ -962,7 +954,7 @@ class Model(_Base_Class, LightningModule):
 
     #     return parameter_list
 
-    def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor:
+    def training_step(self, batch, batch_idx, dataloader_idx=None) -> torch.Tensor | Sequence[torch.Tensor]:
         if not (self.current_epoch or batch_idx or dataloader_idx):
             self.zprint("Begin training")
 
@@ -1098,7 +1090,7 @@ class Model(_Base_Class, LightningModule):
         return g
 
     def _pcgrad_step(self, task_losses: dict[str, torch.Tensor], shared_params: list[torch.nn.Parameter]) -> None:
-        tasks = [t for t in self.task_names if t in task_losses]
+        tasks = [t for t in self.task_specs if t in task_losses]
         if len(tasks) <= 1 or not shared_params:
             total_loss = sum(task_losses.values())
             self.manual_backward(total_loss)
@@ -1187,7 +1179,7 @@ class Model(_Base_Class, LightningModule):
             self._ddp_allreduce_grads_once([p for p in self.parameters() if p.requires_grad])
 
     def _gradnorm_step(self, task_losses: dict[str, torch.Tensor], shared_params: list[torch.nn.Parameter]) -> None:
-        tasks = [t for t in self.task_names if t in task_losses]
+        tasks = [t for t in self.task_specs if t in task_losses]
         if len(tasks) <= 1 or not shared_params:
             total_loss = sum(task_losses.values())
             self.manual_backward(total_loss)
@@ -1351,7 +1343,7 @@ class Model(_Base_Class, LightningModule):
             dataloader_idx = None,
             stage: str = '',
             return_task_losses: bool = False,
-    ) -> torch.Tensor:
+    ) -> torch.Tensor | Sequence:
         sync_dist_epoch = bool(getattr(getattr(self, 'trainer', None), 'world_size', 1) > 1)
         # Keep loss tensors on the same device as model outputs.
         sum_loss = torch.zeros((), device=self.device)
@@ -1463,8 +1455,8 @@ class Model(_Base_Class, LightningModule):
                 score_metric_names: tuple[str, ...] = tuple(self.task_configs[task].get('score_metric_names', ()))
                 for metric_name in score_metric_names:
                     key = f"{task}__{stage}__{metric_name}"
-                    metric_obj = self.stage_task_metrics[key]
-                    metric_obj.update(preds=preds_for_metrics, target=target_for_metrics)
+                    metric_obj = cast(Metric, self.stage_task_metrics[key])
+                    metric_obj.update(preds_for_metrics, target_for_metrics)
 
                     # Log the Metric object so Lightning calls compute()/reset() at epoch boundaries.
                     self.log(
@@ -1498,7 +1490,7 @@ class Model(_Base_Class, LightningModule):
                     feats = self.latent_bn(feats)
                 features_by_key[input_key] = feats
 
-            for task in self.task_names:
+            for task in self.task_specs:
                 feats = features_by_key[self.task_input_key[task]]
                 results[task] = self.task_models[task](feats)
         else:
@@ -1506,7 +1498,7 @@ class Model(_Base_Class, LightningModule):
             feats = self.feature_model(x)
             if self.latent_bn is not None:
                 feats = self.latent_bn(feats)
-            for task in self.task_names:
+            for task in self.task_specs:
                 results[task] = self.task_models[task](feats)
 
         return results
@@ -1552,7 +1544,7 @@ class Model(_Base_Class, LightningModule):
             for backend in backend_candidates:
                 try:
                     self.feature_model = torch.compile(self.feature_model, backend=backend)  # type: ignore[attr-defined]
-                    for task in self.task_names:
+                    for task in self.task_specs:
                         self.task_models[task] = torch.compile(self.task_models[task], backend=backend)  # type: ignore[attr-defined]
                     if self.is_global_zero:
                         self.zprint(f"torch.compile enabled (backend={backend})")
@@ -1604,7 +1596,7 @@ class Model(_Base_Class, LightningModule):
 
         # Log loss weights once (rank 0) for reproducibility.
         if self.is_global_zero:
-            for task_name in self.task_names:
+            for task_name in self.task_specs:
                 pw = getattr(self, f"loss_pos_weight__{task_name}", None)
                 cw = getattr(self, f"loss_class_weight__{task_name}", None)
                 if isinstance(pw, torch.Tensor):
@@ -1670,7 +1662,7 @@ class Model(_Base_Class, LightningModule):
                 logger.log_metrics(
                     metrics={
                         f'task_log_sigma/{task}': self.task_log_sigma[task].data.item()
-                        for task in self.task_names
+                        for task in self.task_specs
                     },
                     step=self.global_step,
                 )
@@ -1709,7 +1701,7 @@ class Model(_Base_Class, LightningModule):
 
             if self.multiobjective_method == 'gradnorm' and self.is_multitask:
                 w_items: list[str] = []
-                for task in self.task_names:
+                for task in self.task_specs:
                     w = getattr(self, f"gradnorm_w__{task}", None)
                     if isinstance(w, torch.Tensor):
                         w_items.append(f"{task}={float(w.detach().cpu().flatten()[0]):.3f}")
@@ -2054,7 +2046,7 @@ class Data(_Base_Class, LightningDataModule):
     balance_confinement_data_with_elm_data: bool = False
 
     # Task configuration (source of truth). If None, defaults to _default_task_specs().
-    task_specs: Optional[Sequence[TaskSpec]] = None
+    task_specs: Sequence[TaskSpec] = None
 
     # Class imbalance handling
     use_class_imbalance_weights: bool = True
@@ -2062,7 +2054,7 @@ class Data(_Base_Class, LightningDataModule):
     task_loss_class_weight: dict[str, list[float]] = dataclasses.field(default_factory=dict)
 
     def __post_init__(self):
-        super().__post_init__()
+        _Base_Class.__post_init__(self)
         LightningDataModule.__init__(self)
         # task_specs is owned/logged by the LightningModule to avoid hparams merge conflicts.
         self.save_hyperparameters(ignore=['task_specs'])
@@ -3650,19 +3642,22 @@ def main(
         bad_elm_indices: Sequence[int] = (),
 ) -> dict:
 
-    _configure_multiprocessing_start_method()
+    try:
+        mp.set_start_method('spawn', force=True)
+    except RuntimeError:
+        pass
 
     ### SLURM/MPI environment
     num_nodes = int(os.getenv('SLURM_NNODES', default=1))
     world_size = int(os.getenv("SLURM_NTASKS", default=1))
     world_rank = int(os.getenv("SLURM_PROCID", default=0))
+    if world_size > 1:
+        print(f"World rank {world_rank} of size {world_size} on {num_nodes} node(s)")
 
     is_global_zero = (world_rank == 0)
     def zprint(text):
         if is_global_zero:
             print(text)
-
-    zprint(f"World rank {world_rank} of size {world_size} on {num_nodes} node(s)")
 
     if multiobjective_method in ('pcgrad', 'gradnorm') and gradient_clip_val not in (0, None):
         zprint(
@@ -3680,22 +3675,9 @@ def main(
     # --- Deterministic seeding (torch + numpy + python + dataloader workers) ---
     # In distributed runs, every rank must use the same seed.
     if seed is None:
-        # Prefer stable scheduler-provided identifiers so all ranks match.
-        # Falls back to 0 for local runs.
-        seed_from_env = (
-            os.getenv('UNIQUE_IDENTIFIER')
-            or os.getenv('SLURM_JOB_ID')
-            or os.getenv('SLURM_ARRAY_JOB_ID')
-            or os.getenv('SLURM_JOBID')
-        )
-        try:
-            seed = int(seed_from_env) if seed_from_env is not None else 0
-        except ValueError:
-            seed = 0
-
+        seed = np.random.default_rng().integers(0, 2**32 - 1)
     seed = int(seed)
-    if is_global_zero:
-        zprint(f"Using seed: {seed}")
+    zprint(f"Using seed: {seed}")
     seed_everything(seed, workers=True)
 
     ### model
@@ -3927,7 +3909,7 @@ def main(
     }
 
 if __name__=='__main__':
-    _configure_multiprocessing_start_method()
+
     feature_model_layers = (
         {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
@@ -3935,6 +3917,7 @@ if __name__=='__main__':
         {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
     )
+
     task_specs = (
         TaskSpec(
             name='elm_class',
@@ -3945,25 +3928,25 @@ if __name__=='__main__':
             dataloader_idx=0,
             track_elmwise_f1=True,
         ),
-        # TaskSpec(
-        #     name='conf_onehot',
-        #     task_type='multiclass',
-        #     head_layers=(16,),
-        #     num_classes=4,
-        #     label_format='multiclass_index',
-        #     dataloader_idx=1,
-        #     class_labels=('L-mode','H-mode','QH-mode','WP QH-mode'),
-        # ),
+        TaskSpec(
+            name='conf_onehot',
+            task_type='multiclass',
+            head_layers=(16,),
+            num_classes=4,
+            label_format='multiclass_index',
+            dataloader_idx=1,
+            class_labels=('L-mode','H-mode','QH-mode','WP QH-mode'),
+        ),
     )
     main(
-        # confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
+        confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
         # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
-        elm_data_file=ml_data.small_data_100,
+        elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
+        # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         task_specs=task_specs,
-        max_elms=40,
+        max_elms=120,
         max_epochs=2,
         # bad_elm_indices=bad_elm_indices,
         lr=1e-2,

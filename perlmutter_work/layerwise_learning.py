@@ -5,13 +5,8 @@ from model_trainer.main_multitask_v3 import main
 
 if __name__=='__main__':
 
-    # task_id = int(os.getenv('SLURM_ARRAY_TASK_ID'))
-    # backbone_model_path_dict = {
-    #     0: 'multi_256_v30/L4_r46892977_0',
-    #     1: 'multi_256_v30/L4_r46892977_1',
-    #     2: 'multi_256_v30/L4_r46892977_2',
-    # }
-    # backbone_model_path = backbone_model_path_dict[task_id]
+    task_id = int(os.getenv('SLURM_ARRAY_TASK_ID'))
+    backbone_model_path = f'multi_256_v30/L3_r46911715_{task_id}'
 
     bad_elm_files = Path('/global/homes/d/drsmith/ml/bes-edgeml-datasets/model_trainer/')
     bad_elm_indices = []
@@ -24,13 +19,13 @@ if __name__=='__main__':
         # scenario
         signal_window_size=256,
         experiment_name='multi_256_v30',
-        trial_name_prefix='L3',
+        trial_name_prefix='L4',
         # data
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        max_elms=240,
-        max_confinement_event_length=int(20e3),
-        confinement_dataset_factor=0.3,
+        max_elms=480,
+        max_confinement_event_length=int(40e3),
+        confinement_dataset_factor=0.5,
         fraction_validation=0.1,
         fraction_test=0.1,
         num_workers=4,
@@ -40,7 +35,7 @@ if __name__=='__main__':
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
             {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
             {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias': True},
-            # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
+            {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
             # {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1,         'bias': True},
         ),
         mlp_tasks={
@@ -50,7 +45,7 @@ if __name__=='__main__':
         monitor_metric='sum_score/train',
         fir_bp=(None, 100),
         # training
-        max_epochs=250,
+        max_epochs=300,
         lr=1e-2,
         lr_warmup_epochs=10,
         lr_scheduler_patience=50,
@@ -59,9 +54,9 @@ if __name__=='__main__':
         batch_size=256,
         use_wandb=True,
         early_stopping_patience=125,
-        # backbone_model_path=backbone_model_path,
-        # backbone_unfreeze_at_epoch=1,
-        # backbone_first_n_layers=3,
-        # backbone_initial_lr=1e-3,
-        # backbone_warmup_rate=2,
+        backbone_model_path=backbone_model_path,
+        backbone_unfreeze_at_epoch=10,
+        backbone_first_n_layers=3,
+        backbone_initial_lr=1e-3,
+        backbone_warmup_rate=2,
     )
