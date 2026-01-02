@@ -67,6 +67,8 @@ STAGE_KEYS_TRAIN_VAL_TEST: tuple[str, ...] = ('train', 'val', 'test')
 # Lightning/Trainer stage values used by DataModule.setup()
 TRAINER_STAGE_KEYS: tuple[str, ...] = ('fit', 'test', 'predict')
 
+MULTIOBJECTIVE_KEYS: Literal['logsigma', 'pcgrad', 'gradnorm'] = ('logsigma', 'pcgrad', 'gradnorm')
+
 
 def _expit_np(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x)
@@ -309,18 +311,17 @@ class Model(_Base_Class, LightningModule):
     elm_loss_weight: float = None
     conf_loss_weight: float = None
     no_bias: bool = False
-    batch_norm: bool = True
-    dropout: float = 0.0
+    # batch_norm: bool = True
+    dropout: float = 0.05
     feature_model_layers: Sequence[dict[str, LightningModule]] = None
     task_specs: Sequence[TaskSpec] = None
-    unfreeze_uncertainty_epoch: int = -1
-    uncertainty_warmup_epochs: int = 0
-    multiobjective_method: Literal['uncertainty', 'pcgrad', 'gradnorm'] = 'uncertainty'
+    unfreeze_logsigma_epoch: int = -1
+    logsigma_warmup_epochs: int = 0
+    multiobjective_method: Literal['logsigma', 'pcgrad', 'gradnorm'] = 'logsigma'
     gradnorm_alpha: float = 1.5
     gradnorm_eta: float = 0.025
-    latent_batch_norm: bool = True
-    pcgrad_update_interval: int = 1
-    gradnorm_update_interval: int = 1
+    # latent_batch_norm: bool = True
+    grad_update_interval: int = 1
     gradnorm_rep_params: Literal['all', 'last_trunk_layer'] = 'last_trunk_layer'
     use_torch_compile: bool = False
     backbone_model_path: str|Path = None
@@ -343,9 +344,6 @@ class Model(_Base_Class, LightningModule):
 
         if self.is_global_zero:
             print_fields(self)
-
-        # only batch_norm or dropout, not both
-        assert not (self.batch_norm and self.dropout)
 
         # input data shape
         self.input_data_shape = (1, 1, self.signal_window_size, 8, 8)
@@ -378,8 +376,8 @@ class Model(_Base_Class, LightningModule):
         for task_name, key in self.task_input_key.items():
             self.input_key_to_tasks.setdefault(key, []).append(task_name)
 
-        if self.uncertainty_warmup_epochs and self.unfreeze_uncertainty_epoch == -1:
-            self.unfreeze_uncertainty_epoch = int(self.uncertainty_warmup_epochs)
+        if self.logsigma_warmup_epochs and self.unfreeze_logsigma_epoch == -1:
+            self.unfreeze_logsigma_epoch = int(self.logsigma_warmup_epochs)
 
         # create MLP configs + metrics
         self.elm_wise_results = {}
@@ -489,9 +487,9 @@ class Model(_Base_Class, LightningModule):
                     self.stage_task_metrics[key] = metric
 
         # Optional BatchNorm1d on the latent feature vector before task heads.
-        self.latent_bn: Optional[torch.nn.BatchNorm1d] = (
-            torch.nn.BatchNorm1d(int(self.feature_space_size)) if self.latent_batch_norm else None
-        )
+        # self.latent_bn: Optional[torch.nn.BatchNorm1d] = (
+        #     torch.nn.BatchNorm1d(int(self.feature_space_size)) if self.latent_batch_norm else None
+        # )
 
         # Cache shared parameters (trunk + optional latent BN) and refresh only when trainability changes.
         self._shared_params_cache_signature: Optional[tuple[tuple[int, bool], ...]] = None
@@ -504,10 +502,10 @@ class Model(_Base_Class, LightningModule):
         self._torch_compile_done: bool = False
 
         # Multi-objective training mode.
-        if self.multiobjective_method not in ('uncertainty', 'pcgrad', 'gradnorm'):
+        if self.multiobjective_method not in ('logsigma', 'pcgrad', 'gradnorm'):
             raise ValueError(f"Unknown multiobjective_method: {self.multiobjective_method}")
         # PCGrad/GradNorm require manual optimization.
-        self.automatic_optimization = (self.multiobjective_method == 'uncertainty')
+        self.automatic_optimization = (self.multiobjective_method == 'logsigma')
 
         # GradNorm-style task weights stored as buffers for checkpointing.
         # Initialized lazily (only when used) to keep default behavior unchanged.
@@ -518,7 +516,7 @@ class Model(_Base_Class, LightningModule):
                 self.register_buffer(f"gradnorm_w__{task}", w, persistent=True)
                 self.register_buffer(f"gradnorm_L0__{task}", torch.tensor(float('nan')), persistent=True)
 
-        self.task_log_sigma.requires_grad_ = True if self.unfreeze_uncertainty_epoch == -1 else False
+        self.task_log_sigma.requires_grad_ = True if self.unfreeze_logsigma_epoch == -1 else False
 
         self.zprint(f"Total model parameters: {self.param_count(self):,d}")
 
@@ -530,9 +528,9 @@ class Model(_Base_Class, LightningModule):
         self.zprint("Feature space sub-model")
         if self.feature_model_layers is None:
             self.feature_model_layers = (
-                {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
-                {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1, 'bias':True},
-                {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1), 'bias':True},
+                {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
+                {'out_channels': 4, 'kernel': (1, 3, 3), 'stride': 1},
+                {'out_channels': 4, 'kernel': (8, 1, 1), 'stride': (8, 1, 1)},
             )
         n_feature_layers = len(self.feature_model_layers)
         feature_layer_dict = OrderedDict()
@@ -541,39 +539,41 @@ class Model(_Base_Class, LightningModule):
         previous_out_channels: int = None
         for i_layer, layer in enumerate(self.feature_model_layers):
             in_channels: int = 1 if i_layer==0 else previous_out_channels
-            # batch norm before conv layer (except input layer)
-            # if i_layer > 0 and self.batch_norm:
-            if self.batch_norm:
-                layer_name = f"L{i_layer:02d}_BatchNorm"
-                feature_layer_dict[layer_name] = torch.nn.BatchNorm3d(in_channels)
-                self.zprint(f"  {layer_name} (regularization)")
+
             # conv layer
-            conv_layer_name = f"L{i_layer:02d}_Conv"
-            bias = layer['bias'] and (self.no_bias == False)
             conv = torch.nn.Conv3d(
                 in_channels=in_channels,
                 out_channels=layer['out_channels'],
                 kernel_size=layer['kernel'],
                 stride=layer['stride'],
-                bias=bias,
+                bias=False,
             )
+            conv_layer_name = f"L{i_layer:02d}_Conv"
             feature_layer_dict[conv_layer_name] = conv
             n_params = self.param_count(conv)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
-            self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  bias {bias}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
+            self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
             previous_out_channels = layer['out_channels']
-            # LeakyReLU layer
+
+            # batchnorm after conv
+            # layer_name = f"L{i_layer:02d}_BatchNorm"
+            # feature_layer_dict[layer_name] = torch.nn.BatchNorm3d(in_channels)
+            layer_name = f"L{i_layer:02d}_GroupNorm"
+            feature_layer_dict[layer_name] = torch.nn.GroupNorm(1,in_channels)
+            self.zprint(f"  {layer_name} (regularization)")
+
+            # LeakyReLU after batchnorm
             relu_layer_name = f"L{i_layer:02d}_LeakyReLU"
             feature_layer_dict[relu_layer_name] = torch.nn.LeakyReLU(self.leaky_relu_slope)
             self.zprint(f"  {relu_layer_name} (activation)")
-            # dropout after activation (except after last layer)
-            if i_layer < n_feature_layers - 1 and self.dropout:
-                feature_layer_dict[f"L{i_layer:02d}_Dropout"] = torch.nn.Dropout3d(self.dropout)
-                self.zprint(f"  {layer_name} (regularization)")
 
+        # flatten and groupnorm
         layer_name = f'L{n_feature_layers - 1:02d}_Flatten'
         feature_layer_dict[layer_name] = torch.nn.Flatten()
         self.zprint(f"  {layer_name}  (flatten to vector)")
+        layer_name = f"L{n_feature_layers - 1:02d}_GroupNorm"
+        feature_layer_dict[layer_name] = torch.nn.GroupNorm(1,previous_out_channels)
+
         self.feature_model = torch.nn.Sequential(feature_layer_dict)
         self.feature_space_size = self.feature_model(torch.zeros(self.input_data_shape)).numel()
 
@@ -594,25 +594,34 @@ class Model(_Base_Class, LightningModule):
             i_layer = n_feature_layers + i_mlp_layer
             # # batch norm
             # if self.batch_norm:
-            #     layer_name = f"L{i_layer:02d}_BatchNorm"
-            #     mlp_layer_dict[layer_name] = torch.nn.BatchNorm1d(mlp_layers[i_mlp_layer])
-            #     self.zprint(f'  {layer_name} (regularization)')
             # fully-connected layer
-            layer_name = f"L{i_layer:02d}_FC"
-            bias = (True and (self.no_bias==False)) if i_mlp_layer<n_mlp_layers-2 else False
+            # bias = False if i_mlp_layer<n_mlp_layers-2 else True
+            # Linear
             mlp_layer = torch.nn.Linear(
                 in_features=mlp_layers[i_mlp_layer],
                 out_features=mlp_layers[i_mlp_layer+1],
-                bias=bias,
+                bias=False if i_mlp_layer<n_mlp_layers-2 else True,
             )
+            layer_name = f"L{i_layer:02d}_FC"
             mlp_layer_dict[layer_name] = mlp_layer
             n_params = self.param_count(mlp_layer)
-            self.zprint(f"  {layer_name}  bias {bias}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
-            # leaky relu
-            if i_mlp_layer+1 != n_mlp_layers-1:
+            self.zprint(f"  {layer_name}  in_features {mlp_layer.in_features}  out_features {mlp_layer.out_features}  parameters {n_params:,d}")
+
+            if i_mlp_layer < n_mlp_layers-2:
+                # batchnorm after Linear
+                layer_name = f"L{i_layer:02d}_BatchNorm"
+                mlp_layer_dict[layer_name] = torch.nn.BatchNorm1d(mlp_layers[i_mlp_layer+1])
+                self.zprint(f'  {layer_name} (regularization)')
+
+                # leaky relu
                 layer_name = f"L{i_layer:02d}_LeakyReLU"
                 mlp_layer_dict[layer_name] = torch.nn.LeakyReLU(self.leaky_relu_slope)
                 self.zprint(f"  {layer_name} (activation)")
+
+                # dropout
+                layer_name = f'L_{i_layer:02d}_Dropout'
+                mlp_layer_dict[layer_name] = torch.nn.Dropout1d(p=self.dropout,inplace=True)
+                self.zprint(f"  {layer_name} (regularization)")
 
         mlp_classifier = torch.nn.Sequential(mlp_layer_dict)
 
@@ -715,7 +724,7 @@ class Model(_Base_Class, LightningModule):
         self.zprint(f"  lr for deepest layer: {self.deepest_layer_lr_factor * self.lr:.1e}")
         self.zprint(f"  Warmup epochs: {self.lr_warmup_epochs}")
         self.zprint(f"  Reduce on plateau threshold {self.lr_scheduler_threshold:.1e} and patience {self.lr_scheduler_patience:d}")
-        self.zprint(f"  Unfreeze uncertainty epoch: {self.unfreeze_uncertainty_epoch:d}")
+        self.zprint(f"  Unfreeze logsigma epoch: {self.unfreeze_logsigma_epoch:d}")
 
         params_weights = {'params': []}
         params_biases = {'params': []}
@@ -731,7 +740,7 @@ class Model(_Base_Class, LightningModule):
                 # Always include sigma params in the optimizer so we can unfreeze them later
                 # without modifying optimizer param groups.
                 params_sigmas['params'].append(p)
-                if self.unfreeze_uncertainty_epoch == -1:
+                if self.unfreeze_logsigma_epoch == -1:
                     p.requires_grad_(True)
                 else:
                     p.requires_grad_(False)
@@ -958,12 +967,12 @@ class Model(_Base_Class, LightningModule):
         if not (self.current_epoch or batch_idx or dataloader_idx):
             self.zprint("Begin training")
 
-        # Unfreeze uncertainty parameters after warm start.
+        # Unfreeze logsigma parameters after warm start.
         if (
-            self.multiobjective_method == 'uncertainty'
+            self.multiobjective_method == 'logsigma'
             and self.is_multitask
-            and self.unfreeze_uncertainty_epoch != -1
-            and self.current_epoch == self.unfreeze_uncertainty_epoch
+            and self.unfreeze_logsigma_epoch != -1
+            and self.current_epoch == self.unfreeze_logsigma_epoch
         ):
             for p in self.task_log_sigma.parameters():
                 p.requires_grad_(True)
@@ -1030,9 +1039,9 @@ class Model(_Base_Class, LightningModule):
         items: list[tuple[int, bool]] = []
         for p in self.feature_model.parameters():
             items.append((id(p), bool(p.requires_grad)))
-        if self.latent_bn is not None:
-            for p in self.latent_bn.parameters():
-                items.append((id(p), bool(p.requires_grad)))
+        # if self.latent_bn is not None:
+        #     for p in self.latent_bn.parameters():
+        #         items.append((id(p), bool(p.requires_grad)))
         return tuple(items)
 
     def _refresh_shared_params_cache(self, *, force: bool = False) -> None:
@@ -1042,8 +1051,8 @@ class Model(_Base_Class, LightningModule):
         self._shared_params_cache_signature = sig
         self._cached_trunk_params = [p for p in self.feature_model.parameters() if p.requires_grad]
         shared = list(self._cached_trunk_params)
-        if self.latent_bn is not None:
-            shared.extend([p for p in self.latent_bn.parameters() if p.requires_grad])
+        # if self.latent_bn is not None:
+        #     shared.extend([p for p in self.latent_bn.parameters() if p.requires_grad])
         self._cached_shared_params = shared
         # Invalidate GradNorm rep cache.
         self._cached_gradnorm_rep_signature = None
@@ -1096,7 +1105,7 @@ class Model(_Base_Class, LightningModule):
             self.manual_backward(total_loss)
             return
 
-        interval = int(self.pcgrad_update_interval) if self.pcgrad_update_interval else 1
+        interval = int(self.grad_update_interval) if self.grad_update_interval else 1
         interval = max(1, interval)
         if interval > 1 and (int(getattr(self, 'global_step', 0)) % interval) != 0:
             # Cheap step: skip PCGrad projection.
@@ -1185,7 +1194,7 @@ class Model(_Base_Class, LightningModule):
             self.manual_backward(total_loss)
             return
 
-        interval = int(self.gradnorm_update_interval) if self.gradnorm_update_interval else 1
+        interval = int(self.grad_update_interval) if self.grad_update_interval else 1
         interval = max(1, interval)
         do_update = (interval <= 1) or ((int(getattr(self, 'global_step', 0)) % interval) == 0)
 
@@ -1320,8 +1329,8 @@ class Model(_Base_Class, LightningModule):
             self.predict_outputs[dataloader_idx] = []
         signals, labels, times = batch
         features = self.feature_model(signals)
-        if self.latent_bn is not None:
-            features = self.latent_bn(features)
+        # if self.latent_bn is not None:
+        #     features = self.latent_bn(features)
         datamodule: Data = self.trainer.datamodule
         task = datamodule.loader_tasks[dataloader_idx]
         task_outputs = self.task_models[task](features)
@@ -1420,7 +1429,7 @@ class Model(_Base_Class, LightningModule):
                         )
                     prod_loss = prod_loss * metric_value
                     task_losses[task] = metric_value
-                    if self.multiobjective_method == 'uncertainty' and self.is_multitask:
+                    if self.multiobjective_method == 'logsigma' and self.is_multitask:
                         metric_weighted = metric_value / (torch.exp(self.task_log_sigma[task])) + self.task_log_sigma[task]
                         sum_loss = sum_loss + metric_weighted
                     else:
@@ -1486,8 +1495,8 @@ class Model(_Base_Class, LightningModule):
                 rep_task = next((t for t in tasks if t in batch), tasks[0])
                 x = batch[rep_task][0]
                 feats = self.feature_model(x)
-                if self.latent_bn is not None:
-                    feats = self.latent_bn(feats)
+                # if self.latent_bn is not None:
+                #     feats = self.latent_bn(feats)
                 features_by_key[input_key] = feats
 
             for task in self.task_specs:
@@ -1496,8 +1505,8 @@ class Model(_Base_Class, LightningModule):
         else:
             x = batch[0]
             feats = self.feature_model(x)
-            if self.latent_bn is not None:
-                feats = self.latent_bn(feats)
+            # if self.latent_bn is not None:
+            #     feats = self.latent_bn(feats)
             for task in self.task_specs:
                 results[task] = self.task_models[task](feats)
 
@@ -1639,9 +1648,9 @@ class Model(_Base_Class, LightningModule):
                     # self.zprint(f"  Frozen {mod_name}.{param_name}")
                     self.n_frozen_layers += 1
                     break
-        if self.is_multitask and self.current_epoch==self.unfreeze_uncertainty_epoch:
+        if self.is_multitask and self.current_epoch==self.unfreeze_logsigma_epoch:
             pass
-            # self.zprint(f"  Unfreezing task uncertainty parameters and adding to optimizer")
+            # self.zprint(f"  Unfreezing task logsigma parameters and adding to optimizer")
             # for p in self.task_log_sigma.parameters():
             #     p.requires_grad = True
             # params_sigmas = {
@@ -3581,18 +3590,17 @@ def main(
         signal_window_size: int = 256,
         # model
         no_bias: bool = False,
-        batch_norm: bool = True,
-        dropout: float = 0.0,
+        # batch_norm: bool = True,
+        dropout: float = 0.05,
         feature_model_layers: Sequence[dict[str, LightningModule]] = None,
         task_specs: Optional[Sequence[TaskSpec]] = None,
-        unfreeze_uncertainty_epoch: int = -1,
-        uncertainty_warmup_epochs: int = 0,
-        multiobjective_method: str = 'uncertainty',
-        latent_batch_norm: bool = True,
-        pcgrad_update_interval: int = 1,
-        gradnorm_update_interval: int = 1,
+        multiobjective_method: str = 'logsigma',
+        unfreeze_logsigma_epoch: int = -1,
+        logsigma_warmup_epochs: int = 0,
+        grad_update_interval: int = 1,
         gradnorm_rep_params: str = 'last_trunk_layer',
         use_torch_compile: bool = False,
+        # latent_batch_norm: bool = True,
         # optimizer
         use_optimizer: str = 'adam',
         lr: float = 1e-3,
@@ -3685,7 +3693,7 @@ def main(
     lit_model = Model(
         signal_window_size=signal_window_size,
         no_bias=no_bias,
-        batch_norm=batch_norm,
+        # batch_norm=batch_norm,
         feature_model_layers=feature_model_layers,
         task_specs=task_specs,
         dropout=dropout,
@@ -3698,12 +3706,11 @@ def main(
         lr_warmup_epochs=lr_warmup_epochs,
         weight_decay=weight_decay,
         monitor_metric=monitor_metric,
-        unfreeze_uncertainty_epoch=unfreeze_uncertainty_epoch,
-        uncertainty_warmup_epochs=uncertainty_warmup_epochs,
+        unfreeze_logsigma_epoch=unfreeze_logsigma_epoch,
+        logsigma_warmup_epochs=logsigma_warmup_epochs,
         multiobjective_method=multiobjective_method,
-        latent_batch_norm=latent_batch_norm,
-        pcgrad_update_interval=pcgrad_update_interval,
-        gradnorm_update_interval=gradnorm_update_interval,
+        # latent_batch_norm=latent_batch_norm,
+        grad_update_interval=grad_update_interval,
         gradnorm_rep_params=gradnorm_rep_params,
         use_torch_compile=use_torch_compile,
         # transfer learning with backbone model
@@ -3940,13 +3947,11 @@ if __name__=='__main__':
     )
     main(
         confinement_data_file='/global/homes/d/drsmith/scratch-ml/data/confinement_data.20240112.hdf5',
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_100.hdf5',
-        # elm_data_file='/global/homes/d/drsmith/scratch-ml/data/small_data_500.hdf5',
         elm_data_file='/global/homes/d/drsmith/scratch-ml/data/elm_data.20240502.hdf5',
         # elm_data_file=ml_data.small_data_100,
         feature_model_layers=feature_model_layers,
         task_specs=task_specs,
-        max_elms=120,
+        max_elms=60,
         max_epochs=2,
         # bad_elm_indices=bad_elm_indices,
         lr=1e-2,
@@ -3955,8 +3960,8 @@ if __name__=='__main__':
         fraction_validation=0.125,
         # fraction_test=0.125,
         num_workers=2,
-        max_confinement_event_length=int(25e3),
-        confinement_dataset_factor=0.25,
+        max_confinement_event_length=int(20e3),
+        confinement_dataset_factor=0.2,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
         # seed=int(np.random.default_rng().integers(0, 2**32-1)),
