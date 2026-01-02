@@ -67,8 +67,6 @@ STAGE_KEYS_TRAIN_VAL_TEST: tuple[str, ...] = ('train', 'val', 'test')
 # Lightning/Trainer stage values used by DataModule.setup()
 TRAINER_STAGE_KEYS: tuple[str, ...] = ('fit', 'test', 'predict')
 
-MULTIOBJECTIVE_KEYS: Literal['logsigma', 'pcgrad', 'gradnorm'] = ('logsigma', 'pcgrad', 'gradnorm')
-
 
 def _expit_np(x: np.ndarray) -> np.ndarray:
     x = np.asarray(x)
@@ -365,6 +363,9 @@ class Model(_Base_Class, LightningModule):
         self.task_specs_by_name: dict[str, TaskSpec] = {spec.name: spec for spec in self.task_specs}
         # (duplicate names are already checked in _validate_task_specs)
 
+        # Canonical ordered list of task names.
+        self.task_names: tuple[str, ...] = tuple(spec.name for spec in self.task_specs)
+
         self.is_multitask = len(self.task_specs) > 1
 
         # Task grouping for shared trunk computation.
@@ -510,11 +511,11 @@ class Model(_Base_Class, LightningModule):
         # GradNorm-style task weights stored as buffers for checkpointing.
         # Initialized lazily (only when used) to keep default behavior unchanged.
         if self.multiobjective_method == 'gradnorm' and self.is_multitask:
-            for task in self.task_specs:
+            for task_name in self.task_names:
                 w = torch.tensor(1.0)
                 w.requires_grad_(True)
-                self.register_buffer(f"gradnorm_w__{task}", w, persistent=True)
-                self.register_buffer(f"gradnorm_L0__{task}", torch.tensor(float('nan')), persistent=True)
+                self.register_buffer(f"gradnorm_w__{task_name}", w, persistent=True)
+                self.register_buffer(f"gradnorm_L0__{task_name}", torch.tensor(float('nan')), persistent=True)
 
         self.task_log_sigma.requires_grad_ = True if self.unfreeze_logsigma_epoch == -1 else False
 
@@ -552,14 +553,15 @@ class Model(_Base_Class, LightningModule):
             feature_layer_dict[conv_layer_name] = conv
             n_params = self.param_count(conv)
             data_shape = tuple(conv(torch.zeros(data_shape)).shape)
-            self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {np.prod(data_shape)})")
-            previous_out_channels = layer['out_channels']
+            data_size = np.prod(data_shape)
+            self.zprint(f"  {conv_layer_name} kern {conv.kernel_size}  stride {conv.stride}  out_ch {conv.out_channels}  param {n_params:,d}  output {data_shape} (size {data_size})")
+            previous_out_channels = conv.out_channels
 
             # batchnorm after conv
             # layer_name = f"L{i_layer:02d}_BatchNorm"
             # feature_layer_dict[layer_name] = torch.nn.BatchNorm3d(in_channels)
             layer_name = f"L{i_layer:02d}_GroupNorm"
-            feature_layer_dict[layer_name] = torch.nn.GroupNorm(1,in_channels)
+            feature_layer_dict[layer_name] = torch.nn.GroupNorm(1, conv.out_channels)
             self.zprint(f"  {layer_name} (regularization)")
 
             # LeakyReLU after batchnorm
@@ -568,14 +570,16 @@ class Model(_Base_Class, LightningModule):
             self.zprint(f"  {relu_layer_name} (activation)")
 
         # flatten and groupnorm
-        layer_name = f'L{n_feature_layers - 1:02d}_Flatten'
+        layer_name = 'Feature_Space_Flatten'
         feature_layer_dict[layer_name] = torch.nn.Flatten()
         self.zprint(f"  {layer_name}  (flatten to vector)")
-        layer_name = f"L{n_feature_layers - 1:02d}_GroupNorm"
-        feature_layer_dict[layer_name] = torch.nn.GroupNorm(1,previous_out_channels)
+        layer_name = "Feature_Space_LayerNorm"
+        feature_layer_dict[layer_name] = torch.nn.LayerNorm(data_size)
+        self.zprint(f"  {layer_name}  (regularization)")
 
         self.feature_model = torch.nn.Sequential(feature_layer_dict)
         self.feature_space_size = self.feature_model(torch.zeros(self.input_data_shape)).numel()
+        assert self.feature_space_size == data_size
 
         self.zprint(f"    Feature sub-model parameters: {self.param_count(self.feature_model):,d}")
         self.zprint(f"    Feature space size: {self.feature_space_size}")
@@ -651,11 +655,11 @@ class Model(_Base_Class, LightningModule):
                     param.data.uniform_(-sqrt_k, sqrt_k)
                     self.zprint(f"  {param_name}: initialized to uniform +- {sqrt_k:.1e} n*var: {n_in*torch.var(param.data):.3f} (n {param.data.numel()})")
             random_batch_input = {
-                task: [torch.randn(
+                spec.name: [torch.randn(
                     size=[512]+list(self.input_data_shape[1:]),
                     dtype=torch.float32,
                 )]
-                for task in self.task_specs
+                for spec in self.task_specs
             }
             example_batch_output = self(random_batch_input)
             for task_name, task_output in example_batch_output.items():
@@ -1099,7 +1103,7 @@ class Model(_Base_Class, LightningModule):
         return g
 
     def _pcgrad_step(self, task_losses: dict[str, torch.Tensor], shared_params: list[torch.nn.Parameter]) -> None:
-        tasks = [t for t in self.task_specs if t in task_losses]
+        tasks = [t for t in self.task_names if t in task_losses]
         if len(tasks) <= 1 or not shared_params:
             total_loss = sum(task_losses.values())
             self.manual_backward(total_loss)
@@ -1188,7 +1192,7 @@ class Model(_Base_Class, LightningModule):
             self._ddp_allreduce_grads_once([p for p in self.parameters() if p.requires_grad])
 
     def _gradnorm_step(self, task_losses: dict[str, torch.Tensor], shared_params: list[torch.nn.Parameter]) -> None:
-        tasks = [t for t in self.task_specs if t in task_losses]
+        tasks = [t for t in self.task_names if t in task_losses]
         if len(tasks) <= 1 or not shared_params:
             total_loss = sum(task_losses.values())
             self.manual_backward(total_loss)
@@ -1359,12 +1363,18 @@ class Model(_Base_Class, LightningModule):
         prod_loss = torch.ones((), device=self.device)
         task_losses: dict[str, torch.Tensor] = {}
         model_outputs = self(batch)
+
+        # CombinedLoader yields dict-like batches; Lightning can't always infer batch size.
+        # Provide it explicitly for correct epoch-weighting and to avoid warnings.
+        default_batch_size: int = int(next(iter(model_outputs.values())).shape[0]) if model_outputs else 1
         for task in model_outputs:
             task_outputs: torch.Tensor = model_outputs[task]
             metrics = self.task_metrics[task]
             spec = self.task_specs_by_name[task]
             if spec.dataloader_idx is not None and dataloader_idx not in [None, spec.dataloader_idx]:
                 continue
+
+            task_batch_size: int = int(task_outputs.shape[0])
 
             task_batch = batch[task] if isinstance(batch, dict) else batch
 
@@ -1450,6 +1460,7 @@ class Model(_Base_Class, LightningModule):
                     on_epoch=True,
                     sync_dist=sync_dist_epoch,
                     add_dataloader_idx=False,
+                    batch_size=task_batch_size,
                 )
 
             # --- Score metrics (TorchMetrics) ---
@@ -1475,11 +1486,26 @@ class Model(_Base_Class, LightningModule):
                         on_epoch=True,
                         sync_dist=sync_dist_epoch,
                         add_dataloader_idx=False,
+                        batch_size=task_batch_size,
                     )
 
         # Reduce step-level logging volume: aggregate on epoch.
-        self.log(f"sum_loss/{stage}", sum_loss, on_step=False, on_epoch=True, sync_dist=sync_dist_epoch)
-        self.log(f"prod_loss/{stage}", prod_loss, on_step=False, on_epoch=True, sync_dist=sync_dist_epoch)
+        self.log(
+            f"sum_loss/{stage}",
+            sum_loss,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=sync_dist_epoch,
+            batch_size=default_batch_size,
+        )
+        self.log(
+            f"prod_loss/{stage}",
+            prod_loss,
+            on_step=False,
+            on_epoch=True,
+            sync_dist=sync_dist_epoch,
+            batch_size=default_batch_size,
+        )
         return (sum_loss, task_losses) if return_task_losses else sum_loss
 
     def forward(
@@ -1499,16 +1525,18 @@ class Model(_Base_Class, LightningModule):
                 #     feats = self.latent_bn(feats)
                 features_by_key[input_key] = feats
 
-            for task in self.task_specs:
-                feats = features_by_key[self.task_input_key[task]]
-                results[task] = self.task_models[task](feats)
+            for spec in self.task_specs:
+                task_name = spec.name
+                feats = features_by_key[self.task_input_key[task_name]]
+                results[task_name] = self.task_models[task_name](feats)
         else:
             x = batch[0]
             feats = self.feature_model(x)
             # if self.latent_bn is not None:
             #     feats = self.latent_bn(feats)
-            for task in self.task_specs:
-                results[task] = self.task_models[task](feats)
+            for spec in self.task_specs:
+                task_name = spec.name
+                results[task_name] = self.task_models[task_name](feats)
 
         return results
 
@@ -1525,11 +1553,23 @@ class Model(_Base_Class, LightningModule):
 
         # Optional torch.compile (PyTorch 2.x): compile after Lightning has placed the model.
         if (not self._torch_compile_done) and self.use_torch_compile and hasattr(torch, 'compile'):
-            # Prefer inductor for speed. On macOS this may require an OpenMP toolchain; if it
-            # fails (e.g., missing omp.h), we fall back to aot_eager.
-            backend_candidates: list[str] = ['inductor']
-            if sys.platform == 'darwin':
-                backend_candidates.append('aot_eager')
+            # Backend selection:
+            # - Allow explicit override via env var TORCH_COMPILE_BACKEND.
+            # - Default to eager for maximum robustness on this stack.
+            #   (We've observed TorchDynamo backend fake-tensor failures with aot_eager/inductor here.)
+            #   Users can opt into other backends via TORCH_COMPILE_BACKEND.
+            backend_env = os.getenv('TORCH_COMPILE_BACKEND', '').strip()
+            if backend_env:
+                # Support a single backend name or a comma-separated preference list.
+                backend_candidates: list[str] = [b.strip() for b in backend_env.split(',') if b.strip()]
+            else:
+                backend_candidates = [
+                    # Optional fallbacks (can be faster but are more fragile/noisy).
+                    'inductor',
+                    'aot_eager',
+                    # Most robust choice on this stack, including under TORCH_LOGS/TORCHDYNAMO_VERBOSE.
+                    'eager',
+                ]
 
             # Make compile best-effort: if the backend fails at runtime, fall back to eager.
             # NOTE: avoid `import torch._dynamo` here; in a function scope that would bind a local
@@ -1544,23 +1584,64 @@ class Model(_Base_Class, LightningModule):
 
             if self.is_global_zero:
                 self.zprint(
-                    "Compiling trunk and heads with torch.compile "
+                    "Compiling trunk with torch.compile "
                     f"(backend candidates={backend_candidates})"
                 )
+
+            # TorchDynamo FakeTensor device propagation can fail if module params/buffers are on CPU
+            # while inputs are on CUDA. Ensure the trunk is on the same device Lightning will use.
+            target_device = getattr(getattr(trainer, 'strategy', None), 'root_device', None) or self.device
+            try:
+                self.feature_model = self.feature_model.to(target_device)
+            except Exception:
+                pass
 
             compiled_any = False
             last_err: Exception | None = None
             for backend in backend_candidates:
                 try:
-                    self.feature_model = torch.compile(self.feature_model, backend=backend)  # type: ignore[attr-defined]
-                    for task in self.task_specs:
-                        self.task_models[task] = torch.compile(self.task_models[task], backend=backend)  # type: ignore[attr-defined]
+                    original_feature_model = self.feature_model
+                    # Compile only the shared trunk. In this codebase/environment we've seen
+                    # TorchDynamo fake-tensor backend failures when compiling some heads (BatchNorm1d).
+                    # Trunk compilation captures most of the benefit and avoids noisy graph-break warnings.
+                    # NOTE: keep fullgraph=False. With fullgraph=True TorchDynamo may raise
+                    # DataDependentOutputException (aten._local_scalar_dense) on this stack, especially
+                    # when TORCH_LOGS / TORCHDYNAMO_VERBOSE are enabled.
+                    self.feature_model = torch.compile(self.feature_model, backend=backend, fullgraph=False)  # type: ignore[attr-defined]
+
+                    # Re-assert device placement after wrapping.
+                    try:
+                        self.feature_model = self.feature_model.to(target_device)
+                    except Exception:
+                        pass
+
+                    # Force a warmup call now so backend failures happen here (and can be caught),
+                    # rather than crashing at the first real training step.
+                    try:
+                        dm = getattr(trainer, 'datamodule', None)
+                        warmup_bs: int | None = getattr(dm, 'batch_size', None) if dm is not None else None
+                        if isinstance(warmup_bs, int) and warmup_bs > 0:
+                            per_rank_bs = max(1, int(warmup_bs) // max(1, int(getattr(trainer, 'world_size', 1) or 1)))
+                        else:
+                            per_rank_bs = 2
+                        with torch.no_grad():
+                            x = torch.randn((per_rank_bs, *self.input_data_shape[1:]), device=target_device)
+                            _ = self.feature_model(x)
+                    except Exception as warmup_err:
+                        self.feature_model = original_feature_model
+                        raise warmup_err
+
                     if self.is_global_zero:
                         self.zprint(f"torch.compile enabled (backend={backend})")
                     compiled_any = True
                     break
                 except Exception as e:
                     last_err = e
+                    # Ensure we leave the model in eager mode after a failed attempt.
+                    try:
+                        self.feature_model = original_feature_model  # type: ignore[has-type]
+                    except Exception:
+                        pass
                     if self.is_global_zero:
                         self.zprint(f"torch.compile failed (backend={backend}); trying fallback: {e}")
 
@@ -1605,7 +1686,7 @@ class Model(_Base_Class, LightningModule):
 
         # Log loss weights once (rank 0) for reproducibility.
         if self.is_global_zero:
-            for task_name in self.task_specs:
+            for task_name in self.task_names:
                 pw = getattr(self, f"loss_pos_weight__{task_name}", None)
                 cw = getattr(self, f"loss_class_weight__{task_name}", None)
                 if isinstance(pw, torch.Tensor):
@@ -1671,7 +1752,7 @@ class Model(_Base_Class, LightningModule):
                 logger.log_metrics(
                     metrics={
                         f'task_log_sigma/{task}': self.task_log_sigma[task].data.item()
-                        for task in self.task_specs
+                        for task in self.task_names
                     },
                     step=self.global_step,
                 )
@@ -1710,7 +1791,7 @@ class Model(_Base_Class, LightningModule):
 
             if self.multiobjective_method == 'gradnorm' and self.is_multitask:
                 w_items: list[str] = []
-                for task in self.task_specs:
+                for task in self.task_names:
                     w = getattr(self, f"gradnorm_w__{task}", None)
                     if isinstance(w, torch.Tensor):
                         w_items.append(f"{task}={float(w.detach().cpu().flatten()[0]):.3f}")
@@ -3594,7 +3675,7 @@ def main(
         dropout: float = 0.05,
         feature_model_layers: Sequence[dict[str, LightningModule]] = None,
         task_specs: Optional[Sequence[TaskSpec]] = None,
-        multiobjective_method: str = 'logsigma',
+        multiobjective_method: Literal['logsigma', 'pcgrad', 'gradnorm'] = 'logsigma',
         unfreeze_logsigma_epoch: int = -1,
         logsigma_warmup_epochs: int = 0,
         grad_update_interval: int = 1,
@@ -3834,7 +3915,7 @@ def main(
         ) if world_size>1 else 'auto',
         num_nodes = num_nodes,
         use_distributed_sampler=False,
-        num_sanity_val_steps=2,
+        num_sanity_val_steps=0,
         reload_dataloaders_every_n_epochs=reload_dataloaders_every_n_epochs,
     )
 
@@ -3960,8 +4041,10 @@ if __name__=='__main__':
         fraction_validation=0.125,
         # fraction_test=0.125,
         num_workers=2,
-        max_confinement_event_length=int(20e3),
+        max_confinement_event_length=int(10e3),
         confinement_dataset_factor=0.2,
+        multiobjective_method='logsigma',
+        use_torch_compile=True,
         # use_wandb=True,
         monitor_metric='sum_loss/train',
         # seed=int(np.random.default_rng().integers(0, 2**32-1)),
