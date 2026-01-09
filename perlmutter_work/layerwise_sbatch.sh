@@ -46,6 +46,9 @@ echo UNIQUE_IDENTIFIER: ${UNIQUE_IDENTIFIER}
 
 export WANDB__SERVICE_WAIT=500
 
+# export RAND_SEED=${RANDOM}
+# echo Random seed: ${RAND_SEED}
+
 SCRIPT=$(cat << END
 import os
 import pickle

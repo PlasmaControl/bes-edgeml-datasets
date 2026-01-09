@@ -5,6 +5,9 @@ from model_trainer.main_multitask_v3 import main
 
 if __name__=='__main__':
 
+    # seed = int(os.getenv("RAND_SEED"))
+    # print(f'Linux RAND_SEED: {seed}')
+
     task_id = int(os.getenv('SLURM_ARRAY_TASK_ID'))
     backbone_model_path = f'multi_256_v30/L3_r46911715_{task_id}'
 
