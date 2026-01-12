@@ -1,7 +1,7 @@
 absl-py==2.3.1
 accelerate==1.10.1
 aiohappyeyeballs==2.6.1
-aiohttp==3.12.15
+aiohttp==3.13.3
 aiosignal==1.4.0
 annotated-types==0.7.0
 apex @ file:///pscratch/sd/s/swowner/pytorch-build/pytorch/2.8.0/apex
@@ -129,7 +129,7 @@ pytorch-lightning==2.5.5
 pytz==2025.2
 PyYAML==6.0.3
 pyzmq==27.1.0
-ray==2.49.2
+ray==2.52.0
 referencing==0.36.2
 regex==2025.9.18
 requests==2.32.5
@@ -167,7 +167,7 @@ triton==3.4.0
 typing-inspection==0.4.1
 typing_extensions==4.12.2
 tzdata==2025.2
-urllib3==2.5.0
+urllib3==2.6.3
 wadler_lindig==0.1.7
 wandb==0.22.1
 wcwidth==0.2.14
