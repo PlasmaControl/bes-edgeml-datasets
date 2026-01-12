@@ -1565,8 +1565,8 @@ class Model(_Base_Class, LightningModule):
             else:
                 backend_candidates = [
                     # Optional fallbacks (can be faster but are more fragile/noisy).
-                    'inductor',
-                    'aot_eager',
+                    # 'inductor',
+                    # 'aot_eager',
                     # Most robust choice on this stack, including under TORCH_LOGS/TORCHDYNAMO_VERBOSE.
                     'eager',
                 ]
@@ -1582,11 +1582,7 @@ class Model(_Base_Class, LightningModule):
             except Exception:
                 pass
 
-            if self.is_global_zero:
-                self.zprint(
-                    "Compiling trunk with torch.compile "
-                    f"(backend candidates={backend_candidates})"
-                )
+            self.zprint(f"Compiling trunk with torch.compile (backend candidates={backend_candidates})")
 
             # TorchDynamo FakeTensor device propagation can fail if module params/buffers are on CPU
             # while inputs are on CUDA. Ensure the trunk is on the same device Lightning will use.
@@ -1631,8 +1627,7 @@ class Model(_Base_Class, LightningModule):
                         self.feature_model = original_feature_model
                         raise warmup_err
 
-                    if self.is_global_zero:
-                        self.zprint(f"torch.compile enabled (backend={backend})")
+                    self.zprint(f"torch.compile enabled (backend={backend})")
                     compiled_any = True
                     break
                 except Exception as e:
@@ -1642,10 +1637,9 @@ class Model(_Base_Class, LightningModule):
                         self.feature_model = original_feature_model  # type: ignore[has-type]
                     except Exception:
                         pass
-                    if self.is_global_zero:
-                        self.zprint(f"torch.compile failed (backend={backend}); trying fallback: {e}")
+                    self.zprint(f"torch.compile failed (backend={backend}); trying fallback: {e}")
 
-            if not compiled_any and self.is_global_zero and last_err is not None:
+            if not compiled_any and last_err is not None:
                 self.zprint(f"torch.compile failed for all backends; continuing without compile: {last_err}")
             self._torch_compile_done = True
         if self.world_size > 0:
@@ -3767,7 +3761,7 @@ def main(
         seed = np.random.default_rng().integers(0, 2**32 - 1)
     seed = int(seed)
     zprint(f"Using seed: {seed}")
-    seed_everything(seed, workers=True)
+    seed_everything(seed, workers=True, verbose=True)
 
     ### model
     zprint("\u2B1C Creating model")
@@ -4034,22 +4028,17 @@ if __name__=='__main__':
         task_specs=task_specs,
         max_elms=60,
         max_epochs=2,
-        # bad_elm_indices=bad_elm_indices,
         lr=1e-2,
         lr_warmup_epochs=2,
         batch_size=128,
         fraction_validation=0.125,
-        # fraction_test=0.125,
         num_workers=2,
         max_confinement_event_length=int(10e3),
         confinement_dataset_factor=0.2,
         multiobjective_method='logsigma',
         use_torch_compile=True,
-        # use_wandb=True,
         monitor_metric='sum_loss/train',
         # seed=int(np.random.default_rng().integers(0, 2**32-1)),
-        # balance_confinement_data_with_elm_data=True,
-        # skip_train=True,
         skip_test=True,
         # backbone_model_path='experiment_default/r2025_12_23_11_33_20',
         # backbone_unfreeze_at_epoch=1,
