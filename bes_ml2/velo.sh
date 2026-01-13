@@ -1,7 +1,7 @@
 #!/usr/bin/env bash
 #SBATCH --account=m3586
 #SBATCH --constraint=gpu
-#SBATCH --mail-user=kevin.gill@wisc.edu
+#SBATCH --mail-user=david.smith@wisc.edu
 #SBATCH --mail-type=ALL
 
 #SBATCH --ntasks-per-node=4
@@ -39,7 +39,7 @@ else
 fi
 echo UNIQUE_IDENTIFIER: $UNIQUE_IDENTIFIER
 
-JOB_DIR=/pscratch/sd/k/kevinsg/bes_ml_jobs/
+JOB_DIR=${HOME}/scratch-ml
 mkdir --parents $JOB_DIR || exit
 cd $JOB_DIR || exit
 echo Job directory: $PWD
@@ -230,7 +230,7 @@ try:
     )
 
     trainer.run_all(
-        max_epochs=40,
+        max_epochs=3,
         early_stopping_min_delta=2e-3,
         early_stopping_patience=100,
         skip_test=False,
@@ -255,7 +255,7 @@ echo "${PYTHON_SCRIPT}"
 
 
 START_TIME=$(date +%s)
-srun python -c "${PYTHON_SCRIPT}"
+srun --unbuffered python -c "${PYTHON_SCRIPT}"
 EXIT_CODE=$?
 END_TIME=$(date +%s)
 echo Slurm elapsed time $(( (END_TIME - START_TIME)/60 )) min $(( (END_TIME - START_TIME)%60 )) s
