@@ -2,8 +2,8 @@ from __future__ import annotations
 import dataclasses
 import os
 import time
-from typing import Iterable
-import gc
+import math
+from typing import Iterable, cast
 
 import numpy as np
 import matplotlib.pyplot as plt
@@ -30,10 +30,21 @@ import psutil
 
 from torch.autograd import Function
 
+"""Lightning model for BES experiments.
+
+This module supports multiple encoder front-ends (raw CNN, FFT CNN, FPGA FFT, none, RCN,
+FFT->MLP) and multiple output heads (regression, classification, reconstruction, etc.).
+
+Shape convention used throughout:
+- Input signals are typically (B, 1, W, R, C) where W is the time-window length.
+- Some legacy paths also accept (B, 1, W, R) (treated as C=1).
+"""
+
 class CustomRFFT(Function):
     @staticmethod
     def forward(ctx, input):
-        # Perform the FFT operation and remove the DC component
+        # Perform FFT along the time axis and drop the DC bin (index 0).
+        # Dropping DC reduces trivial baseline dominance for magnitude features.
         output = torch.fft.rfft(input, dim=2)[:, :, 1:, :, :]
         return output
 
@@ -55,6 +66,7 @@ class BCEWithLogit(torchmetrics.Metric):
         self.add_state("counts", default=torch.tensor(0), dist_reduce_fx="sum")
 
     def update(self, input: torch.Tensor, target: torch.Tensor):
+        # Accumulate *sum* loss and counts so `.compute()` returns a mean.
         self.bce += torch.nn.functional.binary_cross_entropy_with_logits(
             input=input, 
             target=target.type_as(input),
@@ -79,6 +91,7 @@ class CrossEntropy(torchmetrics.Metric):
         self.class_weights = torch.tensor([0.0853, 0.2436, 0.0622, 0.6089])
 
     def update(self, input: torch.Tensor, target: torch.Tensor):
+        # Accumulate summed loss; reduction to mean is done in `.compute()`.
         class_weights = self.class_weights.to(input.device)
         self.ce += torch.nn.functional.cross_entropy(
             input=input, 
@@ -137,7 +150,10 @@ class Torch_Base(LightningModule):
                 print(f"  {name}: initialized to zeros (numel {param.data.numel()})")
                 param.data.fill_(0)
             elif name.endswith(".weight"):
-                n_in = np.prod(param.shape[1:])
+                # Simple fan-in uniform initialization.
+                # Keep this explicit (instead of `torch.nn.init.*`) so printed diagnostics
+                # match the model's actual parameter scaling.
+                n_in = int(np.prod(tuple(int(d) for d in param.shape[1:])))
                 sqrt_k = np.sqrt(3. / n_in)
                 print(f"  {name}: initialized to uniform +- {sqrt_k:.1e} (numel {param.data.numel()})")
                 param.data.uniform_(-sqrt_k, sqrt_k)
@@ -432,7 +448,10 @@ class Torch_CNN_Mixin(Torch_Base):
     def forward_with_fft(self, x):
         fft_subwindows = self.compute_fft_subwindows(x)
         # Pass FFT features through the FFT-specific CNN encoder
-        fft_features = self.encoder(fft_subwindows)
+        encoder = cast(torch.nn.Module, getattr(self, "encoder", None))
+        if encoder is None:
+            raise RuntimeError("encoder is None; initialize the model with an FFT-capable encoder_type")
+        fft_features = encoder(fft_subwindows)
         return fft_features
     
     def forward_with_fpga_fft(self, x):
@@ -475,7 +494,10 @@ class Torch_CNN_Mixin(Torch_Base):
         # fft_subwindows_reshaped = fft_subwindows.reshape(batch_size, self.fft_subwindows, (self.nfreqs - 1), spatial_dim1 * spatial_dim2)
 
         # Pass FFT features through the FFT-specific CNN encoder
-        fft_features = self.cnn_encoder(fft_subwindows_reshaped)
+        encoder = cast(torch.nn.Module, getattr(self, "encoder", None))
+        if encoder is None:
+            raise RuntimeError("encoder is None; initialize the model with an FPGA-FFT-capable encoder_type")
+        fft_features = encoder(fft_subwindows_reshaped)
 
         return fft_features
     
@@ -565,7 +587,7 @@ class Torch_CNN_Mixin(Torch_Base):
             batch_norm = torch.nn.BatchNorm3d(num_features=self.fft_num_kernels[i])
 
             # Update data_shape based on the Conv3D layer
-            data_shape = tuple(conv3d(torch.zeros(size=(1,) + data_shape)).size()[1:])
+            data_shape = tuple(int(d) for d in conv3d(torch.zeros(size=(1,) + data_shape)).size()[1:])
             
             # Add MaxPool3d layer
             maxpool = torch.nn.MaxPool3d(
@@ -578,7 +600,7 @@ class Torch_CNN_Mixin(Torch_Base):
             print(f"    Maxpool ({self.fft_maxpool_freq_size[i]}, {self.fft_maxpool_spatial_size[i][0]}, {self.fft_maxpool_spatial_size[i][1]})")
 
             # Update data_shape based on the maxpool layer
-            data_shape = tuple(maxpool(torch.zeros(size=(1,) + data_shape)).size()[1:])
+            data_shape = tuple(int(d) for d in maxpool(torch.zeros(size=(1,) + data_shape)).size()[1:])
 
             cnn.extend([
                 torch.nn.Dropout(p=self.fft_dropout),
@@ -588,7 +610,7 @@ class Torch_CNN_Mixin(Torch_Base):
                 maxpool,
             ])
 
-        num_features = np.prod(data_shape)
+        num_features = math.prod(int(d) for d in data_shape)
         return cnn, num_features, data_shape
     
     def make_fpga_fft_cnn_encoder(self) -> tuple[torch.nn.Module, int, tuple]:
@@ -637,8 +659,8 @@ class Torch_CNN_Mixin(Torch_Base):
 
             # Dynamically compute the new data shape after each convolution
             with torch.no_grad():
-                dummy_input = torch.zeros((1,) + data_shape)
-                data_shape = conv2d(dummy_input).shape[1:]
+                dummy_input = torch.zeros((1,) + tuple(int(d) for d in data_shape))
+                data_shape = tuple(int(d) for d in conv2d(dummy_input).shape[1:])
 
             # Add MaxPool2d layer
             maxpool = torch.nn.MaxPool2d(kernel_size=(2,2))
@@ -646,8 +668,8 @@ class Torch_CNN_Mixin(Torch_Base):
 
             # Dynamically compute the new data shape after pooling
             with torch.no_grad():
-                dummy_input = torch.zeros((1,) + data_shape)
-                data_shape = maxpool(dummy_input).shape[1:]
+                dummy_input = torch.zeros((1,) + tuple(int(d) for d in data_shape))
+                data_shape = tuple(int(d) for d in maxpool(dummy_input).shape[1:])
 
             cnn.extend([
                 conv2d,
@@ -658,7 +680,7 @@ class Torch_CNN_Mixin(Torch_Base):
             ])
 
         # Adjusted to correctly reflect the flattened output dimensions after the final layer
-        num_features = np.prod(data_shape[0:])  # Exclude the batch dimension
+        num_features = math.prod(int(d) for d in data_shape[0:])  # Exclude the batch dimension
 
         return cnn, num_features, data_shape
     
@@ -688,7 +710,7 @@ class Torch_CNN_Mixin(Torch_Base):
 
         data_shape = (self.cnn_input_channels, self.signal_window_size, self.n_rows, self.n_cols)
         self.input_data_shape = tuple(data_shape)
-        print(f"  Input data shape {data_shape}  (size {np.prod(data_shape)})")
+        print(f"  Input data shape {data_shape}  (size {math.prod(int(d) for d in data_shape)})")
 
         # CNN layers
         cnn = torch.nn.Sequential()
@@ -711,7 +733,7 @@ class Torch_CNN_Mixin(Torch_Base):
                 padding=self.cnn_padding[i],
                 padding_mode='reflect',
             )
-            data_shape = tuple(conv3d(torch.zeros(size=data_shape)).size())
+            data_shape = tuple(int(d) for d in conv3d(torch.zeros(size=data_shape)).size())
             # print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
             assert np.all(np.array(data_shape) >= 1), f"Bad data shape {data_shape} after CNN layer {i}"
              # Add MaxPool3d layer
@@ -724,8 +746,8 @@ class Torch_CNN_Mixin(Torch_Base):
             )
             print(f"    Maxpool ({self.cnn_maxpool_time_size[i]}, {self.cnn_maxpool_spatial_size[i][0]}, {self.cnn_maxpool_spatial_size[i][1]})")
             # Update data_shape after MaxPooling
-            data_shape = tuple(maxpool(torch.zeros(size=(1,) + data_shape)).size()[1:])
-            print(f"    Output data shape: {data_shape}  (size {np.prod(data_shape)})")
+            data_shape = tuple(int(d) for d in maxpool(torch.zeros(size=(1,) + data_shape)).size()[1:])
+            print(f"    Output data shape: {data_shape}  (size {math.prod(int(d) for d in data_shape)})")
             cnn.extend([
                 torch.nn.Dropout(p=self.cnn_dropout),
                 conv3d,
@@ -734,7 +756,7 @@ class Torch_CNN_Mixin(Torch_Base):
                 maxpool,
             ])
 
-        num_features = np.prod(data_shape)
+        num_features = math.prod(int(d) for d in data_shape)
         print(f"  CNN output features: {num_features}")
 
         return cnn, num_features, data_shape
@@ -771,7 +793,7 @@ class Torch_CNN_Mixin(Torch_Base):
         # Our data shape: (channels, time_dim, spatial_dim)
         data_shape = (self.cnn_input_channels, self.signal_window_size, 8)
         self.input_data_shape = data_shape
-        print(f"  Input data shape {data_shape} (size {np.prod(data_shape)})")
+        print(f"  Input data shape {data_shape} (size {math.prod(int(d) for d in data_shape)})")
 
         cnn = torch.nn.Sequential()
         input_channels = self.cnn_input_channels
@@ -799,8 +821,8 @@ class Torch_CNN_Mixin(Torch_Base):
             # Update data_shape after the conv layer.
             # Fake input to determine output shape
             with torch.no_grad():
-                test_out = conv2d(torch.zeros((1,) + data_shape))
-                data_shape = test_out.shape[1:]  # excluding batch dimension
+                test_out = conv2d(torch.zeros((1,) + tuple(int(d) for d in data_shape)))
+                data_shape = tuple(int(d) for d in test_out.shape[1:])  # excluding batch dimension
                 # data_shape is now (channels_out, time_out, spatial_out)
 
             # Now add the MaxPool2d layer
@@ -809,10 +831,10 @@ class Torch_CNN_Mixin(Torch_Base):
 
             maxpool2d = torch.nn.MaxPool2d(kernel_size=maxpool_kernel)
             with torch.no_grad():
-                test_out = maxpool2d(torch.zeros((1,) + data_shape))
-                data_shape = test_out.shape[1:]
+                test_out = maxpool2d(torch.zeros((1,) + tuple(int(d) for d in data_shape)))
+                data_shape = tuple(int(d) for d in test_out.shape[1:])
 
-            print(f"    Output data shape: {data_shape} (size {np.prod(data_shape)})")
+            print(f"    Output data shape: {data_shape} (size {math.prod(int(d) for d in data_shape)})")
 
             # Add layers to the sequence
             cnn.extend([
@@ -826,7 +848,7 @@ class Torch_CNN_Mixin(Torch_Base):
             # Update input_channels for next layer
             input_channels = self.cnn_num_kernels[i]
 
-        num_features = np.prod(data_shape)
+        num_features = math.prod(int(d) for d in data_shape)
         print(f"  CNN output features: {num_features}")
 
         return cnn, num_features, data_shape
@@ -891,12 +913,17 @@ class Lightning_Model(
     # capture outputs from penultimate layer to perform tSNE
     penultimate_outputs: list = dataclasses.field(default_factory=list)
     visualize_embeddings: bool = False
+    # NOTE: We must not create/assign torch.nn.Module objects (like ModuleList) until
+    # LightningModule/torch.nn.Module initialization has run. We initialize to None
+    # so base-class __post_init__ logging can safely access the attribute.
+    per_class_f1_scores: torch.nn.ModuleList = dataclasses.field(default=None, init=False)
     prediction_directory: str = None
     n_rows: int = 8
     n_cols: int = 8
 
     def __post_init__(self):
         super().__post_init__()
+        self.per_class_f1_scores = torch.nn.ModuleList()
         self.save_hyperparameters()
 
         print(f'Initiating {self.__class__.__name__}')
@@ -909,6 +936,8 @@ class Lightning_Model(
                 field_str += f" (default {default_value})"
             print(field_str)
 
+        # Encoder selection controls what `self.forward()` does with the input tensor.
+        # We keep the branching here so downstream heads only see a flat `features` tensor.
         if self.encoder_type == 'raw':
             # self.cnn_encoder, cnn_features, cnn_output_shape = self.make_cnn_encoder()
             self.encoder, features, output_shape = self.make_2d_cnn_encoder()
@@ -945,7 +974,8 @@ class Lightning_Model(
         else:
             raise ValueError("Invalid encoder_type")
 
-        # `frontends` for regression, classification, and self-supervised learning
+        # `frontends` are the output heads. Multiple can be enabled simultaneously.
+        # Each head gets the shared `features` output of the chosen encoder.
         self.frontends = torch.nn.ModuleDict()
         self.frontends_active = {}
         for frontend_key in self._frontend_names:
@@ -961,7 +991,7 @@ class Lightning_Model(
                             self.frontends.update({frontend_key: new_module})
                             setattr(self, f"{frontend_key}_ce_loss", CrossEntropy())
                             setattr(self, f"{frontend_key}_f1_score", torchmetrics.F1Score(task='multiclass',  num_classes=self.num_classes, average='macro'))
-                            # Initialize per-class F1 scores
+                            # Per-class F1 is tracked separately from macro-F1 for diagnostics.
                             self.per_class_f1_scores = torch.nn.ModuleList([
                                 torchmetrics.F1Score(num_classes=1, average='none', task='binary') for _ in range(self.num_classes)  # Assuming 4 classes
                             ])
@@ -1067,7 +1097,9 @@ class Lightning_Model(
     def forward(self, signals: torch.Tensor) -> dict[str, torch.Tensor]:
         results = {}
 
-        # Accept both (B,1,W,R,C) and (B,1,W,R)
+        # Accept both (B,1,W,R,C) and legacy (B,1,W,R).
+        # The `none` encoder path flattens the input and asserts the flattened size
+        # matches what the model was initialized to expect.
         if signals.dim() == 5:
             B, Ch, W, R, C = signals.shape
             flat = signals.reshape(B, Ch * W * R * C)   # -> (B, W*R*C) since Ch==1
@@ -1081,7 +1113,10 @@ class Lightning_Model(
             raise ValueError(f"Expected (B,1,W,R[,C]), got {tuple(signals.shape)}")
         
         if self.encoder_type == 'raw':
-            features = self.encoder(signals)
+            encoder = cast(torch.nn.Module, getattr(self, "encoder", None))
+            if encoder is None:
+                raise RuntimeError("encoder is None; initialize the model with encoder_type='raw'")
+            features = encoder(signals)
         elif self.encoder_type == 'fft':
             features = self.forward_with_fft(signals)
         elif self.encoder_type == 'fpga_fft':
@@ -1103,8 +1138,12 @@ class Lightning_Model(
 
             features = flat  # (B, expected)
         elif self.encoder_type == 'rcn':
+            # RCN is an end-to-end predictor: it returns velocity directly and bypasses heads.
             reshaped_signals = self.reshape_signals_rcn(signals)
-            velocity_pred = self.encoder(reshaped_signals)   # shape [B,1]
+            encoder = cast(torch.nn.Module, getattr(self, "encoder", None))
+            if encoder is None:
+                raise RuntimeError("encoder is None; initialize the model with encoder_type='rcn'")
+            velocity_pred = encoder(reshaped_signals)   # shape [B,1]
             results["velocimetry_rcn"] = velocity_pred
             return results
 
@@ -1130,7 +1169,12 @@ class Lightning_Model(
     def update_step(self, batch, batch_idx) -> torch.Tensor:
         signals, labels, _ = batch
         results = self(signals)
-        sum_loss = None
+        sum_loss = torch.tensor(0.0, device=signals.device)
+
+        # `update_step` is used by train/val/test. It:
+        # - computes head-specific metrics
+        # - accumulates the loss terms into `sum_loss`
+        # - relies on `compute_log_reset()` to log and reset metric state
 
         # Define metric suffixes for each task
         metric_suffices_dict = {
@@ -1188,7 +1232,7 @@ class Lightning_Model(
                         metric_value = metric(preds, target)
                         
                         if 'loss' in metric_name:
-                            sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+                            sum_loss = sum_loss + metric_value
                 elif 'separatrix' in frontend_key:
                     # Handle separatrix task
                     frontend_result = frontend_result.reshape(-1, 6, 2)
@@ -1200,7 +1244,7 @@ class Lightning_Model(
                     metric_value = metric(frontend_result_flat, target_flat)
 
                     if 'loss' in metric_name:
-                        sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+                        sum_loss = sum_loss + metric_value
                 else:
                     # Handle other tasks
                     metric_name = f"{frontend_key}_{metric_suffix}"
@@ -1215,7 +1259,7 @@ class Lightning_Model(
                         metric_value = metric(frontend_result, target)
 
                     if 'loss' in metric_name:
-                        sum_loss = metric_value if sum_loss is None else sum_loss + metric_value
+                        sum_loss = sum_loss + metric_value
 
         return sum_loss
 
@@ -1329,7 +1373,8 @@ class Lightning_Model(
                 # For per-class F1 calculation, compare binary representations
                 per_class_preds = (class_preds == i).int()  # Binary predictions for each class
                 per_class_labels = (class_labels == i).int()  # Binary labels for each class
-                f1_metric.update(per_class_preds, per_class_labels)
+                metric = cast(torchmetrics.Metric, f1_metric)
+                metric.update(per_class_preds, per_class_labels)
         
         self.update_step(batch, batch_idx)
         if self.visualize_embeddings:
@@ -1337,7 +1382,7 @@ class Lightning_Model(
 
     def on_test_epoch_end(self)-> None:
         if 'multiclass_classifier_mlp' in self.frontends_active:
-            per_class_f1 = [f1_metric.compute() for f1_metric in self.per_class_f1_scores]
+            per_class_f1 = [cast(torchmetrics.Metric, m).compute() for m in self.per_class_f1_scores]
             for i, f1_score in enumerate(per_class_f1):
                 self.log(f'per_class_f1_class_{i}', f1_score, on_step=False, on_epoch=True, sync_dist=True)
             if self.visualize_embeddings:
@@ -1411,7 +1456,8 @@ class Lightning_Model(
         self.cls_labels = []     # list of (B,)  np arrays (or (B,1) squeezed)
         self.cls_cids = []       # list of (B, *) identifiers (tuples/ints)
 
-        # which head did we actually use during this predict run?
+        # Which head did we actually use during this predict run?
+        # (Useful because the same datamodule can be used with different heads.)
         self._active_head = None  # 'velocimetry' or 'multiclass'
 
     def predict_step(self, batch, batch_idx):
@@ -1424,6 +1470,7 @@ class Lightning_Model(
             raise ValueError("predict_step expected a tuple/list batch.")
         
         # ---------- Velocimetry path (5-tuple) ----------
+        # Expected batch: (signals, labels, time_points, shot_ids, event_ids)
         if len(batch) == 5:
             signals, labels, time_points, shot_ids, event_ids = batch
             results = self(signals)
@@ -1440,6 +1487,7 @@ class Lightning_Model(
                 return
             
         # ---------- Multiclass path for Confinement_Predict_Dataset ----------
+        # Expected batch: (signals, labels, shot, start_time)
         if len(batch) == 4:
             signals, labels, shot, start_time = batch
             results = self(signals)
@@ -1507,6 +1555,8 @@ class Lightning_Model(
                 # merge on rank0
                 logits_list, labels_list, cids_list = [], [], []
                 for g in gathered:
+                    if g is None:
+                        continue
                     if g["labels"].size:
                         logits_list.append(g["logits"])
                         labels_list.append(g["labels"])
@@ -1613,9 +1663,14 @@ class Lightning_Model(
             preds_all, lbls_all, times_all = [], [], []
             shots_all, events_all = [], []
             for g in gathered:
+                if g is None:
+                    continue
                 if g["pred"].size:
                     preds_all.append(g["pred"]); lbls_all.append(g["lbl"]); times_all.append(g["t"])
-                shots_all.extend(g["shots_list"]); events_all.extend(g["events_list"])
+                if g.get("shots_list"):
+                    shots_all.extend(g["shots_list"])
+                if g.get("events_list"):
+                    events_all.extend(g["events_list"])
 
             if not preds_all:
                 print("[rank0] No velocimetry predictions collected; nothing to write.")
@@ -2363,17 +2418,19 @@ class Lightning_Model(
 
         # Convert lists to NumPy arrays for easier manipulation
         # Flattening all labels and all predictions into a single NumPy array
-        all_labels = np.concatenate([v for v in all_labels.values()])
+        all_labels_arr = np.concatenate([v for v in all_labels.values()])
         all_predictions_prob = np.concatenate([v for v in all_predictions.values()])
         all_argmax_predictions = np.argmax(all_predictions_prob, axis=1)
 
         # one-hot labels
-        all_labels = np.argmax(all_labels, axis=1)
+        all_labels_arr = np.argmax(all_labels_arr, axis=1)
         # all_labels_by_shot = np.argmax(all_labels_by_shot, axis=1)
 
         # Identify NaNs in Labels and update corresponding predictions to NaN
-        nan_indices = np.isnan(all_labels)
-        all_argmax_predictions = np.where(nan_indices, np.nan, all_argmax_predictions)
+        # np.isnan requires a float dtype
+        all_labels_f = all_labels_arr.astype(float)
+        nan_indices = np.isnan(all_labels_f)
+        all_argmax_predictions = np.where(nan_indices, np.nan, all_argmax_predictions.astype(float))
 
         # Check for NaNs in Labels and Probabilities
         if nan_indices.any():
@@ -2382,23 +2439,23 @@ class Lightning_Model(
             print("Warning: NaN values found in 'all_predictions_prob'")
         
         # Check Array Shapes
-        print("Shape of all_labels:", all_labels.shape)
+        print("Shape of all_labels:", all_labels_arr.shape)
         print("Shape of all_predictions_prob:", all_predictions_prob.shape)
 
         # Ensure that the two arrays have compatible shapes
-        if all_labels.shape[0] != all_predictions_prob.shape[0]:
+        if all_labels_arr.shape[0] != all_predictions_prob.shape[0]:
             print("Warning: Shape mismatch between 'all_labels' and 'all_predictions_prob'")
 
         # Ensure there's at least one positive and one negative sample for each class
         for i in range(all_predictions_prob.shape[1]):
-            if np.sum(all_labels == i) == 0 or np.sum(all_labels != i) == 0:
+            if np.sum(all_labels_arr == i) == 0 or np.sum(all_labels_arr != i) == 0:
                 print(f"Warning: Not enough samples for class {i} to compute ROC curve")        
                 
         # Calculate overall accuracy, precision, and recall, excluding NaNs
-        valid_indices = ~np.isnan(all_labels) & ~np.isnan(all_argmax_predictions)
-        accuracy = accuracy_score(all_labels[valid_indices], all_argmax_predictions[valid_indices])
-        precision = precision_score(all_labels[valid_indices], all_argmax_predictions[valid_indices], average='weighted', zero_division=0)
-        recall = recall_score(all_labels[valid_indices], all_argmax_predictions[valid_indices], average='weighted', zero_division=0)
+        valid_indices = ~np.isnan(all_labels_arr.astype(float)) & ~np.isnan(all_argmax_predictions.astype(float))
+        accuracy = accuracy_score(all_labels_arr[valid_indices], all_argmax_predictions[valid_indices])
+        precision = precision_score(all_labels_arr[valid_indices], all_argmax_predictions[valid_indices], average='weighted', zero_division=0)
+        recall = recall_score(all_labels_arr[valid_indices], all_argmax_predictions[valid_indices], average='weighted', zero_division=0)
 
         print(f"Overall accuracy: {accuracy:.3f}")
         print(f"Overall precision: {precision:.3f}")
@@ -2583,8 +2640,9 @@ class Lightning_Model(
         print(f"Total trainable parameters: {total_params:,}")
 
         # 2) Optionally, if `self.encoder` exists:
-        if getattr(self, "encoder", None) is not None:
-            enc_params = sum(p.numel() for p in self.encoder.parameters() if p.requires_grad)
+        encoder = getattr(self, "encoder", None)
+        if encoder is not None:
+            enc_params = sum(p.numel() for p in encoder.parameters() if p.requires_grad)
             print(f"  Encoder parameters: {enc_params:,}")
 
         # 3) If you have special sub-encoders:

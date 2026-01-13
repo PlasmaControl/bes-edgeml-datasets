@@ -1,27 +1,32 @@
 from __future__ import annotations
 import dataclasses
-from pathlib import Path
-import gc
 import os
+from typing import Any, Optional, Sequence
 
 import numpy as np
-import matplotlib.pyplot as plt
-import scipy.stats
 from scipy.signal import firwin, filtfilt
-from sklearn.preprocessing import OneHotEncoder
-from sklearn.impute import SimpleImputer
 from sklearn.model_selection import train_test_split 
-from scipy.stats import mode
 
 import h5py
 
 import torch
 import torch.utils.data
-import time
 
 from lightning.pytorch import LightningDataModule
 
-from bes_data.sample_data import sample_elm_data_file
+"""LightningDataModule + Datasets for BES velocimetry.
+
+Key concepts:
+- Signals are stored as time series on an (R,C) grid (canonical 8×8 after padding).
+- Training samples are sliding windows of length W over time.
+- Labels are scalar vθ(ψ_target) (here stored under `vZ`) aligned to the window end time.
+
+Most of the complexity here comes from making windowing/label alignment robust across
+different stored time bases (µs vs ms), variable shot/event lengths, and (optional)
+distributed training where each rank reads only a subset of events.
+"""
+
+# from bes_data.sample_data import sample_elm_data_file
 
 
 class TrainValTest_Dataset(torch.utils.data.Dataset):
@@ -57,6 +62,8 @@ class TrainValTest_Dataset(torch.utils.data.Dataset):
         return self.sample_indices.numel()
 
     def __getitem__(self, idx: int):
+        # `sample_indices` stores the *window end index* t0.
+        # The returned window is inclusive of t0 and has length W.
         i_t0 = int(self.sample_indices[idx].item())
         s = i_t0 - self.W + 1
         e = i_t0 + 1
@@ -78,17 +85,25 @@ class PredictDataset(torch.utils.data.Dataset):
       shot_id : Python str/int (kept as-is)
       event_id: Python str/int (kept as-is)
     """
-    def __init__(self, windows, labels, times_ms, shots, events):
-        self.windows  = windows
-        self.labels   = labels
+    def __init__(
+        self,
+        windows: np.ndarray,
+        labels: np.ndarray,
+        times_ms: np.ndarray,
+        shots: np.ndarray,
+        events: np.ndarray,
+    ):
+        self.windows = windows
+        self.labels = labels
         self.times_ms = times_ms
-        self.shots    = shots
-        self.events   = events
+        self.shots = shots
+        self.events = events
 
-    def __len__(self):
+    def __len__(self) -> int:
         return self.windows.shape[0]
 
-    def __getitem__(self, idx):
+    def __getitem__(self, idx: int):
+        # Keep `shot`/`event` as Python objects (strings/ints) for later grouping.
         x  = torch.from_numpy(self.windows[idx])   # (1,W,R_sel,C_sel)
         y  = torch.tensor(self.labels[idx], dtype=torch.float32)
         tm = torch.tensor(self.times_ms[idx], dtype=torch.float32)
@@ -143,7 +158,7 @@ class Velocimetry_Datamodule(LightningDataModule):
     shot_time_windows: dict = None
     train_time_windows: dict = None   # dict like shot_time_windows (optional)
     # ---- NEW: block selection & labels-at-fixed-psi ----
-    block_cols: typing.Any = ('last', 4)   # ('last', k) | list[int] | slice
+    block_cols: Any = ('last', 4)   # ('last', k) | list[int] | slice
     row_stride: int = 1                     # 1 = keep every row
     row_offset: int = 0                     # starting row offset (0..row_stride-1)
     target_sampling_hz: float = 250_000.0   # downsample target (Hz)
@@ -155,7 +170,9 @@ class Velocimetry_Datamodule(LightningDataModule):
     def __post_init__(self):
         super().__init__()
         if self.data_file is None:
-            self.data_file = sample_elm_data_file.as_posix()
+            raise ValueError(
+                "Velocimetry_Datamodule.data_file is None. Provide a valid HDF5 path via the data_file argument."
+            )
         self.save_hyperparameters(
             ignore=['max_predict_elms', 'n_rows', 'n_cols']
         )
@@ -197,7 +214,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                 field_str += f" (default {default_value})"
             print(field_str)
 
-    def state_dict(self) -> dict:
+    def state_dict(self) -> dict[str, Any]:
         state = {}
         for item in self.state_items:
             state[item] = getattr(self, item)
@@ -208,19 +225,25 @@ class Velocimetry_Datamodule(LightningDataModule):
         for item in self.state_items:
             setattr(self, item, state[item])
     
-    def prepare_data(self):
+    def prepare_data(self) -> None:
         pass
 
-    def setup(self, stage=None):
+    def setup(self, stage: Optional[str] = None) -> None:
         print(f"Running Velocimetry_Datamodule.setup(stage={stage})")
-        # Determine the rank of this GPU
-        try:
-            local_rank = self.trainer.local_rank
-            node_rank = self.trainer.node_rank
-        except:
+        # Determine this process' rank.
+        # - When attached to a Lightning `Trainer`, prefer trainer-reported ranks.
+        # - Otherwise fall back to SLURM env vars so `setup()` can be called standalone.
+        trainer = getattr(self, "trainer", None)
+        if trainer is not None:
+            local_rank = int(getattr(trainer, "local_rank", 0))
+            node_rank = int(getattr(trainer, "node_rank", 0))
+        else:
             local_rank = int(os.getenv('SLURM_LOCALID', 0))
             node_rank = int(os.getenv('SLURM_NODEID', 0))
 
+        # NOTE: this assumes 4 GPUs per node.
+        # If you run on nodes with a different GPU count, adjust this formula or
+        # pass `world_size`/chunking differently.
         global_rank = node_rank * 4 + local_rank
 
         # Determine the dataset stage (train, validation, or test) based on the current stage
@@ -254,6 +277,8 @@ class Velocimetry_Datamodule(LightningDataModule):
                         print(f"[rank {global_rank}] local train batches: {local_batches}")
 
                         # Compute global min across ranks (NCCL -> must be CUDA tensor)
+                        # We truncate each rank to the same number of full batches so DDP
+                        # does not hang when one rank exhausts its DataLoader early.
                         if torch.distributed.is_available() and torch.distributed.is_initialized():
                             t = torch.tensor(local_batches, device="cuda", dtype=torch.long)
                             torch.distributed.all_reduce(t, op=torch.distributed.ReduceOp.MIN)
@@ -304,6 +329,10 @@ class Velocimetry_Datamodule(LightningDataModule):
 
     def _cols_from_spec(self, spec, n=8):
         import numpy as np
+        # `block_cols` can be:
+        # - ('last', k): last k columns
+        # - slice: python slice over columns
+        # - list/ndarray: explicit indices
         if isinstance(spec, tuple) and spec[0] == 'last':
             k = int(spec[1]); return np.arange(n-k, n)
         if isinstance(spec, slice):
@@ -320,6 +349,8 @@ class Velocimetry_Datamodule(LightningDataModule):
         return time_count
 
     def create_balanced_chunks(self, indices, times, num_chunks):
+        # Greedy load-balancing: assign the longest remaining event to the currently
+        # lightest chunk. This works well enough in practice for uneven event lengths.
         # Create a mapping from indices to times
         index_to_time = {index: time for index, time in zip(indices, times)}
 
@@ -360,6 +391,8 @@ class Velocimetry_Datamodule(LightningDataModule):
         print(f"[{dataset_stage}] load+preprocess (ψ={self.label_target_psi}, target_fs={self.target_sampling_hz} Hz)")
 
         # -------- helpers (scoped) --------
+        # These are nested to keep the public module surface smaller; they are purely
+        # local helpers used by the data-building pipeline.
         def _format_psi_key(psi: float) -> str:
             s = f"{psi:.3f}".rstrip('0').rstrip('.')
             return "psi_" + s.replace('.', 'p')
@@ -377,7 +410,9 @@ class Velocimetry_Datamodule(LightningDataModule):
             ratio = orig_fs / target_fs
             q = int(round(ratio))
             if abs(ratio - q) < 1e-6 and q >= 2:
+                # Integer factor: use FIR decimation (good anti-aliasing, stable).
                 return decimate(arr, q, ftype='fir', axis=axis, zero_phase=True)
+            # Rational factor: use polyphase resampling.
             frac = Fraction(target_fs / orig_fs).limit_denominator(64)
             return resample_poly(arr, up=frac.numerator, down=frac.denominator, axis=axis)
 
@@ -388,6 +423,8 @@ class Velocimetry_Datamodule(LightningDataModule):
             return x.astype(np.float32), t
 
         def _align_label_scalar_at_times(t_ms, label_t_ms, label_vals, tol_ms=0.6):
+            # Nearest-neighbor alignment of labels to each downsampled signal time.
+            # If the closest label time is farther than tol_ms, mark as NaN (invalid).
             if t_ms.size == 0 or label_t_ms.size == 0:
                 return np.full_like(t_ms, np.nan, dtype=np.float32)
             idx = np.searchsorted(label_t_ms, t_ms)
@@ -404,6 +441,7 @@ class Velocimetry_Datamodule(LightningDataModule):
             return out
 
         def _window_indices(valid_mask: np.ndarray, W: int, hop: int = 1) -> np.ndarray:
+            # Return t0 indices such that the entire window [t0-W+1, t0] is valid.
             T = valid_mask.size
             cs = np.cumsum(valid_mask.astype(np.int32))
             def wsum(t0):
@@ -482,7 +520,9 @@ class Velocimetry_Datamodule(LightningDataModule):
         tgt_fs  = float(self.target_sampling_hz)
         psi_key = _format_psi_key(self.label_target_psi)
 
-        # Build indices ON THE CANONICAL 8×8 GRID
+        # Build indices ON THE CANONICAL 8×8 GRID.
+        # Even if an input shot stores fewer channels, we pad to 8×8 so the selection
+        # logic (row_idx/col_idx) stays consistent.
         row_idx = np.arange(8)[self.row_offset::self.row_stride]          # e.g., every row or every other row, etc.
         col_idx = self._cols_from_spec(self.block_cols, n=8)               # e.g., ('last',4)->[4,5,6,7]
         R_sel, C_sel = row_idx.size, col_idx.size
@@ -515,7 +555,8 @@ class Velocimetry_Datamodule(LightningDataModule):
                 sig_trc = self.reshape_signals(sig_64t, order_attr)  # -> (T, R, C)
                 t_ms    = _guess_times_ms(times)
 
-                # PAD to 8×8 so row_idx/col_idx are always valid
+                # PAD to 8×8 so row_idx/col_idx are always valid.
+                # This is intentionally done before sub-grid selection.
                 sig_trc = self._pad_to_full_grid(sig_trc, target_R=8, target_C=8)  # (T, 8, 8)
 
                 # sub-grid select
@@ -532,7 +573,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                 sig_trc = sig_trc[mask_time];  t_ms = t_ms[mask_time]
                 if sig_trc.shape[0] < W:  continue
 
-                # downsample to target rate
+                # Downsample to target rate *after* time cropping to avoid edge effects.
                 sig_ds, t_ds = _downsample_stack(sig_trc, t_ms, orig_fs, tgt_fs)
 
                 # shot windows mask
@@ -542,7 +583,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                 if dataset_stage == "train":
                     shot_mask &= _mask_from_windows_dict(str(shot), t_ds, getattr(self, "train_time_windows", None))
 
-                # labels @ fixed ψ
+                # Labels @ fixed ψ are stored under shot-level metadata (interpolated_psi).
                 if "interpolated_psi" not in shot_grp or psi_key not in shot_grp["interpolated_psi"]:
                     print(f"  shot {shot}: no labels for {psi_key}");  continue
                 psi_grp = shot_grp["interpolated_psi"][psi_key]
@@ -550,7 +591,7 @@ class Velocimetry_Datamodule(LightningDataModule):
                 lv  = np.array(psi_grp["vZ"],          dtype=np.float32)
                 lbl = _align_label_scalar_at_times(t_ds, lt, lv, tol_ms=self.label_tolerance_ms)
 
-                # final valid mask
+                # Final validity: within time windows AND within label tolerance.
                 valid = shot_mask & ~np.isnan(lbl)
                 # if valid.sum() < W:  continue
                 sample_idx_ev = _window_indices(valid, W, hop=hop)
@@ -830,6 +871,7 @@ class Velocimetry_Datamodule(LightningDataModule):
             events=events,
         )
 
+    @staticmethod
     def _format_psi_key(psi: float) -> str:
         s = f"{psi:.3f}".rstrip('0').rstrip('.')
         return "psi_" + s.replace('.', 'p')
@@ -1225,7 +1267,21 @@ class Velocimetry_Datamodule(LightningDataModule):
             'exkurt': exkurt,
         }
     
-    def custom_collate_fn(self, batch):
+    def custom_collate_fn(
+        self,
+        batch: Sequence[tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]],
+    ) -> tuple[torch.Tensor, dict[str, torch.Tensor], torch.Tensor]:
+        """Legacy collate function for older dataset formats.
+
+        NOTE:
+        - The current `TrainValTest_Dataset` returns `(signals, label_scalar, time_ms)`.
+        - The current `PredictDataset` returns `(signals, label_scalar, time_ms, shot_id, event_id)`.
+        - The DataLoaders in this datamodule do *not* pass `collate_fn=...` and therefore
+          use PyTorch's default collation.
+
+        This function is kept only as a reference for experiments where the dataset
+        returned a dict of labels (multi-task / multi-head training).
+        """
         # Extract all components: signals, labels, and possibly others
         signals = torch.stack([item[0] for item in batch])
         labels = {key: torch.stack([item[1][key] for item in batch]) for key in batch[0][1].keys()}
@@ -1238,6 +1294,10 @@ class Velocimetry_Datamodule(LightningDataModule):
         return int(round(r))
 
     def train_dataloader(self):
+        # Batch format (default collation):
+        #   signals: (B, 1, W, R_sel, C_sel) float32
+        #   labels : (B,) float32   (scalar vθ(ψ_target) at window end time)
+        #   times  : (B,) float32   (window end time in ms)
         if self.split_train_data_per_gpu:
             return self._train_dataloader
         else:
@@ -1256,6 +1316,7 @@ class Velocimetry_Datamodule(LightningDataModule):
             ) 
     
     def val_dataloader(self):
+        # Same batch format as `train_dataloader()`.
         valid_sampler = torch.utils.data.DistributedSampler(
             self.datasets['validation'],
             shuffle=False,
@@ -1271,6 +1332,7 @@ class Velocimetry_Datamodule(LightningDataModule):
         ) 
                 
     def test_dataloader(self):
+        # Same batch format as `train_dataloader()`.
         test_sampler = torch.utils.data.DistributedSampler(
             self.datasets['test'],
             shuffle=False,
@@ -1286,6 +1348,13 @@ class Velocimetry_Datamodule(LightningDataModule):
         ) 
     
     def predict_dataloader(self):
+        # Predict batch format (default collation):
+        #   signals : (B, 1, W, R_sel, C_sel) float32
+        #   labels  : (B,) float32 (NaN if unavailable)
+        #   times   : (B,) float32 (window end time in ms)
+        #   shot_id : length-B collection (strings/ints)
+        #   event_id: length-B collection (strings/ints)
+        # This matches `Lightning_Model.predict_step()`'s 5-tuple velocimetry path.
         if torch.distributed.is_initialized():
             # Use a DistributedSampler if distributed training is active
             predict_sampler = torch.utils.data.DistributedSampler(

@@ -1,56 +1,102 @@
 from __future__ import annotations
+
+from typing import Any, Optional, Union
 import os
 from pathlib import Path
 import dataclasses
 from datetime import datetime, timedelta
 import shutil
 import numpy as np
+import importlib
 
 import torch
 from lightning.pytorch.loggers import TensorBoardLogger, WandbLogger
 from lightning.pytorch.callbacks import LearningRateMonitor, EarlyStopping, ModelCheckpoint
 from lightning.pytorch import Trainer
-from lightning.pytorch.strategies import DDPStrategy, SingleDeviceStrategy
-from lightning.pytorch.utilities.model_summary import ModelSummary
-from lightning.pytorch.profilers import PyTorchProfiler
-import wandb
+from lightning.pytorch.strategies import DDPStrategy
 
-import psutil
+"""Training entrypoint for BES velocimetry experiments.
+
+This file wires together the Lightning model + datamodule, configures loggers/callbacks,
+and writes artifacts into an experiment directory. It is intended to work both when
+executed as part of the `bes_ml2` package and when run as a standalone script.
+"""
+
+# Lightning changed where ModelSummary is exported across versions; import dynamically
+# for compatibility instead of pinning a single import path.
+try:
+    ModelSummary: Any = getattr(
+        importlib.import_module("lightning.pytorch.utilities.model_summary.model_summary"),
+        "ModelSummary",
+    )
+except Exception:
+    ModelSummary = getattr(
+        importlib.import_module("lightning.pytorch.utilities.model_summary"),
+        "ModelSummary",
+    )
+
+# W&B is an optional dependency; keep import-time failures from breaking non-W&B runs.
+try:
+    import wandb  # type: ignore
+except Exception:  # pragma: no cover
+    wandb = None
 
 try:
-    from . import velocimetry_datamodule
-    from . import elm_lightning_model
-except:
     from bes_ml2 import velocimetry_datamodule
-    from bes_ml2 import elm_lightning_model
+    from bes_ml2.elm_lightning_model import Lightning_Model
+except ImportError:
+    from . import velocimetry_datamodule
+    from .elm_lightning_model import Lightning_Model
 
 
 @dataclasses.dataclass(eq=False)
 class BES_Trainer:
-    lightning_model: elm_lightning_model.Lightning_Model
+    """Small convenience wrapper around Lightning's `Trainer`.
+
+    The goal is to centralize:
+    - experiment directory naming
+    - logger/callback setup
+    - checkpoint bookkeeping (best/last)
+    """
+    lightning_model: Lightning_Model
     datamodule: velocimetry_datamodule.Velocimetry_Datamodule
-    experiment_dir: str = './experiment_default'
-    trial_name: str = None  # if None, use default Tensorboard scheme
+    experiment_dir: Union[str, Path] = './experiment_default'
+    trial_name: Optional[str] = None  # if None, use default Tensorboard scheme
     log_freq: int = 100
     wandb_log: bool = False
-    num_train_batches: int = None
-    num_val_batches: int = None
-    num_predict_batches: int = None
-    val_check_interval: int = 1.0
+    num_train_batches: Optional[int] = None
+    num_val_batches: Optional[int] = None
+    num_predict_batches: Optional[int] = None
+    val_check_interval: float = 1.0
 
-    def __post_init__(self):
+    # Derived/filled in during `__post_init__` / `run_all`.
+    experiment_name: str = dataclasses.field(init=False)
+    experiment_parent_dir: Path = dataclasses.field(init=False)
+    trial_dir: Path = dataclasses.field(init=False)
+    loggers: list[Any] = dataclasses.field(init=False)
+    last_model_path: Path = dataclasses.field(init=False)
+    best_model_path: Path = dataclasses.field(init=False)
 
+    def __post_init__(self) -> None:
+        # Print config early so SLURM logs capture the exact run settings.
         print(f'Initiating {self.__class__.__name__}')
         class_fields_dict = {field.name: field for field in dataclasses.fields(self.__class__)}
-        for field_name in dataclasses.asdict(self):
+        # Only print user-configurable (init=True) fields here.
+        # Derived init=False fields are populated later in this method / in run_all.
+        for field in dataclasses.fields(self):
+            if not field.init:
+                continue
+            field_name = field.name
             value = getattr(self, field_name)
             field_str = f"  {field_name}: {value}"
             default_value = class_fields_dict[field_name].default
-            if value != default_value:
+            if default_value is not dataclasses.MISSING and value != default_value:
                 field_str += f" (default {default_value})"
             print(field_str)
 
         if not self.trial_name:
+            # Default: timestamp-based run directory.
+            # If available, incorporate a SLURM/launcher-provided identifier to avoid collisions.
             datetime_str = datetime.now().strftime("%Y_%m_%d_%H_%M_%S")
             slurm_identifier = os.getenv('UNIQUE_IDENTIFIER', None)
             if slurm_identifier:
@@ -63,10 +109,11 @@ class BES_Trainer:
         self.experiment_name = self.experiment_dir.name
         self.experiment_parent_dir = self.experiment_dir.parent
 
-        # **Set the model's log_dir to the experiment_dir**
+        # Set the model's log_dir to the experiment_dir so any model-side artifact writing
+        # (plots, tables, etc.) ends up alongside the Lightning logs.
         self.lightning_model.log_dir = str(self.experiment_dir)
 
-        # set loggers
+        # TensorBoard logger defines the canonical trial directory.
         tb_logger = TensorBoardLogger(
             save_dir=self.experiment_parent_dir,
             name=self.experiment_name,
@@ -78,6 +125,12 @@ class BES_Trainer:
         self.loggers = [tb_logger]
 
         if self.wandb_log:
+            # W&B is optional; avoid importing/initializing it for users who do not want it.
+            if wandb is None:
+                raise RuntimeError(
+                    "wandb_log=True, but `wandb` is not importable. "
+                    "Install wandb (and the Lightning Wandb logger extras) or set wandb_log=False."
+                )
             wandb.login()
             wandb_logger = WandbLogger(
                 save_dir=self.experiment_dir,
@@ -91,6 +144,8 @@ class BES_Trainer:
             )
             self.loggers.append(wandb_logger)
 
+        # Print a model summary once at startup (we disable Lightning's built-in summary
+        # because it can be noisy / version-dependent in DDP settings).
         print("Model Summary:")
         print(ModelSummary(self.lightning_model, max_depth=-1))
         self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
@@ -102,25 +157,28 @@ class BES_Trainer:
         skip_predict: bool = False,
         early_stopping_min_delta: float = 1e-3,
         early_stopping_patience: int = 50,
-        gradient_clip_value: int = None,
-        float_precision: str|int = '16-mixed' if torch.cuda.is_available() else 32,
-    ):
+        gradient_clip_value: Optional[float] = None,
+        float_precision: Union[str, int] = '16-mixed' if torch.cuda.is_available() else 32,
+    ) -> None:
         self.lightning_model.log_dir = self.datamodule.log_dir = self.trial_dir
         monitor_metric = self.lightning_model.monitor_metric
         metric_mode = 'min' if 'loss' in monitor_metric else 'max'
-        # torch.set_float32_matmul_precision('medium')
-        torch.set_float32_matmul_precision('high')  # stricter, no TF32
+        # Numerical consistency knobs:
+        # - `set_float32_matmul_precision('high')` requests stricter matmul kernels.
+        # - TF32 is disabled explicitly for determinism/reproducibility.
+        torch.set_float32_matmul_precision('high')
         torch.backends.cuda.matmul.allow_tf32 = False
         torch.backends.cudnn.allow_tf32 = False
 
         # set callbacks
+        checkpoint_cb = ModelCheckpoint(
+            monitor=monitor_metric,
+            mode=metric_mode,
+            save_last=True,
+        )
         callbacks = [
             LearningRateMonitor(),
-            ModelCheckpoint(
-                monitor=monitor_metric,
-                mode=metric_mode,
-                save_last=True,
-            ),
+            checkpoint_cb,
             EarlyStopping(
                 monitor=monitor_metric,
                 mode=metric_mode,
@@ -131,6 +189,8 @@ class BES_Trainer:
             ),
         ]
 
+        # DDP's `find_unused_parameters` must be enabled if some model branches are
+        # disabled (e.g., only a subset of heads are active).
         frontends_active = [value for value in self.lightning_model.frontends_active.values()]
         some_unused = False in frontends_active
 
@@ -162,26 +222,31 @@ class BES_Trainer:
         )
         
         if skip_test is False:
+            # Free memory from train/validation datasets before testing.
+            # This matters when datasets are large and the job is memory-bound.
             if self.datamodule.split_train_data_per_gpu:
-                del self.datamodule._train_dataloader  
-            else: 
-                del self.datamodule.datasets['train']
+                if hasattr(self.datamodule, "_train_dataloader"):
+                    del self.datamodule._train_dataloader
+            else:
+                self.datamodule.datasets.pop('train', None)
 
-            del self.datamodule.datasets['validation']
+            self.datamodule.datasets.pop('validation', None)
             trainer.test(datamodule=self.datamodule, ckpt_path='best')
 
         if skip_predict is False:
-            # free up space
+            # Free up space again before prediction.
             if self.datamodule.split_train_data_per_gpu:
-                del self.datamodule._train_dataloader  
-            elif skip_test is False: 
-                del self.datamodule.datasets['test']
+                if hasattr(self.datamodule, "_train_dataloader"):
+                    del self.datamodule._train_dataloader
+            elif skip_test is False:
+                self.datamodule.datasets.pop('test', None)
                 
             trainer.predict(datamodule=self.datamodule, ckpt_path='best')
 
-        self.last_model_path = Path(trainer.checkpoint_callback.last_model_path).absolute()
+        # Record both "last" (end-of-fit) and "best" (monitored metric) checkpoints.
+        self.last_model_path = Path(checkpoint_cb.last_model_path).absolute()
         print(f"Last model path: {self.last_model_path}")
-        best_model_path = Path(trainer.checkpoint_callback.best_model_path).absolute()
+        best_model_path = Path(checkpoint_cb.best_model_path).absolute()
         self.best_model_path = best_model_path.parent/'best.ckpt'
         shutil.copyfile(
             src=best_model_path,
@@ -195,7 +260,7 @@ if __name__=='__main__':
 
     if checkpoint:
         # load data and model from checkpoint
-        lightning_model = elm_lightning_model.Lightning_Model.load_from_checkpoint(checkpoint_path=checkpoint)
+        lightning_model = Lightning_Model.load_from_checkpoint(checkpoint_path=checkpoint)
         datamodule = velocimetry_datamodule.Velocimetry_Datamodule.load_from_checkpoint(checkpoint_path=checkpoint)
     else:
         block_cols = [1, 3, 5, 7]
@@ -204,7 +269,7 @@ if __name__=='__main__':
         R_sel = len(np.arange(8)[row_offset::row_stride])
         C_sel = len(block_cols) 
         # initiate new data and model
-        lightning_model = elm_lightning_model.Lightning_Model(
+        lightning_model = Lightning_Model(
             encoder_lr=1e-3,
             decoder_lr=1e-3,
             signal_window_size=48,
@@ -229,7 +294,8 @@ if __name__=='__main__':
         )
 
         datamodule = velocimetry_datamodule.Velocimetry_Datamodule(
-            data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20250824_psi_interp.hdf5',
+            # data_file='/pscratch/sd/k/kevinsg/bes_ml_jobs/confinement_data/20250824_psi_interp.hdf5',
+            data_file='/global/homes/d/drsmith/scratch-ml/data/20251027_raw_signals_psi_interp.hdf5',
             signal_window_size=lightning_model.signal_window_size,
             batch_size=256,
             num_workers=1,
@@ -270,6 +336,6 @@ if __name__=='__main__':
 
     trainer.run_all(
         max_epochs=1,
-        # skip_test=True,
-        # skip_predict=True,
+        skip_test=True,
+        skip_predict=True,
     )
