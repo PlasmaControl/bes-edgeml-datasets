@@ -55,6 +55,46 @@ class TaskSpec:
     head_dropout: float = 0.1
 
 
+def _parse_task_specs(tasks_json: Optional[str]) -> List[TaskSpec]:
+    if not tasks_json:
+        return [
+            TaskSpec(name="binary", task_type="binary", output_dim=1, head_hidden_dims=(128, 64), head_dropout=0.1),
+            TaskSpec(name="multiclass", task_type="multiclass", output_dim=4, head_hidden_dims=(128, 64), head_dropout=0.1),
+            TaskSpec(name="regression", task_type="regression", output_dim=1, head_hidden_dims=(128, 64), head_dropout=0.1),
+        ]
+
+    # Accept either a JSON string or a path to a JSON file.
+    raw: Any
+    if tasks_json.strip().endswith(".json"):
+        with open(tasks_json, "r", encoding="utf-8") as f:
+            raw = json.load(f)
+    else:
+        raw = json.loads(tasks_json)
+
+    if not isinstance(raw, list):
+        raise ValueError("tasks_json must decode to a list of task spec dicts")
+
+    specs: List[TaskSpec] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            raise ValueError("Each task spec must be a dict")
+        specs.append(
+            TaskSpec(
+                name=str(item["name"]),
+                task_type=str(item["task_type"]),
+                output_dim=int(item["output_dim"]),
+                head_hidden_dims=tuple(int(x) for x in item.get("head_hidden_dims", (128, 64))),
+                head_dropout=float(item.get("head_dropout", 0.1)),
+            )
+        )
+
+    names = [s.name for s in specs]
+    if len(set(names)) != len(names):
+        raise ValueError(f"Duplicate task names: {names}")
+
+    return specs
+
+
 class Dropout1dFeatures(nn.Module):
     """Applies Dropout1d to a [B, F] feature tensor by reshaping to [B, F, 1]."""
 
@@ -641,46 +681,6 @@ class Model(pl.LightningModule):
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
-
-
-def _parse_task_specs(tasks_json: Optional[str]) -> List[TaskSpec]:
-    if not tasks_json:
-        return [
-            TaskSpec(name="binary", task_type="binary", output_dim=1, head_hidden_dims=(128, 64), head_dropout=0.1),
-            TaskSpec(name="multiclass", task_type="multiclass", output_dim=4, head_hidden_dims=(128, 64), head_dropout=0.1),
-            TaskSpec(name="regression", task_type="regression", output_dim=1, head_hidden_dims=(128, 64), head_dropout=0.1),
-        ]
-
-    # Accept either a JSON string or a path to a JSON file.
-    raw: Any
-    if tasks_json.strip().endswith(".json"):
-        with open(tasks_json, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    else:
-        raw = json.loads(tasks_json)
-
-    if not isinstance(raw, list):
-        raise ValueError("tasks_json must decode to a list of task spec dicts")
-
-    specs: List[TaskSpec] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            raise ValueError("Each task spec must be a dict")
-        specs.append(
-            TaskSpec(
-                name=str(item["name"]),
-                task_type=str(item["task_type"]),
-                output_dim=int(item["output_dim"]),
-                head_hidden_dims=tuple(int(x) for x in item.get("head_hidden_dims", (128, 64))),
-                head_dropout=float(item.get("head_dropout", 0.1)),
-            )
-        )
-
-    names = [s.name for s in specs]
-    if len(set(names)) != len(names):
-        raise ValueError(f"Duplicate task names: {names}")
-
-    return specs
 
 
 def main(

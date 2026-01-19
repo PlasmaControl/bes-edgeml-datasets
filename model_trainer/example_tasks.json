@@ -1,0 +1,23 @@
+[
+  {
+    "name": "binary",
+    "task_type": "binary",
+    "output_dim": 1,
+    "head_hidden_dims": [128, 64],
+    "head_dropout": 0.1
+  },
+  {
+    "name": "multiclass",
+    "task_type": "multiclass",
+    "output_dim": 4,
+    "head_hidden_dims": [128, 64],
+    "head_dropout": 0.1
+  },
+  {
+    "name": "regression",
+    "task_type": "regression",
+    "output_dim": 1,
+    "head_hidden_dims": [128, 64],
+    "head_dropout": 0.1
+  }
+]
