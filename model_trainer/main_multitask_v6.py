@@ -27,16 +27,15 @@ Notes
 
 from __future__ import annotations
 
-import json
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+
+import numpy as np
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
 from torch.utils.data import DataLoader, Dataset, random_split
-
-from torchmetrics import MeanMetric
 
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
@@ -50,114 +49,71 @@ TaskType = Literal["binary", "multiclass", "regression"]
 class TaskSpec:
     name: str
     task_type: TaskType
-    output_dim: int
-    head_hidden_dims: Tuple[int, ...] = (128, 64)
-    head_dropout: float = 0.1
+    output_size: int
+    hidden_dims: Tuple[int, ...] = (128, 64)
+    dropout: float = 0.1
 
-
-def _parse_task_specs(tasks_json: Optional[str]) -> List[TaskSpec]:
-    if not tasks_json:
-        return [
-            TaskSpec(name="binary", task_type="binary", output_dim=1, head_hidden_dims=(128, 64), head_dropout=0.1),
-            TaskSpec(name="multiclass", task_type="multiclass", output_dim=4, head_hidden_dims=(128, 64), head_dropout=0.1),
-            TaskSpec(name="regression", task_type="regression", output_dim=1, head_hidden_dims=(128, 64), head_dropout=0.1),
-        ]
-
-    # Accept either a JSON string or a path to a JSON file.
-    raw: Any
-    if tasks_json.strip().endswith(".json"):
-        with open(tasks_json, "r", encoding="utf-8") as f:
-            raw = json.load(f)
-    else:
-        raw = json.loads(tasks_json)
-
-    if not isinstance(raw, list):
-        raise ValueError("tasks_json must decode to a list of task spec dicts")
-
-    specs: List[TaskSpec] = []
-    for item in raw:
-        if not isinstance(item, dict):
-            raise ValueError("Each task spec must be a dict")
-        specs.append(
-            TaskSpec(
-                name=str(item["name"]),
-                task_type=str(item["task_type"]),
-                output_dim=int(item["output_dim"]),
-                head_hidden_dims=tuple(int(x) for x in item.get("head_hidden_dims", (128, 64))),
-                head_dropout=float(item.get("head_dropout", 0.1)),
-            )
-        )
-
-    names = [s.name for s in specs]
+def _validate_task_specs(task_specs: Sequence[TaskSpec]) -> None:
+    if not task_specs:
+        raise ValueError("task_specs must be non-empty")
+    names = [t.name for t in task_specs]
     if len(set(names)) != len(names):
         raise ValueError(f"Duplicate task names: {names}")
-
-    return specs
+    for spec in task_specs:
+        if not isinstance(spec, TaskSpec):
+            raise ValueError(f"Each task spec must be a TaskSpec instance, got {type(spec)}")
+        if spec.task_type == "multiclass" and spec.output_size < 2:
+            raise ValueError(f"multiclass task '{spec.name}' must have output_size >= 2")
 
 
 @dataclass(kw_only=True, eq=False)
 class Conv3DBackbone(nn.Module):
     """Shared 3D convolutional encoder producing a latent feature vector."""
-
-    in_channels: int = 1
-    kernel_t: int = 8
-    channels: Sequence[int] = (16, 32, 64)
-    latent_dim: int = 128
+    channels: Sequence[int] = (4, 4, 4)
+    kernel_t: int|Sequence[int] = 4
     leaky_relu_slope: float = 2e-2
-
-    conv: nn.Sequential = field(init=False, repr=False)
-    pool: nn.AdaptiveAvgPool3d = field(init=False, repr=False)
-    flat_norm: nn.LayerNorm = field(init=False, repr=False)
-    to_latent: nn.Sequential = field(init=False, repr=False)
 
     def __post_init__(self) -> None:
         super().__init__()
 
-        if self.kernel_t not in (4, 8):
-            raise ValueError("kernel_t must be 4 or 8")
         if len(self.channels) < 1:
             raise ValueError("channels must be non-empty")
+        
+        if isinstance(self.kernel_t, Sequence):
+            if len(self.kernel_t) != len(self.channels):
+                raise ValueError("If kernel_t is a sequence, it must have the same length as channels")
+        elif isinstance(self.kernel_t, int):
+            self.kernel_t = [self.kernel_t] * len(self.channels)
+        else:
+            raise ValueError("kernel_t must be an int or a sequence of ints")
+        
+        for k in self.kernel_t:
+            if k not in (4, 8):
+                raise ValueError("Each kernel_t must be 4 or 8")
 
         blocks: List[nn.Module] = []
-        c_in = self.in_channels
-        for c_out in self.channels:
+        c_in = 1
+        for c_out, kernel_t in zip(self.channels, self.kernel_t):
             blocks.append(
                 nn.Conv3d(
                     c_in,
                     c_out,
-                    kernel_size=(self.kernel_t, 3, 3),
-                    stride=(self.kernel_t, 1, 1),
-                    padding=(0, 1, 1),
+                    kernel_size=(kernel_t, 3, 3),
+                    stride=(kernel_t, 1, 1),
+                    padding='valid',
                     bias=True,
                 )
             )
             blocks.append(nn.GroupNorm(num_groups=1, num_channels=c_out))
-            blocks.append(nn.LeakyReLU(negative_slope=self.leaky_relu_slope, inplace=True))
+            blocks.append(nn.LeakyReLU(negative_slope=self.leaky_relu_slope, inplace=False))
             c_in = c_out
 
-        self.conv = nn.Sequential(*blocks)
-        self.pool = nn.AdaptiveAvgPool3d((1, 1, 1))
+        blocks.append(nn.Flatten(1))
 
-        # Flattened feature vector normalization
-        self.flat_norm = nn.LayerNorm(self.channels[-1])
-
-        # Project into a user-controlled latent space
-        self.to_latent = nn.Sequential(
-            nn.Linear(self.channels[-1], self.latent_dim),
-            nn.LeakyReLU(negative_slope=self.leaky_relu_slope, inplace=True),
-            nn.LayerNorm(self.latent_dim),
-        )
+        self.conv: nn.Sequential = nn.Sequential(*blocks)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
-        # x: [B, 1, n_time, 8, 8]
-        if x.ndim != 5:
-            raise ValueError(f"Expected input rank 5 [B,1,T,8,8], got {tuple(x.shape)}")
-        y = self.conv(x)
-        y = self.pool(y)
-        y = y.flatten(1)  # [B, C]
-        y = self.flat_norm(y)
-        z = self.to_latent(y)
-        return z
+        return self.conv(x)
 
 
 @dataclass(kw_only=True, eq=False)
@@ -183,8 +139,8 @@ class MultiTask3DDataset(Dataset):
     def __post_init__(self) -> None:
         super().__init__()
 
-        if self.n_time < 128:
-            raise ValueError("n_time must be >= 128")
+        if np.log2(self.n_time) % 1 != 0 or self.n_time < 32:
+            raise ValueError("n_time must be a power of 2 and >= 32")
 
         g = torch.Generator().manual_seed(self.seed)
 
@@ -198,17 +154,17 @@ class MultiTask3DDataset(Dataset):
         for spec in self.task_specs:
             if spec.task_type == "regression":
                 # [N, output_dim]
-                w = torch.randn(1, int(spec.output_dim), generator=g)
+                w = torch.randn(1, int(spec.output_size), generator=g)
                 y = shared.unsqueeze(-1) @ w
                 y = y + 0.1 * torch.randn(y.shape, generator=g)
                 self.y[spec.name] = y
             elif spec.task_type == "binary":
-                logits = shared.unsqueeze(-1).repeat(1, int(spec.output_dim))
+                logits = shared.unsqueeze(-1).repeat(1, int(spec.output_size))
                 logits = logits + 0.5 * torch.randn(logits.shape, generator=g)
                 probs = torch.sigmoid(logits)
                 self.y[spec.name] = (probs > 0.5).float()
             elif spec.task_type == "multiclass":
-                num_classes = int(spec.output_dim)
+                num_classes = int(spec.output_size)
                 if num_classes < 2:
                     raise ValueError(f"multiclass task '{spec.name}' must have output_dim >= 2")
                 class_logits = shared.unsqueeze(-1) + 0.2 * torch.arange(num_classes).unsqueeze(0)
@@ -244,8 +200,8 @@ class Data(pl.LightningDataModule):
     def __post_init__(self) -> None:
         super().__init__()
 
-        if self.n_time < 128:
-            raise ValueError("n_time must be >= 128")
+        if np.log2(self.n_time) % 1 != 0 or self.n_time < 32:
+            raise ValueError("n_time must be a power of 2 and >= 32")
         if not self.task_specs:
             raise ValueError("task_specs must be non-empty")
         names = [t.name for t in self.task_specs]
@@ -358,75 +314,57 @@ class Data(pl.LightningDataModule):
 class Model(pl.LightningModule):
     task_specs: Sequence[TaskSpec]
     n_time: int
-    kernel_t: int = 8
-    backbone_channels: Sequence[int] = (16, 32, 64)
-    latent_dim: int = 128
+    backbone_channels: Sequence[int] = (4, 4, 4)
+    kernel_t: int|Sequence[int] = 8
     leaky_relu_slope: float = 2e-2
     lr: float = 1e-3
     weight_decay: float = 1e-4
 
-    task_specs_by_name: Dict[str, TaskSpec] = field(default_factory=dict, init=False, repr=False)
-    task_names: List[str] = field(default_factory=list, init=False, repr=False)
-
-    backbone: Conv3DBackbone = field(init=False, repr=False)
-    heads: nn.ModuleDict = field(init=False, repr=False)
-    task_log_var: nn.ParameterDict = field(init=False, repr=False)
-
-    train_loss_total: MeanMetric = field(init=False, repr=False)
-    val_loss_total: MeanMetric = field(init=False, repr=False)
-    train_loss_raw: nn.ModuleDict = field(init=False, repr=False)
-    val_loss_raw: nn.ModuleDict = field(init=False, repr=False)
-    train_loss_weighted: nn.ModuleDict = field(init=False, repr=False)
-    val_loss_weighted: nn.ModuleDict = field(init=False, repr=False)
-
     def __post_init__(self) -> None:
         super().__init__()
 
-        if self.n_time < 128:
-            raise ValueError("n_time must be >= 128")
-        if self.kernel_t not in (4, 8):
-            raise ValueError("kernel_t must be 4 or 8")
+        if np.log2(self.n_time) % 1 != 0 or self.n_time < 32:
+            raise ValueError("n_time must be a power of 2 and >= 32")
         if not self.task_specs:
             raise ValueError("task_specs must be non-empty")
-
-        names = [t.name for t in self.task_specs]
-        if len(set(names)) != len(names):
-            raise ValueError(f"Duplicate task names: {names}")
-        self.task_names = names
-        self.task_specs_by_name = {t.name: t for t in self.task_specs}
+        if self.kernel_t not in (4, 8):
+            raise ValueError("kernel_t must be 4 or 8")
 
         self.save_hyperparameters(
             {
                 "n_time": self.n_time,
                 "kernel_t": self.kernel_t,
                 "backbone_channels": list(self.backbone_channels),
-                "latent_dim": self.latent_dim,
                 "leaky_relu_slope": self.leaky_relu_slope,
                 "lr": self.lr,
                 "weight_decay": self.weight_decay,
             }
         )
 
+        self.task_names: List[str] = [t.name for t in self.task_specs]
+        self.task_specs_by_name: Dict[str, TaskSpec] = {t.name: t for t in self.task_specs}
+
         # Manual optimization is required for PCGrad.
         self.automatic_optimization = False
 
         # Shared backbone
         self.backbone = Conv3DBackbone(
-            in_channels=1,
             kernel_t=self.kernel_t,
             channels=self.backbone_channels,
-            latent_dim=self.latent_dim,
             leaky_relu_slope=self.leaky_relu_slope,
         )
+
+        # calc latent space size
+        self.latent_size = self.backbone(torch.zeros(1, 1, self.n_time, 8, 8)).numel()
 
         # Task heads
         self.heads = nn.ModuleDict()
         for spec in self.task_specs:
-            self.heads[spec.name] = self._build_head(
-                input_dim=self.latent_dim,
-                output_dim=spec.output_dim,
-                hidden_dims=spec.head_hidden_dims,
-                dropout=spec.head_dropout,
+            self.heads[spec.name] = self._build_heads(
+                latent_size=self.latent_size,
+                output_size=spec.output_size,
+                hidden_layer_sizes=spec.hidden_dims,
+                dropout=spec.dropout,
                 leaky_relu_slope=self.leaky_relu_slope,
             )
 
@@ -435,47 +373,32 @@ class Model(pl.LightningModule):
             {spec.name: nn.Parameter(torch.zeros(())) for spec in self.task_specs}
         )
 
-        # --- TorchMetrics loss tracking ---
-        metric_kwargs = {
-            "dist_sync_on_step": False,
-            "sync_on_compute": True,
-        }
-
-        self.train_loss_total = MeanMetric(**metric_kwargs)
-        self.val_loss_total = MeanMetric(**metric_kwargs)
-
-        self.train_loss_raw = nn.ModuleDict({name: MeanMetric(**metric_kwargs) for name in self.task_names})
-        self.val_loss_raw = nn.ModuleDict({name: MeanMetric(**metric_kwargs) for name in self.task_names})
-
-        self.train_loss_weighted = nn.ModuleDict({name: MeanMetric(**metric_kwargs) for name in self.task_names})
-        self.val_loss_weighted = nn.ModuleDict({name: MeanMetric(**metric_kwargs) for name in self.task_names})
-
     @staticmethod
-    def _build_head(
+    def _build_heads(
         *,
-        input_dim: int,
-        output_dim: int,
-        hidden_dims: Sequence[int],
+        latent_size: int,
+        output_size: int,
+        hidden_layer_sizes: Sequence[int],
         dropout: float,
         leaky_relu_slope: float,
     ) -> nn.Sequential:
         layers: List[nn.Module] = []
-        prev = input_dim
-        for h in hidden_dims:
+        prev = latent_size
+        for h in hidden_layer_sizes:
             layers.append(nn.Linear(prev, h))
             layers.append(nn.BatchNorm1d(h))
-            layers.append(nn.LeakyReLU(negative_slope=leaky_relu_slope, inplace=True))
+            layers.append(nn.LeakyReLU(negative_slope=leaky_relu_slope, inplace=False))
             if dropout and dropout > 0:
-                layers.append(nn.Dropout1d(p=dropout, inplace=True))
+                layers.append(nn.Dropout1d(p=dropout, inplace=False))
             prev = h
 
-        layers.append(nn.Linear(prev, output_dim))
+        layers.append(nn.Linear(prev, output_size))
         return nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
-        # x: [B, 1, T, 8, 8]
-        z = self.backbone(x)
-        return {name: head(z) for name, head in self.heads.items()}
+        # x: [B, Latent_Size]
+        latent_z = self.backbone(x)
+        return {name: head(latent_z) for name, head in self.heads.items()}
 
     def _compute_task_losses(
         self,
@@ -546,11 +469,11 @@ class Model(pl.LightningModule):
 
         grads_by_task_flat: Dict[str, torch.Tensor] = {}
         for i, t in enumerate(tasks):
-            retain = i != (len(tasks) - 1)
+            # retain = i != (len(tasks) - 1)
             grads = torch.autograd.grad(
                 task_objectives[t],
                 shared_params,
-                retain_graph=retain,
+                retain_graph=True,
                 allow_unused=True,
             )
             flat_parts: List[torch.Tensor] = []
@@ -589,77 +512,47 @@ class Model(pl.LightningModule):
         for p, g in zip(shared_params, merged_grads):
             p.grad = g.detach()
 
-    def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        opt = self.optimizers()
-        opt.zero_grad(set_to_none=True)
-
-        x, targets = batch
-        # Dataset returns x: [1,T,8,8]; make it [B,1,T,8,8]
-        if x.ndim == 4:
-            x = x.unsqueeze(1)
+    def eval_step(self, substage: str, batch: Any, batch_idx: int) -> Tuple[torch.Tensor]:
+        x: torch.Tensor = batch[0]
+        targets: torch.Tensor = batch[1]
+        # # Dataset returns x: [B,T,8,8]; make it [B,1,T,8,8]
+        # if x.ndim == 4:
+        #     x = x.unsqueeze(1)
 
         outputs = self(x)
         task_losses = self._compute_task_losses(outputs, targets)
         total, weighted = self._uncertainty_weighted_losses(task_losses)
 
-        # Update TorchMetrics loss trackers (detach: metrics are for logging only).
-        self.train_loss_total(total.detach())
-        for name, l in task_losses.items():
-            if name in self.train_loss_raw:
-                self.train_loss_raw[name](l.detach())
-        for name, l in weighted.items():
-            if name in self.train_loss_weighted:
-                self.train_loss_weighted[name](l.detach())
+        self.log(f"loss/{substage}", total.detach(), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        for name in self.task_names:
+            if name in task_losses:
+                self.log(f"loss_raw/{substage}/{name}", task_losses[name].detach(), on_step=False, on_epoch=True, sync_dist=True)
+            if name in weighted:
+                self.log(
+                    f"loss_weighted/{substage}/{name}",
+                    weighted[name].detach(),
+                    on_step=False,
+                    on_epoch=True,
+                    sync_dist=True,
+                )
+        self._log_task_logvars(prefix=f"{substage}/")
+
+        return total.detach(), weighted
+
+    def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
+        opt: torch.optim.Optimizer = self.optimizers()
+        opt.zero_grad(set_to_none=True)
+
+        total, weighted = self.eval_step("train", batch, batch_idx)
 
         shared_params = self._get_shared_params()
         self._pcgrad_step(task_objectives=weighted, shared_params=shared_params)
-
         opt.step()
 
-        # Log via TorchMetrics (epoch-wise aggregation).
-        self.log("loss/train", self.train_loss_total, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        for name in self.task_names:
-            self.log(f"loss_raw/train/{name}", self.train_loss_raw[name], on_step=False, on_epoch=True, sync_dist=True)
-            self.log(
-                f"loss_weighted/train/{name}",
-                self.train_loss_weighted[name],
-                on_step=False,
-                on_epoch=True,
-                sync_dist=True,
-            )
-        self._log_task_logvars(prefix="train/")
-
-        return total.detach()
+        return total
 
     def validation_step(self, batch: Any, batch_idx: int) -> None:
-        x, targets = batch
-        if x.ndim == 4:
-            x = x.unsqueeze(1)
-
-        outputs = self(x)
-        task_losses = self._compute_task_losses(outputs, targets)
-        total, weighted = self._uncertainty_weighted_losses(task_losses)
-
-        # Update + log via TorchMetrics.
-        self.val_loss_total(total.detach())
-        for name, l in task_losses.items():
-            if name in self.val_loss_raw:
-                self.val_loss_raw[name](l.detach())
-        for name, l in weighted.items():
-            if name in self.val_loss_weighted:
-                self.val_loss_weighted[name](l.detach())
-
-        self.log("loss/val", self.val_loss_total, on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        for name in self.task_names:
-            self.log(f"loss_raw/val/{name}", self.val_loss_raw[name], on_step=False, on_epoch=True, sync_dist=True)
-            self.log(
-                f"loss_weighted/val/{name}",
-                self.val_loss_weighted[name],
-                on_step=False,
-                on_epoch=True,
-                sync_dist=True,
-            )
-        self._log_task_logvars(prefix="val/")
+        _ = self.eval_step("val", batch, batch_idx)
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
@@ -668,11 +561,12 @@ class Model(pl.LightningModule):
 def main(
     *,
     data_path: Optional[str] = None,
-    n_time: int = 256,
-    kernel_t: int = 8,
-    backbone_channels: Sequence[int] = (16, 32, 64),
+    n_time: int = 4*4*4*2,
+    kernel_t: int = 4,
+    backbone_channels: Sequence[int] = (4, 4, 4),
     latent_dim: int = 128,
-    tasks_json: Optional[str] = None,
+    # tasks_json: Optional[str] = None,
+    task_specs: Optional[Sequence[TaskSpec]] = None,
     batch_size: int = 32,
     num_samples: int = 4096,
     num_workers: int = 0,
@@ -690,12 +584,18 @@ def main(
     passing keyword arguments into main().
     """
 
-    if n_time < 128:
-        raise ValueError("n_time must be >= 128")
-
-    task_specs = _parse_task_specs(tasks_json)
-
     pl.seed_everything(seed, workers=True)
+
+    if np.log2(n_time) % 1 != 0 or n_time < 32:
+        raise ValueError("n_time must be a power of 2 and >= 32")
+
+    if not task_specs:
+        task_specs = [
+            TaskSpec(name="binary", task_type="binary", output_size=1, hidden_dims=(128, 64), dropout=0.1),
+            TaskSpec(name="multiclass", task_type="multiclass", output_size=4, hidden_dims=(128, 64), dropout=0.1),
+            TaskSpec(name="regression", task_type="regression", output_size=1, hidden_dims=(128, 64), dropout=0.1),
+        ]
+    _validate_task_specs(task_specs)
 
     data = Data(
         task_specs=task_specs,
@@ -712,7 +612,7 @@ def main(
         n_time=n_time,
         kernel_t=kernel_t,
         backbone_channels=backbone_channels,
-        latent_dim=latent_dim,
+        # latent_dim=latent_dim,
         lr=lr,
         weight_decay=weight_decay,
     )
