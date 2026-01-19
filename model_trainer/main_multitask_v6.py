@@ -95,24 +95,6 @@ def _parse_task_specs(tasks_json: Optional[str]) -> List[TaskSpec]:
     return specs
 
 
-class Dropout1dFeatures(nn.Module):
-    """Applies Dropout1d to a [B, F] feature tensor by reshaping to [B, F, 1]."""
-
-    def __init__(self, p: float) -> None:
-        super().__init__()
-        self.dropout = nn.Dropout1d(p=p)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        if x.ndim != 2:
-            raise ValueError(f"Dropout1dFeatures expects [B, F], got shape={tuple(x.shape)}")
-        return self.dropout(x.unsqueeze(-1)).squeeze(-1)
-
-
-def _groupnorm_all_channels(num_channels: int) -> nn.GroupNorm:
-    # "across all channels" => one group
-    return nn.GroupNorm(num_groups=1, num_channels=num_channels)
-
-
 @dataclass(kw_only=True, eq=False)
 class Conv3DBackbone(nn.Module):
     """Shared 3D convolutional encoder producing a latent feature vector."""
@@ -149,7 +131,7 @@ class Conv3DBackbone(nn.Module):
                     bias=True,
                 )
             )
-            blocks.append(_groupnorm_all_channels(c_out))
+            blocks.append(nn.GroupNorm(num_groups=1, num_channels=c_out))
             blocks.append(nn.LeakyReLU(negative_slope=self.leaky_relu_slope, inplace=True))
             c_in = c_out
 
@@ -176,28 +158,6 @@ class Conv3DBackbone(nn.Module):
         y = self.flat_norm(y)
         z = self.to_latent(y)
         return z
-
-
-def _build_head(
-    *,
-    input_dim: int,
-    output_dim: int,
-    hidden_dims: Sequence[int],
-    dropout: float,
-    leaky_relu_slope: float,
-) -> nn.Sequential:
-    layers: List[nn.Module] = []
-    prev = input_dim
-    for h in hidden_dims:
-        layers.append(nn.Linear(prev, h))
-        layers.append(nn.BatchNorm1d(h))
-        layers.append(nn.LeakyReLU(negative_slope=leaky_relu_slope, inplace=True))
-        if dropout and dropout > 0:
-            layers.append(Dropout1dFeatures(p=dropout))
-        prev = h
-
-    layers.append(nn.Linear(prev, output_dim))
-    return nn.Sequential(*layers)
 
 
 @dataclass(kw_only=True, eq=False)
@@ -462,11 +422,11 @@ class Model(pl.LightningModule):
         # Task heads
         self.heads = nn.ModuleDict()
         for spec in self.task_specs:
-            self.heads[spec.name] = _build_head(
+            self.heads[spec.name] = self._build_head(
                 input_dim=self.latent_dim,
-                output_dim=int(spec.output_dim),
+                output_dim=spec.output_dim,
                 hidden_dims=spec.head_hidden_dims,
-                dropout=float(spec.head_dropout),
+                dropout=spec.head_dropout,
                 leaky_relu_slope=self.leaky_relu_slope,
             )
 
@@ -489,6 +449,28 @@ class Model(pl.LightningModule):
 
         self.train_loss_weighted = nn.ModuleDict({name: MeanMetric(**metric_kwargs) for name in self.task_names})
         self.val_loss_weighted = nn.ModuleDict({name: MeanMetric(**metric_kwargs) for name in self.task_names})
+
+    @staticmethod
+    def _build_head(
+        *,
+        input_dim: int,
+        output_dim: int,
+        hidden_dims: Sequence[int],
+        dropout: float,
+        leaky_relu_slope: float,
+    ) -> nn.Sequential:
+        layers: List[nn.Module] = []
+        prev = input_dim
+        for h in hidden_dims:
+            layers.append(nn.Linear(prev, h))
+            layers.append(nn.BatchNorm1d(h))
+            layers.append(nn.LeakyReLU(negative_slope=leaky_relu_slope, inplace=True))
+            if dropout and dropout > 0:
+                layers.append(nn.Dropout1d(p=dropout, inplace=True))
+            prev = h
+
+        layers.append(nn.Linear(prev, output_dim))
+        return nn.Sequential(*layers)
 
     def forward(self, x: torch.Tensor) -> Dict[str, torch.Tensor]:
         # x: [B, 1, T, 8, 8]
