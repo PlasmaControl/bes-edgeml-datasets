@@ -331,7 +331,7 @@ class Model(pl.LightningModule):
             self._set_backbone_requires_grad(False)
 
         self._print_model_summary(max_depth=4)
-        self._print_init_activation_stats(num_samples=128)
+        self._print_init_activation_stats(num_samples=512)
 
     def _print_model_summary(self, *, max_depth: int = 4) -> None:
         try:
@@ -354,18 +354,35 @@ class Model(pl.LightningModule):
             self.heads.eval()
 
             with torch.no_grad():
-                x = torch.randn(num_samples, 1, self.signal_window_size, 8, 8, device=device)
-                z = self.backbone(x)
+                while True:
+                    do_break = True
+                    x = torch.randn(num_samples, 1, self.signal_window_size, 8, 8, device=device)
+                    x_mean = x.mean().item()
+                    x_std = x.std(unbiased=False).item()
+                    z: torch.Tensor = self.backbone(x)
+                    z_mean = z.mean().item()
+                    z_std = z.std(unbiased=False).item()
+                    task_stats = {}
+                    for name in self.task_names:
+                        y: torch.Tensor = self.heads[name](z)
+                        y_mean = y.mean(0).tolist()
+                        y_std = y.std(0, unbiased=False).tolist()
+                        task_stats[name] = (y_mean, y_std)
+                        for m,s in zip(y_mean,y_std):
+                            if abs(m)/s > 0.5:
+                                do_break = False
+                    if do_break:
+                        # TODO re-initialize model weights/biases
+                        break
 
-                z_mean = z.mean().item()
-                z_std = z.std(unbiased=False).item()
+                print(f"[init-stats] input: shape={tuple(x.shape)} mean={x_mean:.6g} std={x_std:.6g}")
                 print(f"[init-stats] latent: shape={tuple(z.shape)} mean={z_mean:.6g} std={z_std:.6g}")
-
-                for name in self.task_names:
-                    y = self.heads[name](z)
-                    y_mean = y.mean().item()
-                    y_std = y.std(unbiased=False).item()
-                    print(f"[init-stats] head/{name}: shape={tuple(y.shape)} mean={y_mean:.6g} std={y_std:.6g}")
+                for name, (y_mean, y_std) in task_stats.items():
+                    if len(y_mean) == 1:
+                        print(f"[init-stats] head/{name}: shape={tuple(y.shape)} mean={y_mean[0]:.6g} std={y_std[0]:.6g}")
+                    else:
+                        for i in range(len(y_mean)):
+                            print(f"[init-stats] head/{name}[{i}]: shape={tuple(y.shape)} mean={y_mean[i]:.6g} std={y_std[i]:.6g}")
         finally:
             self.backbone.train(was_training_backbone)
             self.heads.train(was_training_heads)
@@ -399,7 +416,7 @@ class Model(pl.LightningModule):
 
         blocks: List[nn.Module] = []
         c_in = 1
-        for c_out, kT in zip(channels, kernel_ts):
+        for i, (c_out, kT) in enumerate(zip(channels, kernel_ts)):
             blocks.append(
                 nn.Conv3d(
                     c_in,
@@ -411,7 +428,8 @@ class Model(pl.LightningModule):
                 )
             )
             blocks.append(nn.GroupNorm(num_groups=1, num_channels=c_out))
-            blocks.append(nn.LeakyReLU(negative_slope=leaky_relu_slope, inplace=False))
+            if i != len(channels) - 1:
+                blocks.append(nn.LeakyReLU(negative_slope=leaky_relu_slope, inplace=False))
             c_in = c_out
 
         blocks.append(nn.Flatten(1))
