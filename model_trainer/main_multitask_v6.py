@@ -3,7 +3,7 @@
 This script is intentionally self-contained and defaults to synthetic/random data.
 
 Key features requested
-- Shared 3D convolutional encoder (common latent space) for inputs shaped [8, 8, n_time]
+- Shared 3D convolutional encoder (common latent space) for inputs shaped [8, 8, signal_window_size]
   (implemented as torch tensors [B, 1, n_time, 8, 8] for Conv3d).
 - Conv3d kernel sizes (time, height, width) = (kT, 3, 3) with kT in {4, 8}.
   Stride is (kT, 1, 1) (stride equals the kernel time dimension).
@@ -18,7 +18,7 @@ Key features requested
 Example
     # Programmatic usage (keyword defaults)
     from model_trainer.main_multitask_v6 import main
-    main(n_time=256, kernel_t=8, max_epochs=5)
+    main(signal_window_size=256, kernel_t=8, max_epochs=5)
 
 Notes
 - This script focuses on the architecture/training mechanics. For real datasets, extend
@@ -29,6 +29,8 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 from typing import Any, Dict, List, Literal, Optional, Sequence, Tuple
+
+import secrets
 
 import numpy as np
 
@@ -67,69 +69,18 @@ def _validate_task_specs(task_specs: Sequence[TaskSpec]) -> None:
 
 
 @dataclass(kw_only=True, eq=False)
-class Conv3DBackbone(nn.Module):
-    """Shared 3D convolutional encoder producing a latent feature vector."""
-    channels: Sequence[int] = (4, 4, 4)
-    kernel_t: int|Sequence[int] = 4
-    leaky_relu_slope: float = 2e-2
-
-    def __post_init__(self) -> None:
-        super().__init__()
-
-        if len(self.channels) < 1:
-            raise ValueError("channels must be non-empty")
-        
-        if isinstance(self.kernel_t, Sequence):
-            if len(self.kernel_t) != len(self.channels):
-                raise ValueError("If kernel_t is a sequence, it must have the same length as channels")
-        elif isinstance(self.kernel_t, int):
-            self.kernel_t = [self.kernel_t] * len(self.channels)
-        else:
-            raise ValueError("kernel_t must be an int or a sequence of ints")
-        
-        for k in self.kernel_t:
-            if k not in (4, 8):
-                raise ValueError("Each kernel_t must be 4 or 8")
-
-        blocks: List[nn.Module] = []
-        c_in = 1
-        for c_out, kernel_t in zip(self.channels, self.kernel_t):
-            blocks.append(
-                nn.Conv3d(
-                    c_in,
-                    c_out,
-                    kernel_size=(kernel_t, 3, 3),
-                    stride=(kernel_t, 1, 1),
-                    padding='valid',
-                    bias=True,
-                )
-            )
-            blocks.append(nn.GroupNorm(num_groups=1, num_channels=c_out))
-            blocks.append(nn.LeakyReLU(negative_slope=self.leaky_relu_slope, inplace=False))
-            c_in = c_out
-
-        blocks.append(nn.Flatten(1))
-
-        self.conv: nn.Sequential = nn.Sequential(*blocks)
-
-    def forward(self, x: torch.Tensor) -> torch.Tensor:
-        return self.conv(x)
-
-
-@dataclass(kw_only=True, eq=False)
 class MultiTask3DDataset(Dataset):
     """Synthetic dataset for multi-task learning.
 
     Returns
-      x: [1, n_time, 8, 8]
+            x: [1, signal_window_size, 8, 8]
       targets: dict[str, Tensor]
         - binary: float targets in {0,1} shaped [output_dim]
         - multiclass: long class index scalar []
         - regression: float targets shaped [output_dim]
     """
 
-    num_samples: int
-    n_time: int
+    signal_window_size: int
     task_specs: Sequence[TaskSpec]
     seed: int = 123
 
@@ -139,13 +90,14 @@ class MultiTask3DDataset(Dataset):
     def __post_init__(self) -> None:
         super().__init__()
 
-        if np.log2(self.n_time) % 1 != 0 or self.n_time < 32:
-            raise ValueError("n_time must be a power of 2 and >= 32")
+        if np.log2(self.signal_window_size) % 1 != 0 or self.signal_window_size < 32:
+            raise ValueError("signal_window_size must be a power of 2 and >= 32")
 
         g = torch.Generator().manual_seed(self.seed)
 
         # x: [N, 1, T, 8, 8]
-        self.x = torch.randn(self.num_samples, 1, self.n_time, 8, 8, generator=g)
+        self.num_samples = 4096
+        self.x = torch.randn(self.num_samples, 1, self.signal_window_size, 8, 8, generator=g)
 
         # Shared underlying signal (simple): average energy per sample
         shared = self.x.mean(dim=(1, 2, 3, 4))  # [N]
@@ -187,21 +139,16 @@ class MultiTask3DDataset(Dataset):
 class Data(pl.LightningDataModule):
     task_specs: Sequence[TaskSpec]
     data_path: Optional[str] = None
-    n_time: int = 256
-    num_samples: int = 4096
+    signal_window_size: int = 256
     batch_size: int = 32
     num_workers: int = 0
     seed: int = 123
 
-    train_ds: Optional[Dataset] = field(default=None, init=False, repr=False)
-    val_ds: Optional[Dataset] = field(default=None, init=False, repr=False)
-    test_ds: Optional[Dataset] = field(default=None, init=False, repr=False)
-
     def __post_init__(self) -> None:
         super().__init__()
 
-        if np.log2(self.n_time) % 1 != 0 or self.n_time < 32:
-            raise ValueError("n_time must be a power of 2 and >= 32")
+        if np.log2(self.signal_window_size) % 1 != 0 or self.signal_window_size < 32:
+            raise ValueError("signal_window_size must be a power of 2 and >= 32")
         if not self.task_specs:
             raise ValueError("task_specs must be non-empty")
         names = [t.name for t in self.task_specs]
@@ -213,13 +160,16 @@ class Data(pl.LightningDataModule):
         self.save_hyperparameters(
             {
                 "data_path": self.data_path,
-                "n_time": self.n_time,
-                "num_samples": self.num_samples,
+                "signal_window_size": self.signal_window_size,
                 "batch_size": self.batch_size,
                 "num_workers": self.num_workers,
                 "seed": self.seed,
             }
         )
+
+        self.train_ds: Dataset = None
+        self.val_ds: Dataset = None
+        self.test_ds: Dataset = None
 
     def _load_from_file(self) -> Dataset:
         """Load a dataset from disk.
@@ -263,8 +213,7 @@ class Data(pl.LightningDataModule):
             full: Dataset = self._load_from_file()
         else:
             full = MultiTask3DDataset(
-                num_samples=self.num_samples,
-                n_time=self.n_time,
+                signal_window_size=self.signal_window_size,
                 task_specs=self.task_specs,
                 seed=self.seed,
             )
@@ -313,9 +262,10 @@ class Data(pl.LightningDataModule):
 @dataclass(kw_only=True, eq=False)
 class Model(pl.LightningModule):
     task_specs: Sequence[TaskSpec]
-    n_time: int
+    signal_window_size: int
     backbone_channels: Sequence[int] = (4, 4, 4)
     kernel_t: int|Sequence[int] = 8
+    freeze_backbone_epochs: int = 0
     leaky_relu_slope: float = 2e-2
     lr: float = 1e-3
     weight_decay: float = 1e-4
@@ -323,18 +273,21 @@ class Model(pl.LightningModule):
     def __post_init__(self) -> None:
         super().__init__()
 
-        if np.log2(self.n_time) % 1 != 0 or self.n_time < 32:
-            raise ValueError("n_time must be a power of 2 and >= 32")
+        if np.log2(self.signal_window_size) % 1 != 0 or self.signal_window_size < 32:
+            raise ValueError("signal_window_size must be a power of 2 and >= 32")
         if not self.task_specs:
             raise ValueError("task_specs must be non-empty")
         if self.kernel_t not in (4, 8):
             raise ValueError("kernel_t must be 4 or 8")
+        if self.freeze_backbone_epochs < 0:
+            raise ValueError("freeze_backbone_epochs must be >= 0")
 
         self.save_hyperparameters(
             {
-                "n_time": self.n_time,
+                "signal_window_size": self.signal_window_size,
                 "kernel_t": self.kernel_t,
                 "backbone_channels": list(self.backbone_channels),
+                "freeze_backbone_epochs": self.freeze_backbone_epochs,
                 "leaky_relu_slope": self.leaky_relu_slope,
                 "lr": self.lr,
                 "weight_decay": self.weight_decay,
@@ -348,14 +301,14 @@ class Model(pl.LightningModule):
         self.automatic_optimization = False
 
         # Shared backbone
-        self.backbone = Conv3DBackbone(
+        self.backbone = self._build_backbone_encoder(
             kernel_t=self.kernel_t,
             channels=self.backbone_channels,
             leaky_relu_slope=self.leaky_relu_slope,
         )
 
         # calc latent space size
-        self.latent_size = self.backbone(torch.zeros(1, 1, self.n_time, 8, 8)).numel()
+        self.latent_size = self.backbone(torch.zeros(1, 1, self.signal_window_size, 8, 8)).numel()
 
         # Task heads
         self.heads = nn.ModuleDict()
@@ -372,6 +325,71 @@ class Model(pl.LightningModule):
         self.task_log_var = nn.ParameterDict(
             {spec.name: nn.Parameter(torch.zeros(())) for spec in self.task_specs}
         )
+
+        # If requested, start training with a frozen backbone.
+        if self.freeze_backbone_epochs > 0:
+            self._set_backbone_requires_grad(False)
+
+    @staticmethod
+    def _build_backbone_encoder(
+        *,
+        channels: Sequence[int] = (4, 4, 4),
+        kernel_t: int | Sequence[int] = 4,
+        leaky_relu_slope: float = 2e-2,
+    ) -> nn.Module:
+        """Build the shared 3D convolutional encoder.
+
+        Returns a module mapping inputs shaped [B, 1, T, 8, 8] to a flattened feature vector.
+        """
+        if len(channels) < 1:
+            raise ValueError("channels must be non-empty")
+
+        if isinstance(kernel_t, Sequence):
+            kernel_ts = list(kernel_t)
+            if len(kernel_ts) != len(channels):
+                raise ValueError("If kernel_t is a sequence, it must have the same length as channels")
+        elif isinstance(kernel_t, int):
+            kernel_ts = [kernel_t] * len(channels)
+        else:
+            raise ValueError("kernel_t must be an int or a sequence of ints")
+
+        for k in kernel_ts:
+            if k not in (4, 8):
+                raise ValueError("Each kernel_t must be 4 or 8")
+
+        blocks: List[nn.Module] = []
+        c_in = 1
+        for c_out, kT in zip(channels, kernel_ts):
+            blocks.append(
+                nn.Conv3d(
+                    c_in,
+                    c_out,
+                    kernel_size=(kT, 3, 3),
+                    stride=(kT, 1, 1),
+                    padding="valid",
+                    bias=True,
+                )
+            )
+            blocks.append(nn.GroupNorm(num_groups=1, num_channels=c_out))
+            blocks.append(nn.LeakyReLU(negative_slope=leaky_relu_slope, inplace=False))
+            c_in = c_out
+
+        blocks.append(nn.Flatten(1))
+        return nn.Sequential(*blocks)
+
+    def _set_backbone_requires_grad(self, requires_grad: bool) -> None:
+        for p in self.backbone.parameters():
+            p.requires_grad = requires_grad
+
+    def on_train_epoch_start(self) -> None:
+        # Freeze for the first N epochs (0-indexed). Unfreeze afterwards.
+        if self.freeze_backbone_epochs <= 0:
+            return
+
+        if self.current_epoch < self.freeze_backbone_epochs:
+            self._set_backbone_requires_grad(False)
+        else:
+            self._set_backbone_requires_grad(True)
 
     @staticmethod
     def _build_heads(
@@ -513,11 +531,8 @@ class Model(pl.LightningModule):
             p.grad = g.detach()
 
     def eval_step(self, substage: str, batch: Any, batch_idx: int) -> Tuple[torch.Tensor]:
-        x: torch.Tensor = batch[0]
+        x: torch.Tensor = batch[0]  # should be [B, 1, signal_window_size, 8, 8]
         targets: torch.Tensor = batch[1]
-        # # Dataset returns x: [B,T,8,8]; make it [B,1,T,8,8]
-        # if x.ndim == 4:
-        #     x = x.unsqueeze(1)
 
         outputs = self(x)
         task_losses = self._compute_task_losses(outputs, targets)
@@ -561,19 +576,17 @@ class Model(pl.LightningModule):
 def main(
     *,
     data_path: Optional[str] = None,
-    n_time: int = 4*4*4*2,
-    kernel_t: int = 4,
+    signal_window_size: int = 4*4*4*2,
+    kernel_t: int|Sequence[int] = 4,
     backbone_channels: Sequence[int] = (4, 4, 4),
-    latent_dim: int = 128,
-    # tasks_json: Optional[str] = None,
+    freeze_backbone_epochs: int = 0,
     task_specs: Optional[Sequence[TaskSpec]] = None,
     batch_size: int = 32,
-    num_samples: int = 4096,
     num_workers: int = 0,
-    seed: int = 123,
+    seed: Optional[int] = None,
     lr: float = 1e-3,
     weight_decay: float = 1e-4,
-    max_epochs: int = 10,
+    max_epochs: int = 2,
     accelerator: str = "auto",
     devices: str = "auto",
     log_dir: str = "./lightning_logs",
@@ -584,10 +597,14 @@ def main(
     passing keyword arguments into main().
     """
 
+    if seed is None:
+        # Choose a random 31-bit seed (compatible with common libs expecting a signed int).
+        seed = secrets.randbits(31)
+
     pl.seed_everything(seed, workers=True)
 
-    if np.log2(n_time) % 1 != 0 or n_time < 32:
-        raise ValueError("n_time must be a power of 2 and >= 32")
+    if np.log2(signal_window_size) % 1 != 0 or signal_window_size < 32:
+        raise ValueError("signal_window_size must be a power of 2 and >= 32")
 
     if not task_specs:
         task_specs = [
@@ -599,9 +616,8 @@ def main(
 
     data = Data(
         task_specs=task_specs,
-        n_time=n_time,
+        signal_window_size=signal_window_size,
         data_path=data_path,
-        num_samples=num_samples,
         batch_size=batch_size,
         num_workers=num_workers,
         seed=seed,
@@ -609,10 +625,10 @@ def main(
 
     model = Model(
         task_specs=task_specs,
-        n_time=n_time,
+        signal_window_size=signal_window_size,
         kernel_t=kernel_t,
         backbone_channels=backbone_channels,
-        # latent_dim=latent_dim,
+        freeze_backbone_epochs=freeze_backbone_epochs,
         lr=lr,
         weight_decay=weight_decay,
     )
