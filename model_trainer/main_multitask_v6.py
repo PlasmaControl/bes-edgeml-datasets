@@ -300,7 +300,7 @@ class Model(pl.LightningModule):
         # Manual optimization is required for PCGrad.
         self.automatic_optimization = False
 
-        # Shared backbone
+        # Build shared backbone encoder
         self.backbone = self._build_backbone_encoder(
             kernel_t=self.kernel_t,
             channels=self.backbone_channels,
@@ -310,7 +310,7 @@ class Model(pl.LightningModule):
         # calc latent space size
         self.latent_size = self.backbone(torch.zeros(1, 1, self.signal_window_size, 8, 8)).numel()
 
-        # Task heads
+        # Build task heads
         self.heads = nn.ModuleDict()
         for spec in self.task_specs:
             self.heads[spec.name] = self._build_heads(
@@ -329,6 +329,46 @@ class Model(pl.LightningModule):
         # If requested, start training with a frozen backbone.
         if self.freeze_backbone_epochs > 0:
             self._set_backbone_requires_grad(False)
+
+        self._print_model_summary(max_depth=4)
+        self._print_init_activation_stats(num_samples=128)
+
+    def _print_model_summary(self, *, max_depth: int = 4) -> None:
+        try:
+            from lightning.pytorch.utilities.model_summary import ModelSummary
+
+            print(ModelSummary(self, max_depth=max_depth))
+        except Exception:
+            total_params = sum(p.numel() for p in self.parameters())
+            trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
+            print(f"[model-summary] parameters: total={total_params:,} trainable={trainable_params:,}")
+            print(self)
+
+    def _print_init_activation_stats(self, *, num_samples: int = 128) -> None:
+        device = next(self.backbone.parameters()).device
+
+        was_training_backbone = self.backbone.training
+        was_training_heads = self.heads.training
+        try:
+            self.backbone.eval()
+            self.heads.eval()
+
+            with torch.no_grad():
+                x = torch.randn(num_samples, 1, self.signal_window_size, 8, 8, device=device)
+                z = self.backbone(x)
+
+                z_mean = z.mean().item()
+                z_std = z.std(unbiased=False).item()
+                print(f"[init-stats] latent: shape={tuple(z.shape)} mean={z_mean:.6g} std={z_std:.6g}")
+
+                for name in self.task_names:
+                    y = self.heads[name](z)
+                    y_mean = y.mean().item()
+                    y_std = y.std(unbiased=False).item()
+                    print(f"[init-stats] head/{name}: shape={tuple(y.shape)} mean={y_mean:.6g} std={y_std:.6g}")
+        finally:
+            self.backbone.train(was_training_backbone)
+            self.heads.train(was_training_heads)
 
     @staticmethod
     def _build_backbone_encoder(
@@ -418,6 +458,51 @@ class Model(pl.LightningModule):
         latent_z = self.backbone(x)
         return {name: head(latent_z) for name, head in self.heads.items()}
 
+    def eval_step(self, substage: str, batch: Any, batch_idx: int) -> Tuple[torch.Tensor]:
+        x: torch.Tensor = batch[0]  # should be [B, 1, signal_window_size, 8, 8]
+        targets: torch.Tensor = batch[1]
+
+        outputs = self(x)
+        task_losses = self._compute_task_losses(outputs, targets)
+        total, weighted = self._uncertainty_weighted_losses(task_losses)
+
+        self.log(f"loss/{substage}", total.detach(), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
+        for name in self.task_names:
+            if name in task_losses:
+                self.log(f"loss_raw/{substage}/{name}", task_losses[name].detach(), on_step=False, on_epoch=True, sync_dist=True)
+            if name in weighted:
+                self.log(
+                    f"loss_weighted/{substage}/{name}",
+                    weighted[name].detach(),
+                    on_step=False,
+                    on_epoch=True,
+                    sync_dist=True,
+                )
+        self._log_task_logvars(prefix=f"{substage}/")
+
+        return total.detach(), weighted
+
+    def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
+        opt: torch.optim.Optimizer = self.optimizers()
+        opt.zero_grad(set_to_none=True)
+
+        total, weighted = self.eval_step("train", batch, batch_idx)
+
+        backbone_frozen = not any(p.requires_grad for p in self.backbone.parameters())
+        if backbone_frozen:
+            # When the backbone is frozen there are no shared parameters to resolve
+            # conflicts for, so do a standard single backward pass.
+            self.manual_backward(sum(weighted.values()))
+        else:
+            shared_params = self._get_shared_params()
+            self._pcgrad_step(task_objectives=weighted, shared_params=shared_params)
+        opt.step()
+
+        return total
+
+    def validation_step(self, batch: Any, batch_idx: int) -> None:
+        _ = self.eval_step("val", batch, batch_idx)
+
     def _compute_task_losses(
         self,
         outputs: Dict[str, torch.Tensor],
@@ -477,17 +562,20 @@ class Model(pl.LightningModule):
 
         task_objectives should be per-task scalar objectives (already uncertainty-weighted here).
         """
-        tasks = [t for t in self.task_names if t in task_objectives]
-        if len(tasks) <= 1 or not shared_params:
+        task_names = [t for t in self.task_names if t in task_objectives]
+
+        if len(task_names) <= 1 or not shared_params:
             self.manual_backward(sum(task_objectives.values()))
             return
+
+        perm = torch.randperm(len(task_names), device="cpu").tolist()
+        task_names = [task_names[i] for i in perm]
 
         sizes = [int(p.numel()) for p in shared_params]
         dtypes = [p.dtype for p in shared_params]
 
         grads_by_task_flat: Dict[str, torch.Tensor] = {}
-        for i, t in enumerate(tasks):
-            # retain = i != (len(tasks) - 1)
+        for t in task_names:
             grads = torch.autograd.grad(
                 task_objectives[t],
                 shared_params,
@@ -503,9 +591,9 @@ class Model(pl.LightningModule):
             grads_by_task_flat[t] = torch.cat(flat_parts, dim=0)
 
         eps = 1e-12
-        for ti in tasks:
+        for ti in task_names:
             gi = grads_by_task_flat[ti]
-            for tj in tasks:
+            for tj in task_names:
                 if ti == tj:
                     continue
                 gj = grads_by_task_flat[tj]
@@ -515,7 +603,7 @@ class Model(pl.LightningModule):
                     gi = gi - (dot / denom) * gj
             grads_by_task_flat[ti] = gi
 
-        merged_flat = sum((grads_by_task_flat[t] for t in tasks))
+        merged_flat = sum((grads_by_task_flat[t] for t in task_names))
 
         merged_grads: List[torch.Tensor] = []
         offset = 0
@@ -529,45 +617,6 @@ class Model(pl.LightningModule):
         self.manual_backward(total_obj)
         for p, g in zip(shared_params, merged_grads):
             p.grad = g.detach()
-
-    def eval_step(self, substage: str, batch: Any, batch_idx: int) -> Tuple[torch.Tensor]:
-        x: torch.Tensor = batch[0]  # should be [B, 1, signal_window_size, 8, 8]
-        targets: torch.Tensor = batch[1]
-
-        outputs = self(x)
-        task_losses = self._compute_task_losses(outputs, targets)
-        total, weighted = self._uncertainty_weighted_losses(task_losses)
-
-        self.log(f"loss/{substage}", total.detach(), on_step=False, on_epoch=True, prog_bar=True, sync_dist=True)
-        for name in self.task_names:
-            if name in task_losses:
-                self.log(f"loss_raw/{substage}/{name}", task_losses[name].detach(), on_step=False, on_epoch=True, sync_dist=True)
-            if name in weighted:
-                self.log(
-                    f"loss_weighted/{substage}/{name}",
-                    weighted[name].detach(),
-                    on_step=False,
-                    on_epoch=True,
-                    sync_dist=True,
-                )
-        self._log_task_logvars(prefix=f"{substage}/")
-
-        return total.detach(), weighted
-
-    def training_step(self, batch: Any, batch_idx: int) -> torch.Tensor:
-        opt: torch.optim.Optimizer = self.optimizers()
-        opt.zero_grad(set_to_none=True)
-
-        total, weighted = self.eval_step("train", batch, batch_idx)
-
-        shared_params = self._get_shared_params()
-        self._pcgrad_step(task_objectives=weighted, shared_params=shared_params)
-        opt.step()
-
-        return total
-
-    def validation_step(self, batch: Any, batch_idx: int) -> None:
-        _ = self.eval_step("val", batch, batch_idx)
 
     def configure_optimizers(self):
         return torch.optim.AdamW(self.parameters(), lr=self.lr, weight_decay=self.weight_decay)
