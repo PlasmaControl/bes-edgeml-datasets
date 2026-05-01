@@ -42,6 +42,11 @@ from torch.utils.data import DataLoader, Dataset, random_split
 import lightning.pytorch as pl
 from lightning.pytorch.callbacks import LearningRateMonitor, ModelCheckpoint
 from lightning.pytorch.loggers import TensorBoardLogger
+try:
+    from lightning.pytorch.utilities import ModelSummary  # type: ignore
+except ImportError:
+    from lightning.pytorch.utilities.model_summary import ModelSummary  # type: ignore
+
 
 
 TaskType = Literal["binary", "multiclass", "regression"]
@@ -138,8 +143,8 @@ class MultiTask3DDataset(Dataset):
 @dataclass(kw_only=True, eq=False)
 class Data(pl.LightningDataModule):
     task_specs: Sequence[TaskSpec]
-    data_path: Optional[str] = None
     signal_window_size: int = 256
+    data_path: Optional[str] = None
     batch_size: int = 32
     num_workers: int = 0
     seed: int = 123
@@ -330,19 +335,8 @@ class Model(pl.LightningModule):
         if self.freeze_backbone_epochs > 0:
             self._set_backbone_requires_grad(False)
 
-        self._print_model_summary(max_depth=4)
+        print(ModelSummary(self, max_depth=4))
         self._print_init_activation_stats(num_samples=512)
-
-    def _print_model_summary(self, *, max_depth: int = 4) -> None:
-        try:
-            from lightning.pytorch.utilities.model_summary import ModelSummary
-
-            print(ModelSummary(self, max_depth=max_depth))
-        except Exception:
-            total_params = sum(p.numel() for p in self.parameters())
-            trainable_params = sum(p.numel() for p in self.parameters() if p.requires_grad)
-            print(f"[model-summary] parameters: total={total_params:,} trainable={trainable_params:,}")
-            print(self)
 
     def _print_init_activation_stats(self, *, num_samples: int = 128) -> None:
         device = next(self.backbone.parameters()).device
@@ -371,6 +365,7 @@ class Model(pl.LightningModule):
                         for m,s in zip(y_mean,y_std):
                             if abs(m)/s > 0.5:
                                 do_break = False
+                    do_break = True
                     if do_break:
                         # TODO re-initialize model weights/biases
                         break
@@ -476,7 +471,7 @@ class Model(pl.LightningModule):
         latent_z = self.backbone(x)
         return {name: head(latent_z) for name, head in self.heads.items()}
 
-    def eval_step(self, substage: str, batch: Any, batch_idx: int) -> Tuple[torch.Tensor]:
+    def eval_step(self, substage: str, batch: Any, batch_idx: int) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
         x: torch.Tensor = batch[0]  # should be [B, 1, signal_window_size, 8, 8]
         targets: torch.Tensor = batch[1]
 

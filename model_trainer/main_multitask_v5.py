@@ -147,29 +147,27 @@ def _validate_task_specs(task_specs: Sequence[TaskSpec]) -> tuple[TaskSpec, ...]
 @dataclasses.dataclass(eq=False)
 class _Base_Class:
     signal_window_size: int = 256
+    world_size: int = dataclasses.field(init=False, default=None)
+    world_rank: int = dataclasses.field(init=False, default=None)
+    num_modes: int = dataclasses.field(init=False, default=None)
+    is_global_zero: bool = dataclasses.field(init=False, default=None)
 
     def __post_init__(self):
-        assert np.log2(self.signal_window_size).is_integer(), \
-            'Signal window must be power of 2'
+        if not np.log2(self.signal_window_size).is_integer():
+            raise ValueError(f"Signal window size must be a power of 2, got {self.signal_window_size}")
 
         self.world_size = int(os.getenv("SLURM_NTASKS", default=1))
         self.world_rank = int(os.getenv("SLURM_PROCID", default=0))
         self.num_nodes = int(os.getenv('SLURM_NNODES', default=1))
-        self.slurm_local_rank = int(os.getenv("SLURM_LOCALID", default=0))
-        self.is_global_zero = self.world_rank == 0
-
-        if self.world_rank > 0:
-            assert self.world_size > 1
+        self._local_rank_env = int(os.getenv("SLURM_LOCALID", default=0))
+        self.is_global_zero = (self.world_rank == 0)
 
     def zprint(self, text: str = ''):
         if self.is_global_zero:
             print(text)
 
     def rprint(self, text: str = ''):
-        # if self.world_size > 1:
         print(f"{text}  (Rank {self.world_rank})")
-        # else:
-        #     print(f"{text}")
 
 
 @dataclasses.dataclass(eq=False)
@@ -214,7 +212,7 @@ class Model(_Base_Class, LightningModule):
         self.run_dir: Path = None
         # Avoid assuming CUDA exists; Lightning will move modules/metrics to the correct device.
         self.local_device: str = (
-            f'cuda:{self.slurm_local_rank}' if torch.cuda.is_available() else 'cpu'
+            f'cuda:{self.local_rank}' if torch.cuda.is_available() else 'cpu'
         )
 
         if self.is_global_zero:
@@ -431,6 +429,7 @@ class Model(_Base_Class, LightningModule):
         data_shape = self.input_data_shape
         self.zprint(f"  Input data shape: {data_shape}  (size {np.prod(data_shape)})")
         previous_out_channels: int = None
+        data_size: int = 0
         for i_layer, layer in enumerate(self.feature_model_layers):
             in_channels: int = 1 if i_layer==0 else previous_out_channels
 
@@ -534,6 +533,7 @@ class Model(_Base_Class, LightningModule):
             if param_name.endswith("bias"):
                 param.data.fill_(0)
         good_init = False
+        example_batch_output: dict = {}
         while good_init == False:
             self.zprint("Initializing model to uniform random weights (biases=0)")
             good_init = True
